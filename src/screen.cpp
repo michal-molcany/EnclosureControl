@@ -42,29 +42,38 @@ void Screen::MainScreen()
 
     drawTemperaturePanel(5, 45, extruderTempIcon);
     drawTemperaturePanel(5, 87, bedTempIcon);
-    drawTemperaturePanel(5, 129, extruderTempIcon);
+    drawTemperaturePanel(5, 129, enclosureTempIcon);
 
     drawProgressPanel(SCREEN_WIDTH - 160, 50, printProggresIcon);
     drawFilamentPanel(SCREEN_WIDTH - 160, 115);
 }
 
-void Screen::updateTemperature(int x, int y, float actualValue, float prevActualValue, float targetValue, float prevTargerValue)
+void Screen::updateTemperature(int x, int y, float actualValue, float prevActualValue, float targetValue, float prevTargetValue)
 {
-    if (actualValue == prevActualValue && targetValue == prevTargerValue)
+    if (actualValue == prevActualValue && targetValue == prevTargetValue)
     {
         Serial.println("No change in temperature");
         return;
     }
 
-    if ((targetValue == 0 && prevTargerValue != 0) || (targetValue != 0 && prevTargerValue == 0))
+    bool targetValueChanged = (abs((int)targetValue) == 0) != (abs((int)prevTargetValue) == 0);
+    bool textGotNarrower = tft().textWidth(String(actualValue, 1)) < tft().textWidth(String(prevActualValue, 1));
+
+    if (targetValueChanged || textGotNarrower)
     {
-        tft().fillSmoothRoundRect(x + 40, y, 95, 32, 3, BACKGROUND_PANEL, BACKGROUND);
+        tft().fillSmoothRoundRect(x + 40, y - 2, 90, 36, 3, BACKGROUND_PANEL, BACKGROUND_PANEL);
+        Serial.println("Temperature panel refresh: " + String(targetValue) + "C, " + String(prevTargetValue) + "C " + String((abs((int)targetValue) == 0 && abs((int)prevTargetValue) != 0)));
+    }
+    else
+    {
+        tft().fillSmoothRoundRect(x + 40, y - 2, 90, 36, 3, BACKGROUND_PANEL, BACKGROUND_PANEL);
+        Serial.println("Only value refresh");
     }
 
     if (targetValue == 0)
     {
         tft().setTextDatum(MR_DATUM);
-        tft().fillSmoothRoundRect(x + 38, y, 15, 32, 3, BACKGROUND_PANEL, BACKGROUND_PANEL);
+        tft().fillSmoothRoundRect(x + 38, y - 2, 15, 36, 3, BACKGROUND_PANEL, BACKGROUND_PANEL);
         tft().drawString(String(actualValue, 1) + "°C", x + 130, y + 18, FONT_SIZE + 2);
     }
     else
@@ -77,7 +86,7 @@ void Screen::updateTemperature(int x, int y, float actualValue, float prevActual
     tft().setTextDatum(TL_DATUM);
 
     prevActualValue = actualValue;
-    prevTargerValue = targetValue;
+    prevTargetValue = targetValue;
 }
 
 void Screen::updateMainScreen(OctoPrinter printer)
@@ -97,10 +106,10 @@ void Screen::updateMainScreen(OctoPrinter printer)
     updateTemperature(5, 45, printer.toolActual(), _printerTool0TempActual, printer.toolTarget(), _printerTool0TempTarget);
     updateTemperature(5, 87, printer.bedActual(), _printerBedTempActual, printer.bedTarget(), _printerBedTempTarget);
     updateTemperature(5, 129, printer.chamberActual(), _printerChamberTempActual, printer.chamberTarget(), _printerChamberTempTarget);
-    updateProgress(SCREEN_WIDTH - 160, 50, printer.progress(), printer.remainingFormatted());
+    updateProgress(SCREEN_WIDTH - 160, 50, printer.progress(), printer.remainingFormatted(), printer.Status());
 }
 
-void Screen::updateProgress(int x, int y, float progress, String timePrintLeft)
+void Screen::updateProgress(int x, int y, float progress, String timePrintLeft, String printerState)
 {
     if (tft().textWidth(String(_prevProgress, 1) + "%") < tft().textWidth(String(progress, 1) + "%") ||
         tft().textWidth(_prevTimeLeft) < tft().textWidth(timePrintLeft))
@@ -111,6 +120,8 @@ void Screen::updateProgress(int x, int y, float progress, String timePrintLeft)
     tft().drawString(String(progress, 1) + "%", x + 140, y + 3, FONT_SIZE + 2);
     tft().drawString(timePrintLeft, x + 140, y + 30, FONT_SIZE + 2);
     tft().setTextDatum(TL_DATUM);
+
+    drawProgressBar(5, 180, SCREEN_WIDTH - 10, 12, progress, String(printerState) == "Ready" || String(printerState) == "Operational");
 
     _prevTimeLeft = timePrintLeft;
 }
@@ -155,4 +166,34 @@ void Screen::drawWiFiSignal(int32_t rssi)
 
 void Screen::drawProgressBar(int x, int y, int width, int height, float progress, bool hide)
 {
+    if (hide)
+    {
+        tft().fillRect(x, y, width, height, BACKGROUND);
+        return;
+    }
+
+    // Clamp progress between 0 and 100
+    progress = (progress < 0) ? 0 : (progress > 100) ? 100
+                                                     : progress;
+
+    // Draw background bar
+    tft().drawRect(x, y, width, height, BACKGROUND_PANEL);
+
+    // Calculate filled width
+    int filledWidth = (int)((width - 2) * progress / 100.0f);
+
+    // Draw filled portion (green gradient)
+    uint16_t barColor = TFT_GREEN;
+    if (progress < 75)
+        barColor = TFT_YELLOW; // Yellow for < 75%
+    if (progress < 50)
+        barColor = TFT_RED; // Red for < 50%
+
+    tft().fillRect(x + 1, y + 1, filledWidth, height - 2, barColor);
+
+    // Clear unfilled portion
+    if (filledWidth < width - 2)
+    {
+        tft().fillRect(x + 1 + filledWidth, y + 1, (width - 2) - filledWidth, height - 2, BACKGROUND_PANEL);
+    }
 }

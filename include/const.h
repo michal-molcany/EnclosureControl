@@ -1,7 +1,6 @@
 #ifndef const_h
 #define const_h
 
-#define OCTOTPRINT_PORT 80            // Port of the OctoPrint server
 
 /*Set to your screen resolution and rotation*/
 #define TFT_HOR_RES 240
