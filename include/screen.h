@@ -39,7 +39,7 @@ private:
     void drawFilamentPanel(int x, int y);
 
     void updateTemperature(int x, int y, float actualValue, float prevActualValue, float targetValue, float prevTargerValue);
-    void updateProgress(int x, int y, float progress, String timePrintLeft);
+    void updateProgress(int x, int y, float progress, String timePrintLeft, String printerState);
     void updateFilamentPanel(int x, int y, int filament, String filename);
 
     String _printerState;

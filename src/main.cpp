@@ -35,17 +35,26 @@ void setup()
   touchscreen.setRotation(1);
 
   screen = Screen();
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(sec.getWiFiSSID(), sec.getWiFiPassword());
-  while (WiFi.status() != WL_CONNECTED)
+
+  WiFiManager wm;
+  bool res;
+  res = wm.autoConnect("EnclosureDisplay"); // password protected ap
+  if (!res)
   {
-    delay(500);
-    Serial.print(".");
+    Serial.println("Failed to connect");
+    delay(3000);
+    ESP.restart();
   }
+  else
+  {
+    Serial.println("Connected to WiFi");
+    Serial.println(WiFi.localIP());
+  }
+  
   screen.ConnectedToWiFi(WiFi.SSID());
-  delay(1000);
   prusa.begin();
   screen.MainScreen();
+  screen.updateMainScreen(prusa);
 }
 
 void loop()

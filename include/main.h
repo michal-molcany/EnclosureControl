@@ -11,6 +11,7 @@
 #include "const.h"
 #include "screen.h"
 #include <OctoPrinter.h>
+#include <WiFiManager.h>
 
 // Function declarations
 void UpdateScreen();
