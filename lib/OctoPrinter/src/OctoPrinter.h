@@ -6,13 +6,17 @@
 #include "IPAddress.h"
 #include "ArduinoJson.h"
 
-struct temperatureTracker {
+#define SERIAL_DEBUG 1
+
+struct temperatureTracker
+{
   double actual;
   int target;
   int offset;
 };
 
-struct jobTimer {
+struct jobTimer
+{
   int raw;
   int days;
   int hours;
@@ -21,13 +25,14 @@ struct jobTimer {
   String formatted;
 };
 
-class OctoPrinter {
+class OctoPrinter
+{
 public:
   OctoPrinter(String key, String host, int port);
   void update();
   void begin();
 
-  /* 
+  /*
     These functions are used to check on the printer's status flags.
     All they do is return the state of the boolean flag.
   */
@@ -41,11 +46,13 @@ public:
   bool closed();
   bool closedOrError();
 
-  //give job related information
+  // give job related information
   String remainingFormatted();
   String fileName();
   String Status();
   double progress();
+  String filamentName();
+  String nozzleDiameter();
 
   /*
     Functions to control jobs.
@@ -60,11 +67,15 @@ public:
   int resumeJob();
   int toggleJobPauseState();
 
-  //give server related information
+  // temperature control functions
+  int preheat(int toolTemp);
+  int preheatOff();
+
+  // give server related information
   String serverVersion();
   String apiVersion();
 
-  //temperature related functions
+  // temperature related functions
   double toolActual();
   int toolTarget();
   int toolOffset();
@@ -85,6 +96,8 @@ private:
   void _parseJob(String);
   String _parseConnection(String);
   void _parseProfile(String);
+  String _parseNozzle(String json);
+  int _parseFilament(String json);
 
   String _apiKey;
   IPAddress _host;
@@ -92,18 +105,23 @@ private:
   int _port;
   bool _doOnce;
 
-  struct {
+  struct
+  {
     String _apiVersion;
     String _serverVersion;
   } _server;
-  struct {
+  struct
+  {
     jobTimer _elapsed;
     jobTimer _remaining;
-    const char* _fileName;
+    const char *_fileName;
     double _progress;
     double _rawProgress;
+    String _filament;
+    String _nozzle;
   } _job;
-  struct {
+  struct
+  {
     bool _operational;
     bool _paused;
     bool _printing;
@@ -114,7 +132,8 @@ private:
     bool _closed;
     bool _closedOrError;
   } _is;
-  struct {
+  struct
+  {
     bool _heatedBed;
     bool _heatedChamber;
     int _toolCout;
@@ -122,6 +141,34 @@ private:
   temperatureTracker _bed;
   temperatureTracker _chamber;
   temperatureTracker _tool;
+
+  enum Filament
+  {
+    PLA,
+    PETG,
+    ABS,
+    ASA,
+    TPU,
+    PC,
+    NYLON,
+    HIPS,
+    PVA,
+    WOOD,
+    FLEX,
+    UNKNOWN
+  };
+  String _filamentName[12] = {"PLA", "PETG", "ABS", "ASA", "TPU", "PC", "NYLON", "HIPS", "PVA", "WOOD", "FLEX", "UNKN"};
+
+  enum Nozzle
+  {
+    NOZZLE_0_25,
+    NOZZLE_0_4,
+    NOZZLE_0_6,
+    NOZZLE_0_8,
+    NOZZLE_1_0,
+    UNKNOWN_NOZZLE
+  };
+  String _nozzleName[6] = {"0.25n", "0.4n", "0.6n", "0.8n", "1.0n", "UNKN"};
 };
 
 #endif
