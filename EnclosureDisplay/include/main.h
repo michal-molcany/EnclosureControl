@@ -16,7 +16,9 @@
 // Function declarations
 void UpdateScreen();
 
-void btnPreheet230_pressAction(void);
+// void btnPreheat215_pressAction(void);
+// void btnPreheat230_pressAction(void);
+// void btnPreheatOff_pressAction(void);
 void setup();
 void loop();
 
@@ -27,9 +29,8 @@ extern long api_lasttime;
 extern bool pressed;
 extern bool released;
 extern XPT2046_Touchscreen touchscreen;
-extern ButtonWidget btnPreheet215;
-extern ButtonWidget btnPreheet230;
-extern ButtonWidget *btn[];
+// extern ButtonWidget btnPreheet215;
+
 extern uint8_t buttonCount;
 extern int x, y, z;
 extern OctoPrinter prusa;

@@ -6,12 +6,21 @@ TFT_eSPI &tft()
     return instance;
 }
 
+ButtonWidget btnPreheat215 = ButtonWidget(&tft());
+ButtonWidget btnPreheat230 = ButtonWidget(&tft());
+ButtonWidget btnPreheat250 = ButtonWidget(&tft());
+ButtonWidget btnPreheatOff = ButtonWidget(&tft());
+
+// Global Screen instance for button actions
+Screen *g_screen = nullptr;
+
 Screen::Screen()
 {
     tft().init();
-    tft().setRotation(1);
+    tft().setRotation(3);
     tft().invertDisplay(1);
     tft().setSwapBytes(true);
+    g_screen = this; // Set global instance
 }
 
 void Screen::ConnectingToWiFi()
@@ -30,6 +39,11 @@ void Screen::ConnectedToWiFi(String ssid)
     tft().drawString("SSID: " + ssid, 10, 60, FONT_SIZE);
 }
 
+TFT_eSPI Screen::getTFT()
+{
+    return tft();
+}
+
 void Screen::MainScreen()
 {
     currentScreen = MAIN_SCREEN;
@@ -46,6 +60,75 @@ void Screen::MainScreen()
 
     drawProgressPanel(SCREEN_WIDTH - 160, 50, printProggresIcon);
     drawFilamentPanel(SCREEN_WIDTH - 160, 115);
+
+    btnPreheat215.initButtonUL(BUTTON_SPACING, 190, BUTTON_W, BUTTON_H, TFT_BLACK, TFT_YELLOW, TFT_BLACK, "215", 2);
+    btnPreheat215.setPressAction(btnPreheat215_pressAction);
+    btnPreheat215.drawSmoothButton(false, 2, TFT_BLACK); // 2 is outline width, TFT_BLACK is the surrounding background colour for anti-aliasing
+
+    btnPreheat230.initButtonUL(BUTTON_SPACING + BUTTON_W + BUTTON_SPACING, 190, BUTTON_W, BUTTON_H, TFT_BLACK, TFT_ORANGE, TFT_BLACK, "230", 2);
+    btnPreheat230.setPressAction(btnPreheat230_pressAction);
+    btnPreheat230.drawSmoothButton(false, 2, TFT_BLACK);
+
+    btnPreheat250.initButtonUL(2 * (BUTTON_SPACING + BUTTON_W) + BUTTON_SPACING, 190, BUTTON_W, BUTTON_H, TFT_BLACK, TFT_RED, TFT_BLACK, "250", 2);
+    btnPreheat250.setPressAction(btnPreheat250_pressAction);
+    btnPreheat250.drawSmoothButton(false, 2, TFT_BLACK);
+
+    btnArray[0] = &btnPreheat215;
+    btnArray[1] = &btnPreheat230;
+    btnArray[2] = &btnPreheat250;
+
+    // Create preheat buttons
+    // btnArray[0] = ButtonWidget(tft());
+    // btnArray[1] = new ButtonWidget(tft(), 100, 200, BUTTON_W, BUTTON_H, BACKGROUND_PANEL, BACKGROUND, BACKGROUND_PANEL, "230°C", TFT_WHITE, LABEL1_FONT);
+    // btnArray[2] = new ButtonWidget(tft(), 190, 200, BUTTON_W, BUTTON_H, BACKGROUND_PANEL, BACKGROUND, BACKGROUND_PANEL, "OFF", TFT_WHITE, LABEL1_FONT);
+
+    // btnArray[0]->setPressAction(btnPreheat215_pressAction);
+    // btnArray[1]->setPressAction(btnPreheat230_pressAction);
+    // btnArray[2]->setPressAction(btnPreheatOff_pressAction);
+}
+
+void btnPreheat215_pressAction(void)
+{
+    Serial.println("Preheat 215°C pressed");
+    if (g_screen != nullptr)
+    {
+        g_screen->btnPreheat215Pressed();
+    }
+}
+void btnPreheat230_pressAction(void)
+{
+    Serial.println("Preheat 230°C pressed");
+    if (g_screen != nullptr)
+    {
+        g_screen->btnPreheat230Pressed();
+    }
+}
+void btnPreheat250_pressAction(void)
+{
+    Serial.println("Preheat 250°C pressed");
+    if (g_screen != nullptr)
+    {
+        g_screen->btnPreheat250Pressed();
+    }
+}
+void btnPreheatOff_pressAction(void)
+{
+    Serial.println("Preheat OFF pressed");
+}
+
+void Screen::btnPreheat215Pressed()
+{
+    invertButtonFeedback(BUTTON_SPACING, 190, BUTTON_W, BUTTON_H);
+}
+
+void Screen::btnPreheat230Pressed()
+{
+    invertButtonFeedback(BUTTON_SPACING + BUTTON_W + BUTTON_SPACING, 190, BUTTON_W, BUTTON_H);
+}
+
+void Screen::btnPreheat250Pressed()
+{
+    invertButtonFeedback(2 * (BUTTON_SPACING + BUTTON_W) + BUTTON_SPACING, 190, BUTTON_W, BUTTON_H);
 }
 
 void Screen::updateTemperature(int x, int y, float actualValue, float prevActualValue, float targetValue, float prevTargetValue)
@@ -62,7 +145,6 @@ void Screen::updateTemperature(int x, int y, float actualValue, float prevActual
     if (targetValueChanged || textGotNarrower)
     {
         tft().fillSmoothRoundRect(x + 40, y - 2, 90, 36, 3, BACKGROUND_PANEL, BACKGROUND_PANEL);
-        Serial.println("Temperature panel refresh: " + String(targetValue) + "C, " + String(prevTargetValue) + "C " + String((abs((int)targetValue) == 0 && abs((int)prevTargetValue) != 0)));
     }
     else
     {
@@ -107,6 +189,7 @@ void Screen::updateMainScreen(OctoPrinter printer)
     updateTemperature(5, 87, printer.bedActual(), _printerBedTempActual, printer.bedTarget(), _printerBedTempTarget);
     updateTemperature(5, 129, printer.chamberActual(), _printerChamberTempActual, printer.chamberTarget(), _printerChamberTempTarget);
     updateProgress(SCREEN_WIDTH - 160, 50, printer.progress(), printer.remainingFormatted(), printer.Status());
+    updateFilamentPanel(SCREEN_WIDTH - 160, 115, printer.filamentName(), printer.nozzleDiameter());
 }
 
 void Screen::updateProgress(int x, int y, float progress, String timePrintLeft, String printerState)
@@ -121,9 +204,27 @@ void Screen::updateProgress(int x, int y, float progress, String timePrintLeft, 
     tft().drawString(timePrintLeft, x + 140, y + 30, FONT_SIZE + 2);
     tft().setTextDatum(TL_DATUM);
 
-    drawProgressBar(5, 180, SCREEN_WIDTH - 10, 12, progress, String(printerState) == "Ready" || String(printerState) == "Operational");
+    Serial.print("Selected font: ");
+    Serial.println(tft().textfont);
+
+    drawProgressBar(2, 175, SCREEN_WIDTH - 10, 12, progress, String(printerState) == "Ready" || String(printerState) == "Operational");
 
     _prevTimeLeft = timePrintLeft;
+}
+
+void Screen::updateFilamentPanel(int x, int y, String filament, String nozzle)
+{
+    Serial.println("Parsed filament: " + filament);
+    Serial.println("Parsed nozzle: " + nozzle);
+    if (filament != _prevFilament || nozzle != _prevNozzle)
+    {
+        tft().fillSmoothRoundRect(x + 33, y, 115, 58, 3, BACKGROUND_PANEL, BACKGROUND);
+        tft().setTextDatum(TL_DATUM);
+        tft().drawString(nozzle, x + 40, y + 3, FONT_SIZE + 2);
+        tft().drawString(filament, x + 40, y + 30, FONT_SIZE + 2);
+        _prevFilament = filament;
+        _prevNozzle = nozzle;
+    }
 }
 
 void Screen::drawTemperaturePanel(int x, int y, const unsigned short *icon)
@@ -195,5 +296,30 @@ void Screen::drawProgressBar(int x, int y, int width, int height, float progress
     if (filledWidth < width - 2)
     {
         tft().fillRect(x + 1 + filledWidth, y + 1, (width - 2) - filledWidth, height - 2, BACKGROUND_PANEL);
+    }
+}
+
+void Screen::invertButtonFeedback(int x, int y, int w, int h)
+{
+    if (_invertedButton == nullptr)
+    {
+        _invertedButton = (ButtonWidget *)1; // Use as a flag (non-null pointer)
+        _invertedButtonTime = millis();
+        _invertedButtonX = x;
+        _invertedButtonY = y;
+        _invertedButtonW = w;
+        _invertedButtonH = h;
+        // Invert only the button rectangle
+        tft().invertRect(x, y, w, h);
+    }
+}
+
+void Screen::updateButtonStates()
+{
+    if (_invertedButton != nullptr && (millis() - _invertedButtonTime) >= INVERT_DURATION)
+    {
+        // Invert again to restore original colors
+        tft().invertRect(_invertedButtonX, _invertedButtonY, _invertedButtonW, _invertedButtonH);
+        _invertedButton = nullptr;
     }
 }

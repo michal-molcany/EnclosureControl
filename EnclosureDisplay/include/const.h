@@ -14,9 +14,9 @@
 #define XPT2046_CLK 25  // T_CLK
 #define XPT2046_CS 33   // T_CS
 
-#define API_REFRESH_TIME 1000 // 1 seconds
+#define API_REFRESH_TIME 10000 // 10 seconds
 
-#define LABEL1_FONT &FreeSerif8pt7b      // Key label font 1
+#define LABEL1_FONT &FreeSerif9pt7b      // Key label font 1
 #define LABEL2_FONT &FreeSerifBold12pt7b // Key label font 2
 
 #define SCREEN_WIDTH 320
@@ -26,8 +26,9 @@
 #define BACKGROUND 0x18E3
 #define FONT_COL TFT_WHITE
 
-#define BUTTON_W 80
+#define BUTTON_W 100
 #define BUTTON_H 40
+#define BUTTON_SPACING 5
 
 #define MAIN_SCREEN_BUTTONS 3
 

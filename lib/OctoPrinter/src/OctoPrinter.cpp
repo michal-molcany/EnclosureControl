@@ -87,6 +87,16 @@ String OctoPrinter::fileName()
   return _job._fileName;
 }
 
+String OctoPrinter::filamentName()
+{
+  return _job._filament;
+}
+
+String OctoPrinter::nozzleDiameter()
+{
+  return _job._nozzle;
+}
+
 // These functions are used to get the tool and bed temperature stats.
 
 double OctoPrinter::toolActual()
@@ -196,7 +206,12 @@ String OctoPrinter::_requester(String uri)
     while (_client.connected())
     {
       String line = _client.readStringUntil('\n');
-      // Serial.println(line);
+
+      // if (serialVerbose)
+      // {
+      //   Serial.println(line);
+      // }
+
       if (line == "\r")
       {
         break;
@@ -208,7 +223,11 @@ String OctoPrinter::_requester(String uri)
       response = _client.readString();
     }
     _client.stop();
-    Serial.println(response);
+
+    // if (serialVerbose)
+    // {
+    // Serial.println(response);
+    // }
     return response;
   }
 }
@@ -315,6 +334,8 @@ void OctoPrinter::_parseJob(String json)
 
   if (error)
   {
+    Serial.print(F("Failed to parse JSON: "));
+    Serial.println(error.c_str());
     return;
   }
 
@@ -323,6 +344,38 @@ void OctoPrinter::_parseJob(String json)
 
   JsonObject file = doc["file"];
   _job._fileName = file["name"];
+  _job._filament = _filamentName[_parseFilament(json)];
+  _job._nozzle = _parseNozzle(json);
+}
+
+int OctoPrinter::_parseFilament(String json)
+{
+  for (int i = 0; i < 11; i++)
+  {
+    if (json.indexOf(_filamentName[i]) != -1)
+    {
+#if (SERIAL_DEBUG)
+      Serial.println("Parsed filament: " + _filamentName[i]);
+#endif
+      return i;
+    }
+  }
+  return 11; // UNKNOWN
+}
+
+String OctoPrinter::_parseNozzle(String json)
+{
+  for (int i = 0; i < 5; i++)
+  {
+    if (json.indexOf(_nozzleName[i]) != -1)
+    {
+#if (SERIAL_DEBUG)
+      Serial.println("Parsed nozzle: " + _nozzleName[i]);
+#endif
+      return _nozzleName[i];
+    }
+  }
+  return "0.4"; // Default nozzle size
 }
 
 String OctoPrinter::_parseConnection(String json)
@@ -358,6 +411,20 @@ String OctoPrinter::serverVersion()
 String OctoPrinter::apiVersion()
 {
   return _server._apiVersion;
+}
+
+int OctoPrinter::preheat(int toolTemp)
+{
+  String command = "{\"command\": \"target\", \"targets\": {\"tool0\": " + String(toolTemp) + "}}";
+  String response = _poster("/api/printer/tool", command);
+  return response.toInt();
+}
+
+int OctoPrinter::preheatOff()
+{
+  String command = "{\"command\": \"target\", \"targets\": {\"tool0\": 0}}";
+  String response = _poster("/api/printer/tool", command);
+  return response.toInt();
 }
 
 String OctoPrinter::Status()
