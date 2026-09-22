@@ -6,7 +6,7 @@
 #include "IPAddress.h"
 #include "ArduinoJson.h"
 
-#define SERIAL_DEBUG 1
+#define SERIAL_DEBUG 0
 
 struct temperatureTracker
 {
@@ -54,6 +54,14 @@ public:
   String filamentName();
   String nozzleDiameter();
 
+  // give layer progress information
+  int currentLayer();
+  int totalLayers();
+  String averageLayerDuration();
+  String lastLayerDuration();
+  int averageLayerDurationSeconds();
+  int lastLayerDurationSeconds();
+
   /*
     Functions to control jobs.
     These each return the HTTP status code from the server. As OctoPrint's
@@ -94,6 +102,7 @@ private:
   void _parsePrinter(String);
   void _parseSystem(String);
   void _parseJob(String);
+  void _parseLayerProgress(String);
   String _parseConnection(String);
   void _parseProfile(String);
   String _parseNozzle(String json);
@@ -114,12 +123,35 @@ private:
   {
     jobTimer _elapsed;
     jobTimer _remaining;
-    const char *_fileName;
+    String _fileName;
     double _progress;
     double _rawProgress;
     String _filament;
     String _nozzle;
   } _job;
+
+  struct layerProgress
+  {
+    int current;
+    int total;
+    String averageLayerDuration;
+    int averageLayerDurationInSeconds;
+    String lastLayerDuration;
+    int lastLayerDurationInSeconds;
+  } _layerProgress;
+  struct print
+  {
+    int changeFilamentCount;
+    String changeFilamentTimeLeft;
+    int changeFilamentTimeLeftInSeconds;
+    String estimatedChangedFilamentTime;
+    String estimatedEndTime;
+    String m73progress;
+    String printerState;
+    String progress;
+    String timeLeft;
+    int timeLeftInSeconds;
+  } _print;
   struct
   {
     bool _operational;
