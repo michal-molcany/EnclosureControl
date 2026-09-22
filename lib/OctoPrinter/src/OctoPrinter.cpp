@@ -322,6 +322,12 @@ void OctoPrinter::_parseSystem(String json)
   const char *serverAPIVersion = doc["api"]; // "0.1"
   const char *serverVersion = doc["server"];
 
+  if (serverAPIVersion == nullptr || serverVersion == nullptr)
+  {
+    Serial.println(F("System response is missing api or server fields"));
+    return;
+  }
+
   _server._serverVersion = String(serverVersion);
   _server._apiVersion = String(serverAPIVersion);
 }
