@@ -1,0 +1,28 @@
+{
+	"folders": [
+		{
+			"path": "EnclosureFanControl",
+			"name": "EnclosureFanControl"
+		},
+		{
+			"path": "PrinterDisplay",
+			"name": "PrinterDisplay"
+		},
+		{
+			"path": "lib",
+			"name": "lib"
+		}
+	],
+	"settings": {
+		"platformio-ide.activateProjectOnTextEditorChange": true,
+		"files.exclude": {
+			"**/.pio": true
+		}
+	},
+	"extensions": {
+		"recommendations": [
+			"platformio.platformio-ide",
+			"Jason2866.esp-decoder"
+		]
+	}
+}

@@ -3,6 +3,67 @@
 #include "WiFi.h"
 #include "ArduinoJson.h"
 
+// NOTE: WiFiClient::setTimeout() takes SECONDS, not milliseconds. Passing a
+// millisecond-scale value there arms Stream::timedRead() - a tight loop that
+// never yields - for thousands of seconds and trips the task watchdog.
+// All waits below are available-driven with delay(1) plus an absolute
+// deadline, so the IDLE tasks always run no matter how silent the server is.
+#define OCTOPRINTER_CONNECT_TIMEOUT_MS 3000
+#define OCTOPRINTER_REQUEST_TIMEOUT_MS 8000
+#define OCTOPRINTER_READ_TIMEOUT_S 2
+
+// Reads one LF-terminated line (CR/LF stripped), yielding while waiting.
+// Returns true only for a complete line; false on disconnect or deadline.
+static bool readLineYielding(WiFiClient &client, uint32_t deadlineMs, String &out)
+{
+  out = "";
+  for (;;)
+  {
+    while (client.available() > 0)
+    {
+      const int c = client.read();
+      if (c < 0)
+        break;
+      if (c == '\n')
+        return true;
+      if (c != '\r' && out.length() < 512)
+        out += (char)c;
+    }
+    if (!client.connected() && client.available() == 0)
+      return false;
+    if ((int32_t)(millis() - deadlineMs) >= 0)
+      return false;
+    delay(1);
+  }
+}
+
+// Reads the response body the same yielding way: exactly contentLength bytes
+// when announced, otherwise until close or deadline.
+static void readBodyYielding(WiFiClient &client, uint32_t deadlineMs, int contentLength, String &out)
+{
+  out = "";
+  if (contentLength > 0 && contentLength < 32768)
+    out.reserve(contentLength);
+  for (;;)
+  {
+    while (client.available() > 0 &&
+           (contentLength < 0 || (int)out.length() < contentLength))
+    {
+      const int c = client.read();
+      if (c < 0)
+        break;
+      out += (char)c;
+    }
+    if (contentLength >= 0 && (int)out.length() >= contentLength)
+      return;
+    if (!client.connected() && client.available() == 0)
+      return;
+    if ((int32_t)(millis() - deadlineMs) >= 0)
+      return;
+    delay(1);
+  }
+}
+
 OctoPrinter::OctoPrinter(String apiKey, String hostAddress, int port)
 {
   _apiKey = apiKey;
@@ -27,9 +88,10 @@ void OctoPrinter::update()
   _parseConnection(_requester("/api/connection"));
   // if (!_is._closed) {
   _parsePrinter(_requester("/api/printer?exclude=sd"));
-  if (_is._printing)
+  if (_is._printing || _is._paused)
   {
     _parseJob(_requester("/api/job"));
+    _parseLayerProgress(_requester("/plugin/DisplayLayerProgress/values"));
   }
   // }
 }
@@ -59,7 +121,7 @@ bool OctoPrinter::cancelling()
 
 bool OctoPrinter::pausing()
 {
-  return _is._paused;
+  return _is._pausing;
 }
 
 bool OctoPrinter::error()
@@ -95,6 +157,36 @@ String OctoPrinter::filamentName()
 String OctoPrinter::nozzleDiameter()
 {
   return _job._nozzle;
+}
+
+int OctoPrinter::currentLayer()
+{
+  return _layerProgress.current;
+}
+
+int OctoPrinter::totalLayers()
+{
+  return _layerProgress.total;
+}
+
+String OctoPrinter::averageLayerDuration()
+{
+  return _layerProgress.averageLayerDuration;
+}
+
+String OctoPrinter::lastLayerDuration()
+{
+  return _layerProgress.lastLayerDuration;
+}
+
+int OctoPrinter::averageLayerDurationSeconds()
+{
+  return _layerProgress.averageLayerDurationInSeconds;
+}
+
+int OctoPrinter::lastLayerDurationSeconds()
+{
+  return _layerProgress.lastLayerDurationInSeconds;
 }
 
 // These functions are used to get the tool and bed temperature stats.
@@ -137,6 +229,10 @@ int OctoPrinter::chamberTarget()
 {
   return _chamber.target;
 }
+int OctoPrinter::chamberOffset()
+{
+  return _chamber.offset;
+}
 
 /*
   This handy dandy helper function takes the raw job times in seconds from OctoPrint
@@ -154,20 +250,38 @@ int OctoPrinter::chamberTarget()
 
 void OctoPrinter::_setTime(int elapsed, int remaining)
 {
-  _job._rawProgress = (double)elapsed / ((double)elapsed + (double)remaining);
-  _job._progress = _job._rawProgress * 100;
+  if (elapsed < 0)
+    elapsed = 0;
+  if (remaining < 0)
+    remaining = 0;
+  const int total = elapsed + remaining;
+  if (total <= 0)
+  {
+    _job._rawProgress = 0.0;
+    _job._progress = 0.0;
+  }
+  else
+  {
+    _job._rawProgress = (double)elapsed / (double)total;
+    _job._progress = _job._rawProgress * 100.0;
+    if (!isfinite(_job._progress))
+      _job._progress = 0.0;
+    _job._progress = constrain(_job._progress, 0.0, 100.0);
+    _job._rawProgress = _job._progress / 100.0;
+  }
 
   _job._elapsed.raw = elapsed;
   _job._elapsed.days = elapsed / (24 * 60 * 60);
   _job._elapsed.hours = (elapsed % (24 * 60 * 60)) / (60 * 60);
-  _job._elapsed.minutes = (elapsed % (60 * 60) / 60);
+  _job._elapsed.minutes = (elapsed % (60 * 60)) / 60;
   _job._elapsed.seconds = elapsed % 60;
   _job._elapsed.formatted = "";
   if (_job._elapsed.days > 0)
+  {
     _job._elapsed.formatted += String(_job._elapsed.days);
-  else
-    _job._elapsed.formatted += "";
-  _job._elapsed.formatted += (_job._elapsed.hours < 10) ? ":0" : ":";
+    _job._elapsed.formatted += ":";
+  }
+  _job._elapsed.formatted += (_job._elapsed.hours < 10) ? "0" : "";
   _job._elapsed.formatted += String(_job._elapsed.hours);
   _job._elapsed.formatted += (_job._elapsed.minutes < 10) ? ":0" : ":";
   _job._elapsed.formatted += String(_job._elapsed.minutes);
@@ -175,12 +289,17 @@ void OctoPrinter::_setTime(int elapsed, int remaining)
   _job._elapsed.formatted += String(_job._elapsed.seconds);
 
   _job._remaining.raw = remaining;
-  _job._remaining.hours = remaining / (60 * 60);
-  _job._remaining.minutes = (remaining % (60 * 60) / 60);
+  _job._remaining.days = remaining / (24 * 60 * 60);
+  _job._remaining.hours = (remaining % (24 * 60 * 60)) / (60 * 60);
+  _job._remaining.minutes = (remaining % (60 * 60)) / 60;
   _job._remaining.seconds = remaining % 60;
   _job._remaining.formatted = "";
-  _job._remaining.formatted += String(_job._remaining.days);
-  _job._remaining.formatted += (_job._remaining.hours < 10) ? ":0" : ":";
+  if (_job._remaining.days > 0)
+  {
+    _job._remaining.formatted += String(_job._remaining.days);
+    _job._remaining.formatted += ":";
+  }
+  _job._remaining.formatted += (_job._remaining.hours < 10) ? "0" : "";
   _job._remaining.formatted += String(_job._remaining.hours);
   _job._remaining.formatted += (_job._remaining.minutes < 10) ? ":0" : ":";
   _job._remaining.formatted += String(_job._remaining.minutes);
@@ -190,7 +309,9 @@ void OctoPrinter::_setTime(int elapsed, int remaining)
 
 String OctoPrinter::_requester(String uri)
 {
-  if (!_client.connect(_host, _port))
+  _client.setTimeout(OCTOPRINTER_READ_TIMEOUT_S);
+  const uint32_t deadlineMs = millis() + OCTOPRINTER_REQUEST_TIMEOUT_MS;
+  if (!_client.connect(_host, _port, OCTOPRINTER_CONNECT_TIMEOUT_MS))
   {
     Serial.println("Connection failed");
     return "";
@@ -200,27 +321,29 @@ String OctoPrinter::_requester(String uri)
     _client.println("GET " + uri + " HTTP/1.1");
     _client.println("Host: " + _hostAddress);
     _client.println("Cache-Control: no-cache");
+    _client.println("Connection: close");
     _client.println("X-Api-Key: " + _apiKey);
     _client.println("");
 
-    while (_client.connected())
+    int contentLength = -1;
+    bool headersComplete = false;
+    String line;
+    while (readLineYielding(_client, deadlineMs, line))
     {
-      String line = _client.readStringUntil('\n');
-
-      // if (serialVerbose)
-      // {
-      //   Serial.println(line);
-      // }
-
-      if (line == "\r")
+      if (line.length() == 0)
       {
+        headersComplete = true;
         break;
+      }
+      if (line.startsWith("Content-Length:"))
+      {
+        contentLength = line.substring(15).toInt();
       }
     }
     String response;
-    while (_client.available())
+    if (headersComplete)
     {
-      response = _client.readString();
+      readBodyYielding(_client, deadlineMs, contentLength, response);
     }
     _client.stop();
 
@@ -234,7 +357,9 @@ String OctoPrinter::_requester(String uri)
 
 String OctoPrinter::_poster(String uri, String body)
 {
-  if (!_client.connect(_host, _port))
+  _client.setTimeout(OCTOPRINTER_READ_TIMEOUT_S);
+  const uint32_t deadlineMs = millis() + OCTOPRINTER_REQUEST_TIMEOUT_MS;
+  if (!_client.connect(_host, _port, OCTOPRINTER_CONNECT_TIMEOUT_MS))
   {
     return "ERROR";
   }
@@ -243,6 +368,7 @@ String OctoPrinter::_poster(String uri, String body)
     _client.println("POST " + uri + " HTTP/1.1");
     _client.println("Host: " + _hostAddress);
     _client.println("Cache-Control: no-cache");
+    _client.println("Connection: close");
     _client.println("X-Api-Key: " + _apiKey);
     _client.println("Content-Type: application/json");
     _client.print("Content-Length: ");
@@ -252,16 +378,16 @@ String OctoPrinter::_poster(String uri, String body)
     _client.println("");
 
     String response;
-    while (_client.connected())
+    String line;
+    while (readLineYielding(_client, deadlineMs, line))
     {
-      String line = _client.readStringUntil('\n');
+      if (line.length() == 0)
+      {
+        break;
+      }
       if (line.startsWith("HTTP"))
       {
         response = line.substring(9, 12);
-      }
-      if (line == "\r")
-      {
-        break;
       }
     }
 
@@ -270,46 +396,95 @@ String OctoPrinter::_poster(String uri, String body)
   }
 }
 
+void OctoPrinter::_parseLayerProgress(String json)
+{
+  if (json.length() == 0)
+    return;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, json);
+
+  if (error)
+  {
+    Serial.print(F("Failed to parse JSON: "));
+    Serial.println(error.c_str());
+    return;
+  }
+  if (SERIAL_DEBUG)
+  {
+    Serial.println("Layer Progress JSON: " + json);
+  }
+  JsonObject layer = doc["layer"];
+  if (layer.isNull())
+    return;
+  // DisplayLayerProgress sends current/total as strings ("38") on some
+  // versions and numbers (38) on others - accept both.
+  _layerProgress.current = layer["current"].as<String>().toInt();
+  _layerProgress.total = layer["total"].as<String>().toInt();
+
+  const char *averageLayerDuration = layer["averageLayerDuration"] | "";
+  _layerProgress.averageLayerDuration = String(averageLayerDuration);
+  _layerProgress.averageLayerDurationInSeconds = layer["averageLayerDurationInSeconds"] | 0;
+
+  const char *lastLayerDuration = layer["lastLayerDuration"] | "";
+  _layerProgress.lastLayerDuration = String(lastLayerDuration);
+  _layerProgress.lastLayerDurationInSeconds = layer["lastLayerDurationInSeconds"] | 0;
+}
+
 void OctoPrinter::_parsePrinter(String json)
 {
-  StaticJsonDocument<512> doc;
-  char *json_c_str = &json[0u];
-  DeserializationError error = deserializeJson(doc, json_c_str, json.length());
+  if (json.length() == 0)
+    return;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, json);
 
   if (error)
   {
     return;
   }
+
+  if (SERIAL_DEBUG)
+  {
+    Serial.println("Printer JSON: " + json);
+  }
   JsonObject temperature = doc["temperature"];
+  if (temperature.isNull())
+    return;
 
   JsonObject temperature_tool0 = temperature["tool0"];
-  _tool.actual = temperature_tool0["actual"];
-  _tool.target = temperature_tool0["target"];
-
+  _tool.actual = temperature_tool0["actual"] | 0.0;
+  _tool.target = temperature_tool0["target"] | 0.0;
+  _tool.offset = temperature_tool0["offset"] | 0.0;
   JsonObject temperature_bed = temperature["bed"];
-  _bed.actual = temperature_bed["actual"];
-  _bed.target = temperature_bed["target"];
+  _bed.actual = temperature_bed["actual"] | 0.0;
+  _bed.target = temperature_bed["target"] | 0.0;
+  _bed.offset = temperature_bed["offset"] | 0.0;
 
-  JsonObject temperature_chamber = temperature["Enclosure temperature"];
-  _chamber.actual = temperature_chamber["actual"];
-  _chamber.target = temperature_chamber["target"];
+  JsonObject temperature_chamber = temperature["chamber"];
+  if (temperature_chamber.isNull())
+    temperature_chamber = temperature["enclosure"];
+  if (temperature_chamber.isNull())
+    temperature_chamber = temperature["Encosure temp"];
+  _chamber.actual = temperature_chamber["actual"] | 0.0;
+  _chamber.target = temperature_chamber["target"] | 0.0;
+  _chamber.offset = temperature_chamber["offset"] | 0.0;
 
   JsonObject state_flags = doc["state"]["flags"];
-  _is._operational = state_flags["operational"];
-  _is._paused = state_flags["paused"];
-  _is._printing = state_flags["printing"];
-  _is._cancelling = state_flags["cancelling"];
-  _is._pausing = state_flags["pausing"];
-  _is._error = state_flags["error"];
-  _is._ready = state_flags["ready"];
-  _is._closedOrError = state_flags["closedOrError"];
+  _is._operational = state_flags["operational"] | false;
+  _is._paused = state_flags["paused"] | false;
+  _is._printing = state_flags["printing"] | false;
+  _is._cancelling = state_flags["cancelling"] | false;
+  _is._pausing = state_flags["pausing"] | false;
+  _is._error = state_flags["error"] | false;
+  _is._ready = state_flags["ready"] | false;
+  _is._closedOrError = state_flags["closedOrError"] | false;
 }
 
 void OctoPrinter::_parseSystem(String json)
 {
-  char *input = &json[0u];
-  StaticJsonDocument<48> doc;
-  DeserializationError error = deserializeJson(doc, input, json.length());
+  if (json.length() == 0)
+    return;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, json);
 
   if (error)
   {
@@ -334,9 +509,10 @@ void OctoPrinter::_parseSystem(String json)
 
 void OctoPrinter::_parseJob(String json)
 {
-  StaticJsonDocument<384> doc;
-  char *input = &json[0u];
-  DeserializationError error = deserializeJson(doc, input, json.length());
+  if (json.length() == 0)
+    return;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, json);
 
   if (error)
   {
@@ -344,12 +520,24 @@ void OctoPrinter::_parseJob(String json)
     Serial.println(error.c_str());
     return;
   }
-
+  if (SERIAL_DEBUG)
+  {
+    Serial.println("Job JSON: " + json);
+  }
   JsonObject progress = doc["progress"];
-  _setTime(progress["printTime"], progress["printTimeLeft"]);
+  if (progress.isNull())
+  {
+    return;
+  }
+  _setTime(progress["printTime"] | 0, progress["printTimeLeft"] | 0);
 
-  JsonObject file = doc["file"];
-  _job._fileName = file["name"];
+  // OctoPrint nests the file under "job" ({"job": {"file": {"name": ...}}, ...});
+  // fall back to a top-level "file" object for tolerance.
+  JsonObject file = doc["job"]["file"];
+  if (file.isNull())
+    file = doc["file"];
+  const char *fileName = file["name"] | "";
+  _job._fileName = String(fileName);
   _job._filament = _filamentName[_parseFilament(json)];
   _job._nozzle = _parseNozzle(json);
 }
@@ -386,17 +574,24 @@ String OctoPrinter::_parseNozzle(String json)
 
 String OctoPrinter::_parseConnection(String json)
 {
-  char *input = &json[0u];
-  StaticJsonDocument<768> doc;
-  DeserializationError error = deserializeJson(doc, input, json.length());
+  if (json.length() == 0)
+    return "";
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, json);
 
   if (error)
   {
     return "";
   }
-  const char *currentPrinterProfile = doc["printerProfile"];
+  const char *currentPrinterProfile = doc["printerProfile"] | "";
   JsonObject current = doc["current"];
-  const char *currentState = current["state"];
+  if (current.isNull())
+    return "";
+  const char *currentState = current["state"] | "";
+  if (currentState == nullptr || currentState[0] == '\0')
+  {
+    return "";
+  }
   if (String(currentState) != "Closed")
   {
     _is._closed = false;
@@ -492,4 +687,19 @@ int OctoPrinter::restartJob()
 {
   String response = _poster("/api/job", "{\"command\": \"restart\"}");
   return response.toInt();
+}
+
+int OctoPrinter::pauseJob()
+{
+  return _poster("/api/job", "{\"command\": \"pause\", \"action\": \"pause\"}").toInt();
+}
+
+int OctoPrinter::resumeJob()
+{
+  return _poster("/api/job", "{\"command\": \"pause\", \"action\": \"resume\"}").toInt();
+}
+
+int OctoPrinter::toggleJobPauseState()
+{
+  return _poster("/api/job", "{\"command\": \"pause\", \"action\": \"toggle\"}").toInt();
 }
