@@ -56,7 +56,8 @@ TemperatureRegulation::TemperatureRegulation(OctoPrinter *octoPrinter, ServoLouv
 void TemperatureRegulation::begin()
 {
     pinMode(FAN_PIN, OUTPUT);
-    ledcAttach(FAN_PIN, FAN_PWM_FREQ, 8); // 8-bit resolution (0-255)
+    ledcSetup(0, FAN_PWM_FREQ, 8); // 8-bit resolution (0-255)
+    ledcAttachPin(FAN_PIN, 0);
     stopFan();
 
     Serial.println("TemperatureRegulation initialized");
@@ -309,7 +310,7 @@ void TemperatureRegulation::setFanSpeed(uint8_t speed)
 {
     if (!fanActive || speed > 0)
     {
-        ledcWrite(FAN_PIN, speed);
+        ledcWrite(0, speed);
         fanActive = (speed > 0);
     }
 }
