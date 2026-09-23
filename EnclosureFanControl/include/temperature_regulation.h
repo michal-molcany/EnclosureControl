@@ -18,6 +18,7 @@ private:
 
 public:
     PIDController(float _kp, float _ki, float _kd, float _setpoint);
+    // Cooling PID: output grows when currentValue rises above setpoint.
     float calculate(float currentValue);
     void setSetpoint(float newSetpoint);
     void reset();
@@ -30,10 +31,14 @@ private:
     ServoLouver *louver;
     PIDController pidController;
     bool fanActive;
+    uint8_t lastFanSpeed;
     bool louvreOpen;
     unsigned long lastUpdate;
     unsigned long printEndTime;
+    bool printEndValid;
     bool printWasActive;
+    String lastMaterial; // upper-cased, latched while printing (for post-print windows)
+    unsigned long invalidSince; // millis when data first went invalid (0 = valid)
 
     // Material states
     enum MaterialState
@@ -43,12 +48,15 @@ private:
         PETG_COOLING,
         ASA_ABS_COOLING
     } currentState;
+    unsigned long stateEnteredAt;
 
     // PID fan control
     uint8_t getCurrentFanSpeed(float chamberTemp);
 
-    // Material type detection
-    String getMaterialType();
+    // Material type detection (normalized: trimmed + upper-cased)
+    String getMaterialType(); // raw from OctoPrinter
+    static String normalizeMaterial(const String &raw);
+    bool materialContains(const String &norm, const char *token);
 
     // State management
     void updatePLALogic();
@@ -57,9 +65,10 @@ private:
     void transitionToState(MaterialState newState);
 
     // Helper functions
-    bool isPLATrigger();
-    bool isPETGTrigger();
-    bool isASATrigger();
+    bool isDataValid();
+    bool isPLATrigger(const String &normMaterial);
+    bool isPETGTrigger(const String &normMaterial);
+    bool isASATrigger(const String &normMaterial);
     void openLouvre();
     void closeLouvre();
 
