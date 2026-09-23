@@ -7,6 +7,7 @@
 
 #include "const.h"
 #include "poller.h"
+#include "enclosure_link.h"
 
 class Display
 {
@@ -36,6 +37,13 @@ public:
     void fanDelta(int delta);
     void setChamberControl(ChamberControl mode);
     ChamberControl chamberControl() const { return _chamberControl; }
+    int chamberSetpoint() const { return _chamberSetpoint; }
+    int louvrePercent() const { return _louvreOpen; }
+    int fanPercent() const { return _fanSpeed; }
+    // Fill an outbound command from current UI state (magic+seq stamped by link).
+    void fillEnclosureCommand(EnclosureCommand &cmd) const;
+    // Feed live telemetry from EnclosureFanControl into the chamber view.
+    void enclosureUpdate(const EnclosureSnapshot &snap);
     View currentView() const { return _view; }
     void printerStatisticUpdate(const PrinterSnapshot &snap);
     void jobUpdate(const PrinterSnapshot &snap);
@@ -50,6 +58,8 @@ private:
     void setButtonVisibility(lv_obj_t **buttons, size_t count, bool visible);
     void createChamberView();
     void refreshChamberDetail();
+    void refreshEnclosureLinkHeader();
+    void pushEnclosureCommand();
 
     lv_display_t *_display = nullptr;
     lv_obj_t *_stateLabel = nullptr;
@@ -64,6 +74,8 @@ private:
     lv_obj_t *_lastLayerLabel = nullptr;
     lv_obj_t *_fileNameLabel = nullptr;
     lv_obj_t *_wifiBars[4] = {};
+    lv_obj_t *_encLinkLabel = nullptr; // header C3 indicator, green = link up
+    bool _encLinkUp = false;
     lv_obj_t *_splashLabel = nullptr;
     lv_obj_t *_splashSpinner = nullptr;
     uint8_t _splashFrame = 0;
@@ -90,6 +102,7 @@ private:
     bool _chamberSetpointSeeded = false;
     int _louvreOpen = LOUVRE_DEFAULT;
     int _fanSpeed = FAN_DEFAULT;
+    EnclosureSnapshot _enclosure; // last telemetry from EnclosureFanControl
     bool _isDrawn = false;
     String _jobFileName;
     String _displayedFileName;

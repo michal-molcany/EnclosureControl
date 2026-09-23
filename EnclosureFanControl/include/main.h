@@ -11,6 +11,7 @@
 #include "servo_louver.h"
 #include "temperature_regulation.h"
 #include "chamber_display.h"
+#include "espnow_link.h"
 
 extern OctoPrinter prusa;
 extern ServoLouver louver;

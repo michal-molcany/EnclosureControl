@@ -9,8 +9,9 @@ static void fanPwmInit()
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
     ledcAttach(FAN_PIN, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
 #else
-    ledcSetup(0, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
-    ledcAttachPin(FAN_PIN, 0);
+    // Channel 4 (timer 2): channel 0 / timer 0 belongs to the servo (50 Hz).
+    ledcSetup(FAN_PWM_CHANNEL, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
+    ledcAttachPin(FAN_PIN, FAN_PWM_CHANNEL);
 #endif
 }
 
@@ -19,7 +20,7 @@ static void fanPwmWrite(uint8_t value)
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
     ledcWrite(FAN_PIN, value);
 #else
-    ledcWrite(0, value);
+    ledcWrite(FAN_PWM_CHANNEL, value);
 #endif
 }
 
@@ -121,6 +122,24 @@ void TemperatureRegulation::update()
         Serial.println("Print ended - starting cooldown sequence");
     }
 
+    // Remote manual control bypasses the material state machine entirely
+    // and does not depend on OctoPrint data.
+    if (controlMode == ENC_MODE_MANUAL)
+    {
+        if (hasRemoteRx && (millis() - lastRemoteRxMs > ENC_LINK_LOSS_TIMEOUT_MS))
+        {
+            controlMode = ENC_MODE_AUTO;
+            pidController.reset();
+            Serial.println("[LINK] Manual link lost - falling back to AUTO");
+            // fall through to automatic logic below
+        }
+        else
+        {
+            updateManualLogic();
+            return;
+        }
+    }
+
     if (!isDataValid())
     {
         if (invalidSince == 0)
@@ -132,6 +151,10 @@ void TemperatureRegulation::update()
         return;
     }
     invalidSince = 0;
+
+    // Automatic mode: a remote setpoint from the display overrides material targets.
+    if (hasRemoteSetpoint)
+        pidController.setSetpoint(remoteSetpoint);
 
     String normMaterial = normalizeMaterial(isPrinting ? printer->filamentName() : lastMaterial);
     // Fall back to live name if latched copy is empty (e.g. boot mid-print).
@@ -363,6 +386,66 @@ void TemperatureRegulation::updateASALogic()
     }
 }
 
+// ==================== Remote Manual Logic ====================
+
+void TemperatureRegulation::updateManualLogic()
+{
+    if (louver)
+    {
+        louver->setPercent(manualLouvrePct);
+        lastLouvrePct = manualLouvrePct;
+        louvreOpen = (manualLouvrePct > 0);
+    }
+    uint8_t pwm = (uint8_t)(((uint16_t)manualFanPct * 255U) / 100U);
+    setFanSpeed(pwm);
+
+    Serial.print("[MAN] Louvre: ");
+    Serial.print(manualLouvrePct);
+    Serial.print("%, Fan: ");
+    Serial.print(manualFanPct);
+    Serial.println("%");
+}
+
+void TemperatureRegulation::applyRemoteCommand(const EnclosureCommand &cmd)
+{
+    if (cmd.magic != ENC_PROTO_MAGIC)
+        return;
+    lastRemoteRxMs = millis();
+    hasRemoteRx = true;
+
+    if (cmd.mode == ENC_MODE_MANUAL)
+    {
+        controlMode = ENC_MODE_MANUAL;
+        manualLouvrePct = cmd.louvrePct > 100 ? 100 : cmd.louvrePct;
+        manualFanPct = cmd.fanPct > 100 ? 100 : cmd.fanPct;
+        Serial.print("[LINK] MANUAL louvre=");
+        Serial.print(manualLouvrePct);
+        Serial.print("% fan=");
+        Serial.print(manualFanPct);
+        Serial.println("%");
+    }
+    else
+    {
+        if (controlMode != ENC_MODE_AUTO)
+        {
+            controlMode = ENC_MODE_AUTO;
+            pidController.reset();
+            Serial.println("[LINK] AUTO mode");
+        }
+        if (cmd.setpoint >= 10 && cmd.setpoint <= 80)
+        {
+            if (!hasRemoteSetpoint || remoteSetpoint != cmd.setpoint)
+            {
+                Serial.print("[LINK] AUTO setpoint=");
+                Serial.print(cmd.setpoint);
+                Serial.println("C");
+            }
+            remoteSetpoint = cmd.setpoint;
+            hasRemoteSetpoint = true;
+        }
+    }
+}
+
 // ==================== Trigger Detection ====================
 
 bool TemperatureRegulation::isPLATrigger(const String &normMaterial)
@@ -497,6 +580,7 @@ void TemperatureRegulation::openLouvre()
     {
         louver->setAngle(SERVO_ON_ANGLE);
         louvreOpen = true;
+        lastLouvrePct = 100;
         Serial.println("Louvre opened");
     }
 }
@@ -507,6 +591,7 @@ void TemperatureRegulation::closeLouvre()
     {
         louver->setAngle(SERVO_OFF_ANGLE);
         louvreOpen = false;
+        lastLouvrePct = 0;
         Serial.println("Louvre closed");
     }
 }
@@ -568,4 +653,40 @@ String TemperatureRegulation::getCurrentState() const
     default:
         return "UNKNOWN";
     }
+}
+
+uint8_t TemperatureRegulation::stateCode() const
+{
+    switch (currentState)
+    {
+    case PLA_COOLING:
+        return ENC_STATE_PLA;
+    case PETG_COOLING:
+        return ENC_STATE_PETG;
+    case ASA_ABS_COOLING:
+        return ENC_STATE_ASA;
+    case IDLE:
+    default:
+        return ENC_STATE_IDLE;
+    }
+}
+
+uint8_t TemperatureRegulation::controlModeCode() const
+{
+    return controlMode;
+}
+
+uint8_t TemperatureRegulation::fanPercent() const
+{
+    return (uint8_t)(((uint16_t)lastFanSpeed * 100U) / 255U);
+}
+
+uint8_t TemperatureRegulation::louvrePercent() const
+{
+    return lastLouvrePct;
+}
+
+bool TemperatureRegulation::remoteLinkAlive() const
+{
+    return hasRemoteRx && (millis() - lastRemoteRxMs <= ENC_LINK_LOSS_TIMEOUT_MS);
 }

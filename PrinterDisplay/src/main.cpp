@@ -5,10 +5,13 @@
 #include "const.h"
 #include "display.h"
 #include "poller.h"
+#include "enclosure_link.h"
 #include "secrets.h"
 
 unsigned long display_lasttime = 0;
 unsigned long wifi_lasttime = 0;
+unsigned long enclosure_lasttime = 0;
+bool enclosure_seeded = false;
 Display disp;
 secrets sec;
 PrinterSnapshot snapshot;
@@ -57,6 +60,25 @@ void octoPrintUpdate()
     const bool activeJob = snapshot.printing || snapshot.paused;
     disp.setPreheatButtonsVisibility(!activeJob);
     disp.setPrintButtonsVisibility(activeJob);
+
+    // Enclosure link: feed live louvre/fan telemetry into the chamber view
+    // (throttled to 1 Hz; stale data is greyed out by the view itself).
+    if (millis() - enclosure_lasttime >= 1000)
+    {
+        enclosure_lasttime = millis();
+        EnclosureSnapshot enc;
+        if (enclosureLinkCopy(enc))
+            disp.enclosureUpdate(enc);
+    }
+    // Seed the C3 with current UI state once, so it learns mode + setpoint
+    // even if the user never touches the chamber view. Heartbeat repeats it.
+    if (!enclosure_seeded)
+    {
+        enclosure_seeded = true;
+        EnclosureCommand cmd = {};
+        disp.fillEnclosureCommand(cmd);
+        enclosureLinkSend(cmd);
+    }
 }
 
 void setup()
@@ -75,6 +97,8 @@ void setup()
     }
 
     pollerStart();
+    enclosureLinkStart(ENC_PEER_MAC);
+    WiFi.setSleep(false); // mains-powered: minimize ESP-NOW latency
     const uint32_t bootStart = millis();
     while (!pollerHasData() && (millis() - bootStart < 20000))
     {

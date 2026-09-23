@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <OctoPrinter.h>
+#include <enclosure_proto.h>
 
 // Forward declaration
 class ServoLouver;
@@ -40,6 +41,16 @@ private:
     String lastMaterial; // upper-cased, latched while printing (for post-print windows)
     unsigned long invalidSince; // millis when data first went invalid (0 = valid)
 
+    // Remote control (PrinterDisplay via ESP-NOW)
+    uint8_t controlMode = ENC_MODE_AUTO; // EnclosureMode
+    uint8_t remoteSetpoint = 0;          // desired chamber C, AUTO only
+    bool hasRemoteSetpoint = false;
+    uint8_t manualLouvrePct = 0; // 0-100, MANUAL only
+    uint8_t manualFanPct = 0;    // 0-100, MANUAL only
+    unsigned long lastRemoteRxMs = 0;
+    bool hasRemoteRx = false;
+    uint8_t lastLouvrePct = 0; // 0-100, tracked for telemetry
+
     // Material states
     enum MaterialState
     {
@@ -62,6 +73,7 @@ private:
     void updatePLALogic();
     void updatePETGLogic();
     void updateASALogic();
+    void updateManualLogic();
     void transitionToState(MaterialState newState);
 
     // Helper functions
@@ -85,10 +97,18 @@ public:
     void setFanSpeed(uint8_t speed); // 0-255
     void stopFan();
 
+    // Remote control (ESP-NOW commands from PrinterDisplay)
+    void applyRemoteCommand(const EnclosureCommand &cmd);
+
     // Status functions
     bool isFanActive() const;
     bool isLouvreOpen() const;
     String getCurrentState() const;
+    uint8_t stateCode() const;   // EnclosureState for telemetry
+    uint8_t controlModeCode() const; // EnclosureMode for telemetry
+    uint8_t fanPercent() const;  // 0-100
+    uint8_t louvrePercent() const; // 0-100
+    bool remoteLinkAlive() const;
 };
 
 #endif

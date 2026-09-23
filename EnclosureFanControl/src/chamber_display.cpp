@@ -31,7 +31,8 @@ String ChamberDisplay::shortState(const String &state)
     return "IDLE";
 }
 
-void ChamberDisplay::update(double chamberTemp, bool valid, const String &state, bool fanActive)
+void ChamberDisplay::update(double chamberTemp, bool valid, const String &state, bool fanActive, bool manual, bool linked,
+                            uint8_t louvrePct, uint8_t fanPct)
 {
     unsigned long now = millis();
     if (splashShown && (now - lastDrawMs) < DISPLAY_UPDATE_MIN_MS)
@@ -45,17 +46,28 @@ void ChamberDisplay::update(double chamberTemp, bool valid, const String &state,
     else
         snprintf(tempBuf, sizeof(tempBuf), "---");
 
-    String status = shortState(state);
-    if (fanActive)
-        status += " FAN";
+    String status;
+    if (manual)
+        status = "ML" + String(louvrePct) + " F" + String(fanPct);
+    else
+    {
+        status = shortState(state);
+        if (fanActive)
+            status += " FAN";
+    }
 
+    // Layout (72x40): small temp on top, big louvre/fan in the middle,
+    // small link state at the bottom.
     u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_logisoso16_tr);
-    u8g2.setCursor(2, 20);
+    u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.setCursor(2, 10);
     u8g2.print(tempBuf);
-    u8g2.setFont(u8g2_font_5x7_tr);
-    u8g2.setCursor(2, 36);
+    u8g2.setFont(u8g2_font_logisoso16_tr);
+    u8g2.setCursor(2, 30);
     u8g2.print(status);
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.setCursor(2, 38);
+    u8g2.print(linked ? "+CYD LINK OK" : "-CYD NO LINK");
     u8g2.sendBuffer();
 }
 
@@ -67,5 +79,25 @@ void ChamberDisplay::showMessage(const String &line1, const String &line2)
     u8g2.print(line1);
     u8g2.setCursor(2, 30);
     u8g2.print(line2);
+    u8g2.sendBuffer();
+}
+
+void ChamberDisplay::showPairing(const String &mac)
+{
+    String hex;
+    hex.reserve(12);
+    for (unsigned i = 0; i < mac.length(); ++i)
+    {
+        if (mac[i] != ':')
+            hex += mac[i];
+    }
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.setCursor(2, 12);
+    u8g2.print("PAIR ME");
+    u8g2.setCursor(2, 24);
+    u8g2.print(hex.substring(0, 6));
+    u8g2.setCursor(2, 36);
+    u8g2.print(hex.substring(6, 12));
     u8g2.sendBuffer();
 }
