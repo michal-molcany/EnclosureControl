@@ -8,6 +8,7 @@
 #include "secrets.h"
 
 unsigned long display_lasttime = 0;
+unsigned long wifi_lasttime = 0;
 Display disp;
 secrets sec;
 PrinterSnapshot snapshot;
@@ -47,7 +48,11 @@ void octoPrintUpdate()
     if (!pollerCopySnapshot(snapshot))
         return;
     disp.printerStatisticUpdate(snapshot);
-    disp.drawWiFiSignal(WiFi.RSSI());
+    if (wifi_lasttime == 0 || millis() - wifi_lasttime >= WIFI_SIGNAL_REFRESH_TIME)
+    {
+        wifi_lasttime = millis();
+        disp.drawWiFiSignal(WiFi.RSSI());
+    }
     disp.jobUpdate(snapshot);
     const bool activeJob = snapshot.printing || snapshot.paused;
     disp.setPreheatButtonsVisibility(!activeJob);
