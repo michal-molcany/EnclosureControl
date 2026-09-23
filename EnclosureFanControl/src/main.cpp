@@ -54,12 +54,19 @@ void setup()
     Serial.println("Connected to WiFi");
     Serial.println(WiFi.localIP());
   }
+  WiFi.setSleep(false); // mains-powered: minimize ESP-NOW latency
 
   prusa.begin();
 
   louver.begin();
 
+  // Power-on self-test: open 25% and close again to verify the servo.
+  display.showMessage("Louvre", "test 25%");
+  louver.selfTest();
+
   tempRegulation.begin();
+
+  espnowLinkBegin(ENC_PEER_MAC);
 }
 
 void loop()
@@ -73,8 +80,19 @@ void loop()
   tempRegulation.update();
 
   // Show chamber temperature + state on the onboard OLED.
-  display.update(prusa.chamberActual(), octoDataValid(),
-                 tempRegulation.getCurrentState(), tempRegulation.isFanActive());
+  // While unpaired, show the MAC pairing screen instead (no serial needed).
+  // Linked = peer configured AND commands recently received from the CYD.
+  const bool linked = espnowLinkHasPeer() && tempRegulation.remoteLinkAlive();
+  if (!espnowLinkHasPeer())
+    display.showPairing(WiFi.macAddress());
+  else
+    display.update(prusa.chamberActual(), octoDataValid(),
+                   tempRegulation.getCurrentState(), tempRegulation.isFanActive(),
+                   tempRegulation.controlModeCode() == ENC_MODE_MANUAL, linked,
+                   tempRegulation.louvrePercent(), tempRegulation.fanPercent());
 
-  delay(2000);
+  // ESP-NOW telemetry to PrinterDisplay + inbound remote commands.
+  espnowLinkPoll(tempRegulation, prusa.chamberActual(), octoDataValid());
+
+  delay(3000);
 }
