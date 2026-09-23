@@ -8,6 +8,7 @@ class ServoLouver
 private:
     Servo servo;
     int currentAngle;
+    unsigned long lastMoveMs;
 
 public:
     ServoLouver();
@@ -15,13 +16,17 @@ public:
     // Initialize the servo
     void begin();
 
-    // Move servo to target angle if it differs from current
+    // Move servo to target angle if it differs from current.
+    // Non-blocking: rate-limited, no delay().
     void setAngle(int targetAngle);
 
     // Get current angle
     int getAngle() const;
 
-    // Update servo angle based on printer printing state
+    // Legacy helper kept for compatibility. TemperatureRegulation now owns
+    // the louvre - do NOT call this alongside TemperatureRegulation::update()
+    // or the two controllers will fight over the servo.
+    // Now case-insensitive and non-blocking.
     void updateForPrinter(bool isPrinting, String filamentName);
 };
 
