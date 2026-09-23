@@ -16,8 +16,9 @@
 #define XPT2046_CLK 25  // T_CLK
 #define XPT2046_CS 33   // T_CS
 
-#define API_REFRESH_TIME 3000 // 3 seconds (background poll cycle)
-#define DISPLAY_REFRESH_TIME 250 // 0.25 seconds (UI redraw from snapshot)
+#define API_REFRESH_TIME 3000       // 3 seconds (background poll cycle)
+#define DISPLAY_REFRESH_TIME 250    // 0.25 seconds (UI redraw from snapshot)
+#define WIFI_SIGNAL_REFRESH_TIME 30000 // 30 seconds (WiFi signal redraw)
 
 #define LABEL1_FONT &FreeSerif8pt7b      // Key label font 1
 #define LABEL2_FONT &FreeSerifBold12pt7b // Key label font 2
@@ -30,6 +31,21 @@
 #define FONT_COL TFT_WHITE
 
 #define SERIAL_DEBUG 0
+
+#define CHAMBER_SETPOINT_MIN 20
+#define CHAMBER_SETPOINT_MAX 60
+#define CHAMBER_SETPOINT_STEP 1
+#define CHAMBER_SETPOINT_DEFAULT 30
+
+#define LOUVRE_MIN 0
+#define LOUVRE_MAX 100
+#define LOUVRE_STEP 5
+#define LOUVRE_DEFAULT 0
+#define FAN_MIN 0
+#define FAN_MAX 100
+#define FAN_STEP 5
+#define FAN_DEFAULT 0
+#define FAN_LOUVRE_MIN_OPEN 10
 
 enum ButtonFunction
 {
