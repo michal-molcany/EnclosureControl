@@ -2,6 +2,8 @@
 
 #include <XPT2046_Touchscreen.h>
 
+#include "enclosure_link.h"
+
 #include "icons/icon_bed.h"
 #include "icons/icon_chamber.h"
 #include "icons/icon_fan.h"
@@ -367,6 +369,15 @@ void Display::createLabes()
         lv_obj_add_flag(_wifiBars[index], LV_OBJ_FLAG_HIDDEN);
     }
 
+    // Enclosure-link indicator in the header, left of the WiFi bars.
+    // Green "C3" = fresh telemetry, grey = stale / never received.
+    _encLinkLabel = lv_label_create(_mainContainer);
+    lv_label_set_text(_encLinkLabel, "C3");
+    lv_obj_set_pos(_encLinkLabel, 250, 5);
+    styleLabel(_encLinkLabel);
+    lv_obj_set_style_text_color(_encLinkLabel, lv_color_hex(0x808080), 0);
+    _encLinkUp = false;
+
     lv_obj_t *separator = lv_obj_create(_mainContainer);
     lv_obj_set_pos(separator, 0, 28);
     lv_obj_set_size(separator, SCREEN_WIDTH, 1);
@@ -572,6 +583,41 @@ void Display::setChamberControl(ChamberControl mode)
 {
     _chamberControl = mode;
     refreshChamberDetail();
+    pushEnclosureCommand();
+}
+
+void Display::fillEnclosureCommand(EnclosureCommand &cmd) const
+{
+    cmd.mode = (_chamberControl == ChamberControl::Auto) ? ENC_MODE_AUTO : ENC_MODE_MANUAL;
+    cmd.setpoint = (uint8_t)constrain(_chamberSetpoint, 0, 255);
+    cmd.louvrePct = (uint8_t)constrain(_louvreOpen, 0, 100);
+    cmd.fanPct = (uint8_t)constrain(_fanSpeed, 0, 100);
+}
+
+void Display::pushEnclosureCommand()
+{
+    EnclosureCommand cmd = {};
+    fillEnclosureCommand(cmd);
+    enclosureLinkSend(cmd);
+}
+
+void Display::enclosureUpdate(const EnclosureSnapshot &snap)
+{
+    if (snap.valid)
+        _enclosure = snap;
+    refreshChamberDetail();
+    refreshEnclosureLinkHeader();
+}
+
+void Display::refreshEnclosureLinkHeader()
+{
+    if (!_encLinkLabel)
+        return;
+    const bool up = _enclosure.valid && (millis() - _enclosure.rxMs < ENC_LINK_STALE_MS);
+    if (up == _encLinkUp)
+        return;
+    _encLinkUp = up;
+    lv_obj_set_style_text_color(_encLinkLabel, up ? lv_color_hex(0x00FF00) : lv_color_hex(0x808080), 0);
 }
 
 void Display::chamberSetpointDelta(int delta)
@@ -582,6 +628,7 @@ void Display::chamberSetpointDelta(int delta)
     _chamberSetpoint = constrain(_chamberSetpoint + delta, CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
     _chamberSetpointSeeded = true;
     refreshChamberDetail();
+    pushEnclosureCommand();
 }
 
 void Display::louvreDelta(int delta)
@@ -593,6 +640,7 @@ void Display::louvreDelta(int delta)
     if (_louvreOpen < FAN_LOUVRE_MIN_OPEN)
         _fanSpeed = FAN_MIN;
     refreshChamberDetail();
+    pushEnclosureCommand();
 }
 
 void Display::fanDelta(int delta)
@@ -605,10 +653,12 @@ void Display::fanDelta(int delta)
     {
         _fanSpeed = FAN_MIN;
         refreshChamberDetail();
+        pushEnclosureCommand();
         return;
     }
     _fanSpeed = constrain(_fanSpeed + delta, FAN_MIN, FAN_MAX);
     refreshChamberDetail();
+    pushEnclosureCommand();
 }
 
 void Display::refreshChamberDetail()
@@ -633,11 +683,20 @@ void Display::refreshChamberDetail()
     if (_tempPlusButton)
         styleButton(_tempPlusButton, isAuto ? TFT_ORANGE : TFT_DARKGREY);
 
-    // Louvre/fan rows: automatic in Auto, adjustable in Manual.
+    // Louvre/fan rows: live telemetry in Auto, adjustable in Manual.
     if (isAuto)
     {
-        lv_label_set_text(_louvreLabel, "Louvre Auto");
-        lv_label_set_text(_fanLabel, "Fan Auto");
+        const bool fresh = _enclosure.valid && (millis() - _enclosure.rxMs < ENC_LINK_STALE_MS);
+        if (fresh)
+        {
+            lv_label_set_text(_louvreLabel, ("Louvre " + String(_enclosure.louvrePct) + " %").c_str());
+            lv_label_set_text(_fanLabel, ("Fan " + String(_enclosure.fanPct) + " %").c_str());
+        }
+        else
+        {
+            lv_label_set_text(_louvreLabel, "Louvre --");
+            lv_label_set_text(_fanLabel, "Fan --");
+        }
     }
     else
     {

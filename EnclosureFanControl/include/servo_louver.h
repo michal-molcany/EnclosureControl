@@ -20,6 +20,14 @@ public:
     // Non-blocking: rate-limited, no delay().
     void setAngle(int targetAngle);
 
+    // Proportional 0-100% opening between SERVO_OFF_ANGLE and SERVO_ON_ANGLE.
+    // Used by remote manual control.
+    void setPercent(int percent);
+
+    // Power-on self-test: opens to 25% and closes again to verify the servo.
+    // Blocking (~2s), call once from setup().
+    void selfTest();
+
     // Get current angle
     int getAngle() const;
 

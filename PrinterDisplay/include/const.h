@@ -39,14 +39,20 @@
 
 #define LOUVRE_MIN 0
 #define LOUVRE_MAX 100
-#define LOUVRE_STEP 5
+#define LOUVRE_STEP 10
 #define LOUVRE_DEFAULT 0
 #define FAN_MIN 0
 #define FAN_MAX 100
-#define FAN_STEP 5
+#define FAN_STEP 10
 #define FAN_DEFAULT 0
 #define FAN_LOUVRE_MIN_OPEN 10
 
+// Telemetry older than this counts as stale (greyed out / "--").
+#define ENC_LINK_STALE_MS 5000
+
+// ESP-NOW peer (EnclosureFanControl C3 WiFi MAC). All zeros = receive-only
+// until set. Both firmwares log their own MAC at boot - copy them over.
+static const uint8_t ENC_PEER_MAC[6] = {0xAC, 0xEB, 0xE6, 0x4B, 0x46, 0x1C};
 enum ButtonFunction
 {
     PREHEAT_215 = 215,
