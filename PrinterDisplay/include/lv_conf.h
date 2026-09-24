@@ -16,6 +16,6 @@
 #define LV_USE_FLEX 1
 #define LV_USE_GRID 1
 #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
-#define LV_MEM_SIZE (32U * 1024U)
+#define LV_MEM_SIZE (60U * 1024U)
 
 #endif

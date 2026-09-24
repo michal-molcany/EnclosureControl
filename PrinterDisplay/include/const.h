@@ -47,6 +47,17 @@
 #define FAN_DEFAULT 0
 #define FAN_LOUVRE_MIN_OPEN 10
 
+// Material presets for the chamber Material tab (AUTO setpoint profiles).
+// ASA/ABS target is 50 everywhere (matches C3 TEMP_ASA_CHAMBER_TARGET).
+#define MATERIAL_COUNT 6
+#define MATERIAL_DEFAULT_INDEX 0 // PLA
+#define MATERIAL_PLA_SETPOINT 30
+#define MATERIAL_PETG_SETPOINT 30
+#define MATERIAL_ASA_SETPOINT 50
+#define MATERIAL_ABS_SETPOINT 50
+#define MATERIAL_TPU_SETPOINT 35
+#define MATERIAL_NYLON_SETPOINT 50
+
 // Telemetry older than this counts as stale (greyed out / "--").
 #define ENC_LINK_STALE_MS 5000
 
