@@ -187,10 +187,11 @@ namespace
 
     void chamberTabEvent(lv_event_t *event)
     {
-        if (lv_event_get_code(event) != LV_EVENT_CLICKED || !activeDisplay)
+        if (lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED || !activeDisplay)
             return;
-        const intptr_t tab = reinterpret_cast<intptr_t>(lv_event_get_user_data(event));
-        if (tab >= 0 && tab <= 2)
+        lv_obj_t *tabview = static_cast<lv_obj_t *>(lv_event_get_current_target(event));
+        const uint32_t tab = lv_tabview_get_tab_active(tabview);
+        if (tab <= 2)
             activeDisplay->setChamberTab(static_cast<Display::ChamberTab>(tab));
     }
 
@@ -550,26 +551,70 @@ void Display::createLabes()
 
 void Display::createChamberView()
 {
-    auto makePage = [](lv_obj_t *parent) {
-        lv_obj_t *page = lv_obj_create(parent);
-        lv_obj_set_pos(page, 0, 0);
-        lv_obj_set_size(page, SCREEN_WIDTH, SCREEN_HEIGHT);
-        lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
+    lv_obj_t *backButton = lv_button_create(_chamberContainer);
+    lv_obj_set_size(backButton, 100, 36);
+    lv_obj_set_pos(backButton, 5, 5);
+    styleButton(backButton, TFT_DARKGREY);
+    lv_obj_add_event_cb(backButton, backEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *backLabel = lv_label_create(backButton);
+    lv_label_set_text(backLabel, LV_SYMBOL_LEFT " Back");
+    lv_obj_remove_flag(backLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(backLabel);
+
+    lv_obj_t *title = lv_label_create(_chamberContainer);
+    lv_label_set_text(title, "Enclosure");
+    styleLabel(title);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 20, 12);
+
+    _chamberTabview = lv_tabview_create(_chamberContainer);
+    lv_obj_set_pos(_chamberTabview, 0, 46);
+    lv_obj_set_size(_chamberTabview, SCREEN_WIDTH, SCREEN_HEIGHT - 46);
+    lv_obj_set_style_bg_color(_chamberTabview, color565(BACKGROUND), 0);
+    lv_obj_set_style_border_width(_chamberTabview, 0, 0);
+    lv_obj_set_style_radius(_chamberTabview, 0, 0);
+    lv_obj_set_style_pad_all(_chamberTabview, 0, 0);
+    lv_tabview_set_tab_bar_size(_chamberTabview, 36);
+
+    lv_obj_t *tabBar = lv_tabview_get_tab_bar(_chamberTabview);
+    lv_obj_set_style_bg_color(tabBar, color565(TFT_BLACK), 0);
+    lv_obj_set_style_border_width(tabBar, 0, 0);
+    lv_obj_set_style_radius(tabBar, 0, 0);
+    lv_obj_set_style_pad_all(tabBar, 0, 0);
+
+    _matContainer = lv_tabview_add_tab(_chamberTabview, "Material");
+    _tempContainer = lv_tabview_add_tab(_chamberTabview, "Temp");
+    _manContainer = lv_tabview_add_tab(_chamberTabview, "Manual");
+
+    for (int index = 0; index < 3; ++index)
+    {
+        lv_obj_t *tabButton = lv_tabview_get_tab_button(_chamberTabview, index);
+        styleButton(tabButton, TFT_DARKGREY);
+        lv_obj_set_style_bg_color(tabButton, color565(TFT_BLUE), LV_STATE_CHECKED);
+        lv_obj_set_style_bg_opa(tabButton, LV_OPA_COVER, LV_STATE_CHECKED);
+        lv_obj_set_style_text_color(tabButton, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_t *tabLabel = lv_obj_get_child(tabButton, 0);
+        if (tabLabel)
+            lv_obj_set_style_text_color(tabLabel, lv_color_hex(0xFFFFFF), 0);
+    }
+    lv_obj_add_event_cb(_chamberTabview, chamberTabEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_tabview_set_active(_chamberTabview, static_cast<uint32_t>(_chamberTab), LV_ANIM_OFF);
+
+    auto stylePage = [](lv_obj_t *page) {
+        lv_obj_set_style_bg_color(page, color565(BACKGROUND), 0);
         lv_obj_set_style_border_width(page, 0, 0);
         lv_obj_set_style_radius(page, 0, 0);
         lv_obj_set_style_pad_all(page, 0, 0);
         lv_obj_set_clickable(page, false);
         lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_OFF);
-        return page;
     };
-    _matContainer = makePage(_chamberContainer);
-    _tempContainer = makePage(_chamberContainer);
-    _manContainer = makePage(_chamberContainer);
+    stylePage(_matContainer);
+    stylePage(_tempContainer);
+    stylePage(_manContainer);
 
     // --- Material tab: 2x3 preset grid. ---
     const lv_coord_t matX[] = {10, 165};
-    const lv_coord_t matY[] = {84, 120, 156};
+    const lv_coord_t matY[] = {2, 38, 74};
     for (int index = 0; index < MATERIAL_COUNT; ++index)
     {
         _materialButtons[index] = lv_button_create(_matContainer);
@@ -586,83 +631,53 @@ void Display::createChamberView()
     }
 
     // --- Temp tab: setpoint stepper (as before) + read-only info lines. ---
-    placeRowIcon(_tempContainer, &icon_chamber, 92);
+    placeRowIcon(_tempContainer, &icon_chamber, 10);
     _chamberCurrentLabel = lv_label_create(_tempContainer);
     lv_label_set_text(_chamberCurrentLabel, "-- C");
     styleLabel(_chamberCurrentLabel);
-    lv_obj_set_pos(_chamberCurrentLabel, 40, 84);
+    lv_obj_set_pos(_chamberCurrentLabel, 40, 2);
     _chamberSetpointLabel = lv_label_create(_tempContainer);
     lv_label_set_text(_chamberSetpointLabel, "-- C");
     lv_obj_set_style_text_color(_chamberSetpointLabel, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(_chamberSetpointLabel, &lv_font_montserrat_20, 0);
-    lv_obj_set_pos(_chamberSetpointLabel, 40, 102);
-    _tempMinusButton = createChamberStepperButton(_tempContainer, 186, 86, "-", TFT_BLUE,
+    lv_obj_set_pos(_chamberSetpointLabel, 40, 20);
+    _tempMinusButton = createChamberStepperButton(_tempContainer, 186, 4, "-", TFT_BLUE,
                                                   stepperEvent, -CHAMBER_SETPOINT_STEP);
-    _tempPlusButton = createChamberStepperButton(_tempContainer, 252, 86, "+", TFT_ORANGE,
+    _tempPlusButton = createChamberStepperButton(_tempContainer, 252, 4, "+", TFT_ORANGE,
                                                  stepperEvent, CHAMBER_SETPOINT_STEP);
     _tempInfoLabel = lv_label_create(_tempContainer);
     lv_label_set_text(_tempInfoLabel, "Print: --");
     styleLabel(_tempInfoLabel);
-    lv_obj_set_pos(_tempInfoLabel, 40, 140);
+    lv_obj_set_pos(_tempInfoLabel, 40, 58);
     lv_obj_set_width(_tempInfoLabel, 270);
     lv_label_set_long_mode(_tempInfoLabel, LV_LABEL_LONG_DOT);
     _tempStateLabel = lv_label_create(_tempContainer);
     lv_label_set_text(_tempStateLabel, "Louvre -- Fan --");
     styleLabel(_tempStateLabel);
-    lv_obj_set_pos(_tempStateLabel, 40, 158);
+    lv_obj_set_pos(_tempStateLabel, 40, 76);
     lv_obj_set_width(_tempStateLabel, 270);
     lv_label_set_long_mode(_tempStateLabel, LV_LABEL_LONG_DOT);
 
     // --- Manual tab: louvre + fan steppers (shifted up into freed space). ---
-    placeRowIcon(_manContainer, &icon_louvre, 92);
+    placeRowIcon(_manContainer, &icon_louvre, 10);
     _louvreLabel = lv_label_create(_manContainer);
     lv_label_set_text(_louvreLabel, "Louvre --");
     styleLabel(_louvreLabel);
-    lv_obj_set_pos(_louvreLabel, 40, 95);
-    _louvreMinusButton = createChamberStepperButton(_manContainer, 186, 86, "-", TFT_BLUE,
+    lv_obj_set_pos(_louvreLabel, 40, 13);
+    _louvreMinusButton = createChamberStepperButton(_manContainer, 186, 4, "-", TFT_BLUE,
                                                     louvreStepperEvent, -LOUVRE_STEP);
-    _louvrePlusButton = createChamberStepperButton(_manContainer, 252, 86, "+", TFT_ORANGE,
+    _louvrePlusButton = createChamberStepperButton(_manContainer, 252, 4, "+", TFT_ORANGE,
                                                    louvreStepperEvent, LOUVRE_STEP);
 
-    placeRowIcon(_manContainer, &icon_fan, 138);
+    placeRowIcon(_manContainer, &icon_fan, 56);
     _fanLabel = lv_label_create(_manContainer);
     lv_label_set_text(_fanLabel, "Fan --");
     styleLabel(_fanLabel);
-    lv_obj_set_pos(_fanLabel, 40, 141);
-    _fanMinusButton = createChamberStepperButton(_manContainer, 186, 132, "-", TFT_BLUE,
+    lv_obj_set_pos(_fanLabel, 40, 59);
+    _fanMinusButton = createChamberStepperButton(_manContainer, 186, 50, "-", TFT_BLUE,
                                                  fanStepperEvent, -FAN_STEP);
-    _fanPlusButton = createChamberStepperButton(_manContainer, 252, 132, "+", TFT_ORANGE,
+    _fanPlusButton = createChamberStepperButton(_manContainer, 252, 50, "+", TFT_ORANGE,
                                                 fanStepperEvent, FAN_STEP);
-
-    lv_obj_t *backButton = lv_button_create(_chamberContainer);
-    lv_obj_set_size(backButton, 100, 36);
-    lv_obj_set_pos(backButton, 5, 5);
-    styleButton(backButton, TFT_DARKGREY);
-    lv_obj_add_event_cb(backButton, backEvent, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *backLabel = lv_label_create(backButton);
-    lv_label_set_text(backLabel, LV_SYMBOL_LEFT " Back");
-    lv_obj_remove_flag(backLabel, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(backLabel);
-
-    lv_obj_t *title = lv_label_create(_chamberContainer);
-    lv_label_set_text(title, "Enclosure");
-    styleLabel(title);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 20, 12);
-
-    const char *tabLabels[] = {"Material", "Temp", "Manual"};
-    const lv_coord_t tabX[] = {5, 110, 215};
-    for (int index = 0; index < 3; ++index)
-    {
-        _tabButtons[index] = lv_button_create(_chamberContainer);
-        lv_obj_set_size(_tabButtons[index], 100, 28);
-        lv_obj_set_pos(_tabButtons[index], tabX[index], 46);
-        lv_obj_add_event_cb(_tabButtons[index], chamberTabEvent, LV_EVENT_CLICKED,
-                            reinterpret_cast<void *>(static_cast<intptr_t>(index)));
-        lv_obj_t *tabLabel = lv_label_create(_tabButtons[index]);
-        lv_label_set_text(tabLabel, tabLabels[index]);
-        lv_obj_remove_flag(tabLabel, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_center(tabLabel);
-    }
 }
 
 void Display::showMainView()
@@ -695,6 +710,9 @@ void Display::setChamberControl(ChamberControl mode)
 
 void Display::setChamberTab(ChamberTab tab)
 {
+    const uint32_t index = static_cast<uint32_t>(tab);
+    if (_chamberTabview && lv_tabview_get_tab_active(_chamberTabview) != index)
+        lv_tabview_set_active(_chamberTabview, index, LV_ANIM_OFF);
     _chamberTab = tab;
     _chamberControl = (tab == ChamberTab::Manual) ? ChamberControl::Manual : ChamberControl::Auto;
     // Entering Material re-applies the selected profile setpoint.
@@ -841,39 +859,9 @@ void Display::refreshChamberDetail()
     // auto-select state are still latched by the callers.
     if (!_isDrawn || _view != View::Chamber)
         return;
-    const int tab = static_cast<int>(_chamberTab);
     const bool isManual = _chamberTab == ChamberTab::Manual;
-    const bool isTemp = _chamberTab == ChamberTab::Temperature;
     const lv_color_t dim = lv_color_hex(0x808080);
     const lv_color_t bright = lv_color_hex(0xFFFFFF);
-
-    for (int index = 0; index < 3; ++index)
-    {
-        if (!_tabButtons[index])
-            continue;
-        styleButton(_tabButtons[index], index == tab ? TFT_DARKGREEN : TFT_DARKGREY);
-    }
-    if (_matContainer)
-    {
-        if (_chamberTab == ChamberTab::Material)
-            lv_obj_clear_flag(_matContainer, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_add_flag(_matContainer, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (_tempContainer)
-    {
-        if (isTemp)
-            lv_obj_clear_flag(_tempContainer, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_add_flag(_tempContainer, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (_manContainer)
-    {
-        if (isManual)
-            lv_obj_clear_flag(_manContainer, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_add_flag(_manContainer, LV_OBJ_FLAG_HIDDEN);
-    }
 
     // Material tab: highlight selected preset.
     for (int index = 0; index < MATERIAL_COUNT; ++index)
