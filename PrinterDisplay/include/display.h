@@ -118,7 +118,7 @@ private:
     lv_obj_t *_louvrePlusButton = nullptr;
     lv_obj_t *_fanMinusButton = nullptr;
     lv_obj_t *_fanPlusButton = nullptr;
-    lv_obj_t *_tabButtons[3] = {};
+    lv_obj_t *_chamberTabview = nullptr;
     lv_obj_t *_matContainer = nullptr;
     lv_obj_t *_tempContainer = nullptr;
     lv_obj_t *_manContainer = nullptr;
