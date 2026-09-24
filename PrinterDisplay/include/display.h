@@ -26,6 +26,21 @@ public:
         Manual
     };
 
+    enum class ChamberTab
+    {
+        Material = 0,
+        Temperature = 1,
+        Manual = 2
+    };
+
+    struct MaterialPreset
+    {
+        const char *name;
+        int setpoint;
+    };
+    static const MaterialPreset MATERIAL_PRESETS[MATERIAL_COUNT];
+    static int matchMaterialIndex(const String &filament);
+
     void Initialization();
     void splashScreen(String message);
     void drawWiFiSignal(int32_t rssi);
@@ -36,8 +51,12 @@ public:
     void louvreDelta(int delta);
     void fanDelta(int delta);
     void setChamberControl(ChamberControl mode);
+    void setChamberTab(ChamberTab tab);
+    void selectMaterial(int index);
     ChamberControl chamberControl() const { return _chamberControl; }
+    ChamberTab chamberTab() const { return _chamberTab; }
     int chamberSetpoint() const { return _chamberSetpoint; }
+    int materialIndex() const { return _materialIndex; }
     int louvrePercent() const { return _louvreOpen; }
     int fanPercent() const { return _fanSpeed; }
     // Fill an outbound command from current UI state (magic+seq stamped by link).
@@ -50,7 +69,7 @@ public:
     void setPreheatButtonsVisibility(bool visible);
     void setPrintButtonsVisibility(bool visible);
     void setButtonActions(Action preheat215, Action preheat230, Action preheatOff,
-                          Action pause, Action stop, Action resume);
+                           Action pause, Action stop, Action resume);
 
 private:
     void createPanel(lv_obj_t *parent, lv_obj_t **panel, lv_coord_t x, lv_coord_t y, lv_coord_t width, lv_coord_t height);
@@ -60,6 +79,10 @@ private:
     void refreshChamberDetail();
     void refreshEnclosureLinkHeader();
     void pushEnclosureCommand();
+    // Auto-switch Material profile from OctoPrint filament (Material tab only).
+    void autoSelectMaterial(const String &filament, bool jobActive);
+    static String normalizeFilament(const String &raw);
+    static bool filamentContains(const String &norm, const char *token);
 
     lv_display_t *_display = nullptr;
     lv_obj_t *_stateLabel = nullptr;
@@ -95,13 +118,23 @@ private:
     lv_obj_t *_louvrePlusButton = nullptr;
     lv_obj_t *_fanMinusButton = nullptr;
     lv_obj_t *_fanPlusButton = nullptr;
-    lv_obj_t *_autoButton = nullptr;
-    lv_obj_t *_manualButton = nullptr;
+    lv_obj_t *_tabButtons[3] = {};
+    lv_obj_t *_matContainer = nullptr;
+    lv_obj_t *_tempContainer = nullptr;
+    lv_obj_t *_manContainer = nullptr;
+    lv_obj_t *_materialButtons[MATERIAL_COUNT] = {};
+    lv_obj_t *_tempInfoLabel = nullptr;
+    lv_obj_t *_tempStateLabel = nullptr;
     ChamberControl _chamberControl = ChamberControl::Auto;
+    ChamberTab _chamberTab = ChamberTab::Material;
     int _chamberSetpoint = CHAMBER_SETPOINT_DEFAULT;
     bool _chamberSetpointSeeded = false;
+    int _materialIndex = MATERIAL_DEFAULT_INDEX;
     int _louvreOpen = LOUVRE_DEFAULT;
     int _fanSpeed = FAN_DEFAULT;
+    String _octoFilament;
+    bool _wasJobActive = false;
+    String _lastAutoFilament;
     EnclosureSnapshot _enclosure; // last telemetry from EnclosureFanControl
     bool _isDrawn = false;
     String _jobFileName;

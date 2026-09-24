@@ -78,11 +78,11 @@ This system automatically controls the enclosure fan and louver based on printer
 
 - Opens louvre ONLY if chamber reaches 40°C
 - Applies very slow cooling (30% fan speed)
-- Targets chamber at 45°C (not aggressive)
+- Targets chamber at 50°C (not aggressive)
 
 **Stops when:**
 
-- Chamber reaches 45°C target, OR
+- Chamber reaches 50°C target, OR
 - Chamber drops below 40°C
 
 **Important:** Never opens louvre for other reasons to prevent warping of high-temperature materials
@@ -124,7 +124,7 @@ Located in `const.h`:
 **ASA/ABS/Others:**
 
 - Enclosure threshold: 40°C (critical)
-- Chamber target: 45°C (gentle)
+- Chamber target: 50°C (gentle)
 - Fan speed: 30% of normal (very slow cooling)
 
 ## State Machine
@@ -200,8 +200,8 @@ Louvre closed
 ```
 State transition: ASA_ABS_COOLING
 [ASA/ABS] Enclosure temperature critical - opening louvre
-[ASA/ABS] Slow cooling from 42.0°C, Fan speed (slow): 25
-[ASA/ABS] Slow cooling from 44.5°C, Fan speed (slow): 3
+[ASA/ABS] Slow cooling from 52.0°C, Fan speed (slow): 25
+[ASA/ABS] Slow cooling from 50.5°C, Fan speed (slow): 3
 [ASA/ABS] Target temperature reached - returning to IDLE
 Louvre closed
 ```
@@ -224,7 +224,7 @@ Edit `include/const.h`:
 
 // ASA/ABS thresholds
 #define TEMP_ASA_ENCLOSURE_THRESHOLD 40
-#define TEMP_ASA_CHAMBER_TARGET 45
+#define TEMP_ASA_CHAMBER_TARGET 50
 ```
 
 ### Tuning PID Controller

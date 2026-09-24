@@ -13,10 +13,53 @@
 #include "icons/icon_nozzle_size.h"
 #include "icons/icon_progress.h"
 
+const Display::MaterialPreset Display::MATERIAL_PRESETS[MATERIAL_COUNT] = {
+    {"PLA", MATERIAL_PLA_SETPOINT},
+    {"PETG", MATERIAL_PETG_SETPOINT},
+    {"ASA", MATERIAL_ASA_SETPOINT},
+    {"ABS", MATERIAL_ABS_SETPOINT},
+    {"TPU", MATERIAL_TPU_SETPOINT},
+    {"Nylon", MATERIAL_NYLON_SETPOINT},
+};
+
+int Display::matchMaterialIndex(const String &filament)
+{
+    const String norm = normalizeFilament(filament);
+    if (norm.length() == 0)
+        return MATERIAL_DEFAULT_INDEX; // unknown/empty -> PLA 30
+    if (filamentContains(norm, "PLA"))
+        return 0;
+    if (filamentContains(norm, "PETG"))
+        return 1;
+    if (filamentContains(norm, "ASA"))
+        return 2;
+    if (filamentContains(norm, "ABS"))
+        return 3;
+    if (filamentContains(norm, "TPU"))
+        return 4;
+    if (filamentContains(norm, "NYLON") || filamentContains(norm, "PA"))
+        return 5;
+    return MATERIAL_DEFAULT_INDEX;
+}
+
+String Display::normalizeFilament(const String &raw)
+{
+    String s = raw;
+    s.trim();
+    s.toUpperCase();
+    return s;
+}
+
+bool Display::filamentContains(const String &norm, const char *token)
+{
+    if (norm.length() == 0 || token == nullptr)
+        return false;
+    return norm.indexOf(token) >= 0;
+}
+
 namespace
 {
-    TFT_eSPI displayTft;
-    SPIClass touchSPI(HSPI);
+    TFT_eSPI displayTft;    SPIClass touchSPI(HSPI);
     XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
     lv_color_t drawBuffer[320 * 10];
     Display::Action buttonActions[6] = {};
@@ -43,6 +86,20 @@ namespace
     {
         lv_obj_set_style_bg_color(button, color565(color), 0);
         lv_obj_set_style_bg_color(button, pressed565(color), LV_STATE_PRESSED);
+    }
+
+    // Set label text only when it actually changed. Every lv_label_set_text
+    // frees + re-mallocs the buffer; called at 4 Hz on hidden labels this
+    // fragments the heap until an allocation fails (label->text stays NULL
+    // and the next layout pass panics with LoadProhibited).
+    void setLabelTextOnce(lv_obj_t *label, const String &text)
+    {
+        if (!label)
+            return;
+        const char *current = lv_label_get_text(label);
+        if (current && text.equals(current))
+            return;
+        lv_label_set_text(label, text.c_str());
     }
 
     void flushDisplay(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
@@ -128,13 +185,21 @@ namespace
         activeDisplay->fanDelta(static_cast<int>(delta));
     }
 
-    void chamberModeEvent(lv_event_t *event)
+    void chamberTabEvent(lv_event_t *event)
     {
         if (lv_event_get_code(event) != LV_EVENT_CLICKED || !activeDisplay)
             return;
-        const intptr_t mode = reinterpret_cast<intptr_t>(lv_event_get_user_data(event));
-        activeDisplay->setChamberControl(mode == 0 ? Display::ChamberControl::Auto
-                                                   : Display::ChamberControl::Manual);
+        const intptr_t tab = reinterpret_cast<intptr_t>(lv_event_get_user_data(event));
+        if (tab >= 0 && tab <= 2)
+            activeDisplay->setChamberTab(static_cast<Display::ChamberTab>(tab));
+    }
+
+    void materialButtonEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) != LV_EVENT_CLICKED || !activeDisplay)
+            return;
+        const intptr_t index = reinterpret_cast<intptr_t>(lv_event_get_user_data(event));
+        activeDisplay->selectMaterial(static_cast<int>(index));
     }
 
     lv_obj_t *createChamberStepperButton(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
@@ -174,12 +239,12 @@ namespace
     {
         if (target == 0)
         {
-            lv_label_set_text(label, (String(actual, 1) + " C").c_str());
+            setLabelTextOnce(label, String(actual, 1) + " C");
             lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
         }
         else
         {
-            lv_label_set_text(label, (String(actual, 1) + " / " + String(target) + " C").c_str());
+            setLabelTextOnce(label, String(actual, 1) + " / " + String(target) + " C");
             lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
         }
     }
@@ -478,10 +543,97 @@ void Display::createLabes()
     showMainView();
     refreshChamberDetail();
     _isDrawn = true;
+    Serial.printf("[HEAP] createLabes free=%u min=%u maxblock=%u lvglPool=%u lvglTest=%d\n",
+                  ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
+                  (unsigned)LV_MEM_SIZE, (int)lv_mem_test());
 }
 
 void Display::createChamberView()
 {
+    auto makePage = [](lv_obj_t *parent) {
+        lv_obj_t *page = lv_obj_create(parent);
+        lv_obj_set_pos(page, 0, 0);
+        lv_obj_set_size(page, SCREEN_WIDTH, SCREEN_HEIGHT);
+        lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(page, 0, 0);
+        lv_obj_set_style_radius(page, 0, 0);
+        lv_obj_set_style_pad_all(page, 0, 0);
+        lv_obj_set_clickable(page, false);
+        lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_OFF);
+        return page;
+    };
+    _matContainer = makePage(_chamberContainer);
+    _tempContainer = makePage(_chamberContainer);
+    _manContainer = makePage(_chamberContainer);
+
+    // --- Material tab: 2x3 preset grid. ---
+    const lv_coord_t matX[] = {10, 165};
+    const lv_coord_t matY[] = {84, 120, 156};
+    for (int index = 0; index < MATERIAL_COUNT; ++index)
+    {
+        _materialButtons[index] = lv_button_create(_matContainer);
+        lv_obj_set_size(_materialButtons[index], 145, 32);
+        lv_obj_set_pos(_materialButtons[index], matX[index % 2], matY[index / 2]);
+        lv_obj_add_event_cb(_materialButtons[index], materialButtonEvent, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(index)));
+        lv_obj_t *matLabel = lv_label_create(_materialButtons[index]);
+        lv_label_set_text(matLabel, (String(MATERIAL_PRESETS[index].name) + " " +
+                                     String(MATERIAL_PRESETS[index].setpoint) + "C")
+                                        .c_str());
+        lv_obj_remove_flag(matLabel, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(matLabel);
+    }
+
+    // --- Temp tab: setpoint stepper (as before) + read-only info lines. ---
+    placeRowIcon(_tempContainer, &icon_chamber, 92);
+    _chamberCurrentLabel = lv_label_create(_tempContainer);
+    lv_label_set_text(_chamberCurrentLabel, "-- C");
+    styleLabel(_chamberCurrentLabel);
+    lv_obj_set_pos(_chamberCurrentLabel, 40, 84);
+    _chamberSetpointLabel = lv_label_create(_tempContainer);
+    lv_label_set_text(_chamberSetpointLabel, "-- C");
+    lv_obj_set_style_text_color(_chamberSetpointLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(_chamberSetpointLabel, &lv_font_montserrat_20, 0);
+    lv_obj_set_pos(_chamberSetpointLabel, 40, 102);
+    _tempMinusButton = createChamberStepperButton(_tempContainer, 186, 86, "-", TFT_BLUE,
+                                                  stepperEvent, -CHAMBER_SETPOINT_STEP);
+    _tempPlusButton = createChamberStepperButton(_tempContainer, 252, 86, "+", TFT_ORANGE,
+                                                 stepperEvent, CHAMBER_SETPOINT_STEP);
+    _tempInfoLabel = lv_label_create(_tempContainer);
+    lv_label_set_text(_tempInfoLabel, "Print: --");
+    styleLabel(_tempInfoLabel);
+    lv_obj_set_pos(_tempInfoLabel, 40, 140);
+    lv_obj_set_width(_tempInfoLabel, 270);
+    lv_label_set_long_mode(_tempInfoLabel, LV_LABEL_LONG_DOT);
+    _tempStateLabel = lv_label_create(_tempContainer);
+    lv_label_set_text(_tempStateLabel, "Louvre -- Fan --");
+    styleLabel(_tempStateLabel);
+    lv_obj_set_pos(_tempStateLabel, 40, 158);
+    lv_obj_set_width(_tempStateLabel, 270);
+    lv_label_set_long_mode(_tempStateLabel, LV_LABEL_LONG_DOT);
+
+    // --- Manual tab: louvre + fan steppers (shifted up into freed space). ---
+    placeRowIcon(_manContainer, &icon_louvre, 92);
+    _louvreLabel = lv_label_create(_manContainer);
+    lv_label_set_text(_louvreLabel, "Louvre --");
+    styleLabel(_louvreLabel);
+    lv_obj_set_pos(_louvreLabel, 40, 95);
+    _louvreMinusButton = createChamberStepperButton(_manContainer, 186, 86, "-", TFT_BLUE,
+                                                    louvreStepperEvent, -LOUVRE_STEP);
+    _louvrePlusButton = createChamberStepperButton(_manContainer, 252, 86, "+", TFT_ORANGE,
+                                                   louvreStepperEvent, LOUVRE_STEP);
+
+    placeRowIcon(_manContainer, &icon_fan, 138);
+    _fanLabel = lv_label_create(_manContainer);
+    lv_label_set_text(_fanLabel, "Fan --");
+    styleLabel(_fanLabel);
+    lv_obj_set_pos(_fanLabel, 40, 141);
+    _fanMinusButton = createChamberStepperButton(_manContainer, 186, 132, "-", TFT_BLUE,
+                                                 fanStepperEvent, -FAN_STEP);
+    _fanPlusButton = createChamberStepperButton(_manContainer, 252, 132, "+", TFT_ORANGE,
+                                                fanStepperEvent, FAN_STEP);
+
     lv_obj_t *backButton = lv_button_create(_chamberContainer);
     lv_obj_set_size(backButton, 100, 36);
     lv_obj_set_pos(backButton, 5, 5);
@@ -497,67 +649,20 @@ void Display::createChamberView()
     styleLabel(title);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 20, 12);
 
-    // Mode selector: Auto (desired-temp control) vs Manual (louvre/fan control).
-    _autoButton = lv_button_create(_chamberContainer);
-    lv_obj_set_size(_autoButton, 90, 30);
-    lv_obj_set_pos(_autoButton, 65, 46);
-    lv_obj_add_event_cb(_autoButton, chamberModeEvent, LV_EVENT_CLICKED,
-                        reinterpret_cast<void *>(static_cast<intptr_t>(0)));
-    lv_obj_t *autoLabel = lv_label_create(_autoButton);
-    lv_label_set_text(autoLabel, "Auto");
-    lv_obj_remove_flag(autoLabel, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(autoLabel);
-    _manualButton = lv_button_create(_chamberContainer);
-    lv_obj_set_size(_manualButton, 90, 30);
-    lv_obj_set_pos(_manualButton, 160, 46);
-    lv_obj_add_event_cb(_manualButton, chamberModeEvent, LV_EVENT_CLICKED,
-                        reinterpret_cast<void *>(static_cast<intptr_t>(1)));
-    lv_obj_t *manualLabel = lv_label_create(_manualButton);
-    lv_label_set_text(manualLabel, "Manual");
-    lv_obj_remove_flag(manualLabel, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(manualLabel);
-
-    // Row 1: temperature (icon + actual/desired + stepper). Active in Auto.
-    // Desired temperature is emphasized bigger than the actual value.
-    placeRowIcon(_chamberContainer, &icon_chamber, 92);
-    _chamberCurrentLabel = lv_label_create(_chamberContainer);
-    lv_label_set_text(_chamberCurrentLabel, "-- C");
-    styleLabel(_chamberCurrentLabel);
-    lv_obj_set_pos(_chamberCurrentLabel, 40, 84);
-    _chamberSetpointLabel = lv_label_create(_chamberContainer);
-    lv_label_set_text(_chamberSetpointLabel, "-- C");
-    lv_obj_set_style_text_color(_chamberSetpointLabel, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(_chamberSetpointLabel, &lv_font_montserrat_20, 0);
-    lv_obj_set_pos(_chamberSetpointLabel, 40, 102);
-    _tempMinusButton = createChamberStepperButton(_chamberContainer, 186, 86, "-", TFT_BLUE,
-                                                  stepperEvent, -CHAMBER_SETPOINT_STEP);
-    _tempPlusButton = createChamberStepperButton(_chamberContainer, 252, 86, "+", TFT_ORANGE,
-                                                 stepperEvent, CHAMBER_SETPOINT_STEP);
-
-    // Row 2: louvre opening 0-100%. Active in Manual.
-    placeRowIcon(_chamberContainer, &icon_louvre, 138);
-    _louvreLabel = lv_label_create(_chamberContainer);
-    styleLabel(_louvreLabel);
-    lv_obj_set_pos(_louvreLabel, 40, 141);
-    _louvreMinusButton = createChamberStepperButton(_chamberContainer, 186, 132, "-", TFT_BLUE,
-                                                    louvreStepperEvent, -LOUVRE_STEP);
-    _louvrePlusButton = createChamberStepperButton(_chamberContainer, 252, 132, "+", TFT_ORANGE,
-                                                   louvreStepperEvent, LOUVRE_STEP);
-
-    // Row 3: fan speed 0-100%. Active in Manual, gated on louvre >= 10%.
-    placeRowIcon(_chamberContainer, &icon_fan, 184);
-    _fanLabel = lv_label_create(_chamberContainer);
-    styleLabel(_fanLabel);
-    lv_obj_set_pos(_fanLabel, 40, 187);
-    _fanMinusButton = createChamberStepperButton(_chamberContainer, 186, 178, "-", TFT_BLUE,
-                                                 fanStepperEvent, -FAN_STEP);
-    _fanPlusButton = createChamberStepperButton(_chamberContainer, 252, 178, "+", TFT_ORANGE,
-                                                fanStepperEvent, FAN_STEP);
-
-    lv_obj_t *hint = lv_label_create(_chamberContainer);
-    lv_label_set_text(hint, "Auto: temp - Manual: louvre/fan");
-    styleLabel(hint);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+    const char *tabLabels[] = {"Material", "Temp", "Manual"};
+    const lv_coord_t tabX[] = {5, 110, 215};
+    for (int index = 0; index < 3; ++index)
+    {
+        _tabButtons[index] = lv_button_create(_chamberContainer);
+        lv_obj_set_size(_tabButtons[index], 100, 28);
+        lv_obj_set_pos(_tabButtons[index], tabX[index], 46);
+        lv_obj_add_event_cb(_tabButtons[index], chamberTabEvent, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(index)));
+        lv_obj_t *tabLabel = lv_label_create(_tabButtons[index]);
+        lv_label_set_text(tabLabel, tabLabels[index]);
+        lv_obj_remove_flag(tabLabel, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(tabLabel);
+    }
 }
 
 void Display::showMainView()
@@ -577,18 +682,84 @@ void Display::showChamberView()
     refreshChamberDetail();
     lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
+    Serial.printf("[HEAP] chamber open free=%u min=%u maxblock=%u lvglTest=%d\n",
+                  ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
+                  (int)lv_mem_test());
 }
 
 void Display::setChamberControl(ChamberControl mode)
 {
-    _chamberControl = mode;
+    // Legacy 2-state API: Auto maps to the Temperature tab, Manual to Manual.
+    setChamberTab(mode == ChamberControl::Auto ? ChamberTab::Temperature : ChamberTab::Manual);
+}
+
+void Display::setChamberTab(ChamberTab tab)
+{
+    _chamberTab = tab;
+    _chamberControl = (tab == ChamberTab::Manual) ? ChamberControl::Manual : ChamberControl::Auto;
+    // Entering Material re-applies the selected profile setpoint.
+    if (tab == ChamberTab::Material)
+    {
+        _chamberSetpoint = constrain(MATERIAL_PRESETS[_materialIndex].setpoint,
+                                     CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
+        _chamberSetpointSeeded = true;
+    }
+    refreshChamberDetail();
+    pushEnclosureCommand();
+}
+
+void Display::selectMaterial(int index)
+{
+    if (index < 0 || index >= MATERIAL_COUNT)
+        return;
+    _materialIndex = index;
+    _chamberTab = ChamberTab::Material;
+    _chamberControl = ChamberControl::Auto;
+    _chamberSetpoint = constrain(MATERIAL_PRESETS[index].setpoint,
+                                 CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
+    _chamberSetpointSeeded = true;
+    _lastAutoFilament = normalizeFilament(_octoFilament);
+    refreshChamberDetail();
+    pushEnclosureCommand();
+}
+
+void Display::autoSelectMaterial(const String &filament, bool jobActive)
+{
+    const String norm = normalizeFilament(filament);
+    const bool wasActive = _wasJobActive;
+    _wasJobActive = jobActive;
+    if (filament.length())
+        _octoFilament = filament;
+    if (!jobActive)
+        return;
+    // Material tab only; Temperature/Manual never auto-switch.
+    if (_chamberTab != ChamberTab::Material)
+    {
+        _lastAutoFilament = norm;
+        return;
+    }
+    const bool startEdge = !wasActive;
+    const bool changed = norm.length() > 0 && norm != _lastAutoFilament;
+    if (!startEdge && !changed)
+        return;
+    _lastAutoFilament = norm;
+    const int matched = matchMaterialIndex(filament); // empty/unknown -> PLA
+    if (matched == _materialIndex && _chamberSetpointSeeded)
+    {
+        refreshChamberDetail();
+        return;
+    }
+    _materialIndex = matched;
+    _chamberSetpoint = constrain(MATERIAL_PRESETS[matched].setpoint,
+                                 CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
+    _chamberSetpointSeeded = true;
     refreshChamberDetail();
     pushEnclosureCommand();
 }
 
 void Display::fillEnclosureCommand(EnclosureCommand &cmd) const
 {
-    cmd.mode = (_chamberControl == ChamberControl::Auto) ? ENC_MODE_AUTO : ENC_MODE_MANUAL;
+    cmd.mode = (_chamberTab == ChamberTab::Manual) ? ENC_MODE_MANUAL : ENC_MODE_AUTO;
     cmd.setpoint = (uint8_t)constrain(_chamberSetpoint, 0, 255);
     cmd.louvrePct = (uint8_t)constrain(_louvreOpen, 0, 100);
     cmd.fanPct = (uint8_t)constrain(_fanSpeed, 0, 100);
@@ -623,7 +794,7 @@ void Display::refreshEnclosureLinkHeader()
 void Display::chamberSetpointDelta(int delta)
 {
     // Desired temperature is the automatic-control input; ignore in Manual.
-    if (_chamberControl != ChamberControl::Auto)
+    if (_chamberTab == ChamberTab::Manual)
         return;
     _chamberSetpoint = constrain(_chamberSetpoint + delta, CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
     _chamberSetpointSeeded = true;
@@ -633,8 +804,8 @@ void Display::chamberSetpointDelta(int delta)
 
 void Display::louvreDelta(int delta)
 {
-    // Louvre is the manual-control input; ignore in Auto.
-    if (_chamberControl != ChamberControl::Manual)
+    // Louvre is the manual-control input; ignore outside Manual tab.
+    if (_chamberTab != ChamberTab::Manual)
         return;
     _louvreOpen = constrain(_louvreOpen + delta, LOUVRE_MIN, LOUVRE_MAX);
     if (_louvreOpen < FAN_LOUVRE_MIN_OPEN)
@@ -645,8 +816,8 @@ void Display::louvreDelta(int delta)
 
 void Display::fanDelta(int delta)
 {
-    // Fan is the manual-control input; ignore in Auto.
-    if (_chamberControl != ChamberControl::Manual)
+    // Fan is the manual-control input; ignore outside Manual tab.
+    if (_chamberTab != ChamberTab::Manual)
         return;
     // Fan stays at 0 and ignores input until the louvre is open enough.
     if (_louvreOpen < FAN_LOUVRE_MIN_OPEN)
@@ -665,52 +836,86 @@ void Display::refreshChamberDetail()
 {
     if (!_chamberSetpointLabel || !_chamberCurrentLabel || !_louvreLabel || !_fanLabel)
         return;
-    const bool isAuto = _chamberControl == ChamberControl::Auto;
+    // The chamber pages are hidden while the main view is shown; refreshing
+    // hidden labels is pure heap churn (see setLabelTextOnce). Telemetry and
+    // auto-select state are still latched by the callers.
+    if (!_isDrawn || _view != View::Chamber)
+        return;
+    const int tab = static_cast<int>(_chamberTab);
+    const bool isManual = _chamberTab == ChamberTab::Manual;
+    const bool isTemp = _chamberTab == ChamberTab::Temperature;
     const lv_color_t dim = lv_color_hex(0x808080);
     const lv_color_t bright = lv_color_hex(0xFFFFFF);
 
-    if (_autoButton)
-        styleButton(_autoButton, isAuto ? TFT_DARKGREEN : TFT_DARKGREY);
-    if (_manualButton)
-        styleButton(_manualButton, isAuto ? TFT_DARKGREY : TFT_DARKGREEN);
-
-    // Temperature row: actual on top, desired setpoint below; stepper active in Auto.
-    lv_label_set_text(_chamberSetpointLabel, ("Des " + String(_chamberSetpoint) + " C").c_str());
-    lv_obj_clear_flag(_chamberSetpointLabel, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_style_text_color(_chamberSetpointLabel, isAuto ? bright : dim, 0);
-    if (_tempMinusButton)
-        styleButton(_tempMinusButton, isAuto ? TFT_BLUE : TFT_DARKGREY);
-    if (_tempPlusButton)
-        styleButton(_tempPlusButton, isAuto ? TFT_ORANGE : TFT_DARKGREY);
-
-    // Louvre/fan rows: live telemetry in Auto, adjustable in Manual.
-    if (isAuto)
+    for (int index = 0; index < 3; ++index)
     {
-        const bool fresh = _enclosure.valid && (millis() - _enclosure.rxMs < ENC_LINK_STALE_MS);
-        if (fresh)
-        {
-            lv_label_set_text(_louvreLabel, ("Louvre " + String(_enclosure.louvrePct) + " %").c_str());
-            lv_label_set_text(_fanLabel, ("Fan " + String(_enclosure.fanPct) + " %").c_str());
-        }
+        if (!_tabButtons[index])
+            continue;
+        styleButton(_tabButtons[index], index == tab ? TFT_DARKGREEN : TFT_DARKGREY);
+    }
+    if (_matContainer)
+    {
+        if (_chamberTab == ChamberTab::Material)
+            lv_obj_clear_flag(_matContainer, LV_OBJ_FLAG_HIDDEN);
         else
-        {
-            lv_label_set_text(_louvreLabel, "Louvre --");
-            lv_label_set_text(_fanLabel, "Fan --");
-        }
+            lv_obj_add_flag(_matContainer, LV_OBJ_FLAG_HIDDEN);
     }
-    else
+    if (_tempContainer)
     {
-        lv_label_set_text(_louvreLabel, ("Louvre " + String(_louvreOpen) + " %").c_str());
-        const bool fanLocked = _louvreOpen < FAN_LOUVRE_MIN_OPEN;
-        lv_label_set_text(_fanLabel, (String("Fan ") + String(_fanSpeed) + " %" + (fanLocked ? " (locked)" : "")).c_str());
+        if (isTemp)
+            lv_obj_clear_flag(_tempContainer, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(_tempContainer, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_set_style_text_color(_louvreLabel, isAuto ? dim : bright, 0);
-    const bool fanDimmed = isAuto || _louvreOpen < FAN_LOUVRE_MIN_OPEN;
+    if (_manContainer)
+    {
+        if (isManual)
+            lv_obj_clear_flag(_manContainer, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(_manContainer, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Material tab: highlight selected preset.
+    for (int index = 0; index < MATERIAL_COUNT; ++index)
+    {
+        if (!_materialButtons[index])
+            continue;
+        styleButton(_materialButtons[index], index == _materialIndex ? TFT_DARKGREEN : TFT_DARKGREY);
+    }
+
+    const bool fresh = _enclosure.valid && (millis() - _enclosure.rxMs < ENC_LINK_STALE_MS);
+    const String c3state = fresh ? ("Louvre " + String(_enclosure.louvrePct) + "% Fan " +
+                                    String(_enclosure.fanPct) + "%")
+                                 : String("Louvre -- Fan --");
+    const String printMat = _octoFilament.length() ? _octoFilament : String("--");
+    if (_tempInfoLabel)
+        setLabelTextOnce(_tempInfoLabel, "Print: " + printMat);
+    if (_tempStateLabel)
+    {
+        setLabelTextOnce(_tempStateLabel, "C3: " + c3state);
+        lv_obj_set_style_text_color(_tempStateLabel, fresh ? bright : dim, 0);
+    }
+
+    // Temperature tab: actual on top, desired setpoint below; stepper active.
+    setLabelTextOnce(_chamberSetpointLabel, "Des " + String(_chamberSetpoint) + " C");
+    lv_obj_clear_flag(_chamberSetpointLabel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_text_color(_chamberSetpointLabel, isManual ? dim : bright, 0);
+    if (_tempMinusButton)
+        styleButton(_tempMinusButton, isManual ? TFT_DARKGREY : TFT_BLUE);
+    if (_tempPlusButton)
+        styleButton(_tempPlusButton, isManual ? TFT_DARKGREY : TFT_ORANGE);
+
+    // Manual tab: adjustable louvre/fan.
+    setLabelTextOnce(_louvreLabel, "Louvre " + String(_louvreOpen) + " %");
+    const bool fanLocked = _louvreOpen < FAN_LOUVRE_MIN_OPEN;
+    setLabelTextOnce(_fanLabel, String("Fan ") + String(_fanSpeed) + " %" + (fanLocked ? " (locked)" : ""));
+    lv_obj_set_style_text_color(_louvreLabel, isManual ? bright : dim, 0);
+    const bool fanDimmed = !isManual || fanLocked;
     lv_obj_set_style_text_color(_fanLabel, fanDimmed ? dim : bright, 0);
     if (_louvreMinusButton)
-        styleButton(_louvreMinusButton, isAuto ? TFT_DARKGREY : TFT_BLUE);
+        styleButton(_louvreMinusButton, isManual ? TFT_BLUE : TFT_DARKGREY);
     if (_louvrePlusButton)
-        styleButton(_louvrePlusButton, isAuto ? TFT_DARKGREY : TFT_ORANGE);
+        styleButton(_louvrePlusButton, isManual ? TFT_ORANGE : TFT_DARKGREY);
     if (_fanMinusButton)
         styleButton(_fanMinusButton, fanDimmed ? TFT_DARKGREY : TFT_BLUE);
     if (_fanPlusButton)
@@ -778,9 +983,8 @@ void Display::printerStatisticUpdate(const PrinterSnapshot &snap)
         return;
     if (!snap.state.length())
         return;
-    lv_label_set_text(_stateLabel, ("State: " + snap.state).c_str());
-    updateTempLabel(_toolLabel, snap.toolActual, snap.toolTarget);
-    updateTempLabel(_bedLabel, snap.bedActual, snap.bedTarget);
+    setLabelTextOnce(_stateLabel, "State: " + snap.state);
+    updateTempLabel(_toolLabel, snap.toolActual, snap.toolTarget);    updateTempLabel(_bedLabel, snap.bedActual, snap.bedTarget);
     if (!_chamberSetpointSeeded && snap.chamberTarget >= CHAMBER_SETPOINT_MIN &&
         snap.chamberTarget <= CHAMBER_SETPOINT_MAX && snap.chamberTarget != 0)
     {
@@ -793,12 +997,14 @@ void Display::printerStatisticUpdate(const PrinterSnapshot &snap)
     else
         updateTempLabel(_chamberLabel, snap.chamberActual, 0);
     if (_chamberCurrentLabel)
-        lv_label_set_text(_chamberCurrentLabel, (String(snap.chamberActual, 1) + " C").c_str());
+        setLabelTextOnce(_chamberCurrentLabel, String(snap.chamberActual, 1) + " C");
     refreshChamberDetail();
 }
 
 void Display::jobUpdate(const PrinterSnapshot &snap)
 {
+    // Material-auto runs even before labels exist so profile state is correct.
+    autoSelectMaterial(snap.filament, snap.printing || snap.paused);
     if (!_progressBar || !_progressLabel || !_layerLabel || !_timeLabel || !_lastLayerLabel || !_filamentLabel || !_nozzleLabel || !_fileNameLabel)
         return;
     const String fileName = snap.fileName;
@@ -811,8 +1017,8 @@ void Display::jobUpdate(const PrinterSnapshot &snap)
         _displayedFileName = baseName;
         lv_label_set_text(_fileNameLabel, baseName.length() ? baseName.c_str() : "--");
     }
-    lv_label_set_text(_filamentLabel, snap.filament.c_str());
-    lv_label_set_text(_nozzleLabel, (snap.nozzle).c_str());
+    setLabelTextOnce(_filamentLabel, snap.filament);
+    setLabelTextOnce(_nozzleLabel, snap.nozzle);
     if (!snap.printing && !snap.paused)
         return;
     float progress = snap.progress;

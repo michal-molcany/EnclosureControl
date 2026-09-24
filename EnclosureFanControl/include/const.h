@@ -35,10 +35,10 @@
 #define PETG_COOLDOWN_MAX_MS (20UL * 60UL * 1000UL) // failsafe: leave PETG state after 20min
 
 // Temperature Regulation - ASA/ABS/Others
-// Hysteresis band: open louvre at >= 40, run fan above 45,
+// Hysteresis band: open louvre at >= 40, run fan above 50,
 // close again below 38 to avoid 1Hz flapping.
 #define TEMP_ASA_ENCLOSURE_THRESHOLD 40 // open louvre at/above this
-#define TEMP_ASA_CHAMBER_TARGET 45      // PID setpoint + fan threshold
+#define TEMP_ASA_CHAMBER_TARGET 50      // PID setpoint + fan threshold
 #define TEMP_ASA_CLOSE_THRESHOLD 38     // close louvre below this
 #define TEMP_ASA_FAN_SCALE 0.3f         // 30% of normal fan speed (gentle)
 #define ASA_MAX_MS (3UL * 60UL * 60UL * 1000UL) // failsafe: leave ASA state after 3h
