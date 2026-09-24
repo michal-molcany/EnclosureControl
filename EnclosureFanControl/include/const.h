@@ -54,4 +54,8 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 #define PID_SETPOINT 30
 #define PID_UPDATE_INTERVAL 1000 // 1 second
 
+// OctoPrint background poll interval (FreeRTOS task, CYD-style). Loop only
+// copies the latest snapshot and never blocks on the network.
+#define OCTO_POLL_INTERVAL_MS 5000 // 5 seconds
+
 #endif // ENCLOSURE_CONST_H

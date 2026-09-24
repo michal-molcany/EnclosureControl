@@ -2,8 +2,8 @@
 #define TEMPERATURE_REGULATION_H
 
 #include <Arduino.h>
-#include <OctoPrinter.h>
 #include <enclosure_proto.h>
+#include "octo_poller.h"
 
 // Forward declaration
 class ServoLouver;
@@ -28,7 +28,8 @@ public:
 class TemperatureRegulation
 {
 private:
-    OctoPrinter *printer;
+    OctoSnapshot lastSnap; // last-good snapshot (keep-last-good across failed polls)
+    bool hasGoodData = false;
     ServoLouver *louver;
     PIDController pidController;
     bool fanActive;
@@ -65,33 +66,35 @@ private:
     uint8_t getCurrentFanSpeed(float chamberTemp);
 
     // Material type detection (normalized: trimmed + upper-cased)
-    String getMaterialType(); // raw from OctoPrinter
+    String getMaterialType(); // raw from last snapshot
     static String normalizeMaterial(const String &raw);
     bool materialContains(const String &norm, const char *token);
 
-    // State management
-    void updatePLALogic();
-    void updatePETGLogic();
-    void updateASALogic();
+    // State management (snapshot-driven, never touch the network here)
+    void updatePLALogic(const OctoSnapshot &snap);
+    void updatePETGLogic(const OctoSnapshot &snap);
+    void updateASALogic(const OctoSnapshot &snap);
     void updateManualLogic();
     void transitionToState(MaterialState newState);
 
     // Helper functions
-    bool isDataValid();
-    bool isPLATrigger(const String &normMaterial);
-    bool isPETGTrigger(const String &normMaterial);
-    bool isASATrigger(const String &normMaterial);
+    static bool isDataValid(const OctoSnapshot &s);
+    bool isPLATrigger(const String &normMaterial, bool isPrinting, double nozzleTemp);
+    bool isPETGTrigger(const String &normMaterial, bool isPrinting, double chamberTemp);
+    bool isASATrigger(const String &normMaterial, bool isPrinting);
     void openLouvre();
     void closeLouvre();
 
 public:
-    TemperatureRegulation(OctoPrinter *octoPrinter, ServoLouver *servoLouver);
+    explicit TemperatureRegulation(ServoLouver *servoLouver);
 
     // Initialize temperature regulation
     void begin();
 
-    // Main update function - call this in the main loop
-    void update();
+    // Main update function - call this in the main loop with the latest
+    // snapshot copy (non-blocking). Keeps regulating on last-good data
+    // when the fresh copy is invalid; fan stays off until first good data.
+    void update(const OctoSnapshot &snap);
 
     // Control functions
     void setFanSpeed(uint8_t speed); // 0-255
