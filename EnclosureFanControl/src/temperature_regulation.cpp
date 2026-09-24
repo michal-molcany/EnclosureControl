@@ -75,8 +75,8 @@ void PIDController::reset()
 
 // ==================== TemperatureRegulation Implementation ====================
 
-TemperatureRegulation::TemperatureRegulation(OctoPrinter *octoPrinter, ServoLouver *servoLouver)
-    : printer(octoPrinter), louver(servoLouver), pidController(PID_KP, PID_KI, PID_KD, PID_SETPOINT),
+TemperatureRegulation::TemperatureRegulation(ServoLouver *servoLouver)
+    : louver(servoLouver), pidController(PID_KP, PID_KI, PID_KD, PID_SETPOINT),
       fanActive(false), lastFanSpeed(0), louvreOpen(false), lastUpdate(0), printEndTime(0),
       printEndValid(false), printWasActive(false), lastMaterial(""),
       invalidSince(0), currentState(IDLE), stateEnteredAt(0)
@@ -95,19 +95,44 @@ void TemperatureRegulation::begin()
     Serial.println("TemperatureRegulation initialized");
 }
 
-void TemperatureRegulation::update()
+void TemperatureRegulation::update(const OctoSnapshot &snap)
 {
     // Prevent too frequent updates
     if (millis() - lastUpdate < PID_UPDATE_INTERVAL)
         return;
     lastUpdate = millis();
 
-    bool isPrinting = printer->printing();
+    // Keep-last-good: latch fresh valid data, otherwise reuse the last-good
+    // snapshot so a single failed poll doesn't stall regulation.
+    // Fan stays off until the first good snapshot arrives.
+    OctoSnapshot effective;
+    bool haveData = false;
+    if (isDataValid(snap))
+    {
+        lastSnap = snap;
+        hasGoodData = true;
+        invalidSince = 0;
+        effective = snap;
+        haveData = true;
+    }
+    else if (hasGoodData)
+    {
+        if (invalidSince == 0)
+        {
+            invalidSince = millis();
+            Serial.println("[WARN] OctoPrint data invalid - using last-good snapshot");
+        }
+        effective = lastSnap;
+        haveData = true;
+    }
+
+    bool isPrinting = haveData ? effective.printing : false;
+    String liveFilament = haveData ? effective.filament : String("");
 
     // Latch material while printing for post-print windows (filament may clear after end).
     if (isPrinting)
     {
-        String norm = normalizeMaterial(printer->filamentName());
+        String norm = normalizeMaterial(liveFilament);
         if (norm.length() > 0)
             lastMaterial = norm;
         printWasActive = true;
@@ -140,7 +165,7 @@ void TemperatureRegulation::update()
         }
     }
 
-    if (!isDataValid())
+    if (!haveData)
     {
         if (invalidSince == 0)
         {
@@ -150,25 +175,24 @@ void TemperatureRegulation::update()
         stopFan();
         return;
     }
-    invalidSince = 0;
 
     // Automatic mode: a remote setpoint from the display overrides material targets.
     if (hasRemoteSetpoint)
         pidController.setSetpoint(remoteSetpoint);
 
-    String normMaterial = normalizeMaterial(isPrinting ? printer->filamentName() : lastMaterial);
+    String normMaterial = normalizeMaterial(isPrinting ? liveFilament : lastMaterial);
     // Fall back to live name if latched copy is empty (e.g. boot mid-print).
     if (normMaterial.length() == 0)
-        normMaterial = normalizeMaterial(printer->filamentName());
+        normMaterial = normalizeMaterial(liveFilament);
 
     // Material-change preemption: switch directly between cooling states.
     if (currentState != IDLE && isPrinting)
     {
-        if (currentState != PLA_COOLING && isPLATrigger(normMaterial))
+        if (currentState != PLA_COOLING && isPLATrigger(normMaterial, isPrinting, effective.toolActual))
             transitionToState(PLA_COOLING);
-        else if (currentState != PETG_COOLING && isPETGTrigger(normMaterial))
+        else if (currentState != PETG_COOLING && isPETGTrigger(normMaterial, isPrinting, effective.chamberActual))
             transitionToState(PETG_COOLING);
-        else if (currentState != ASA_ABS_COOLING && isASATrigger(normMaterial))
+        else if (currentState != ASA_ABS_COOLING && isASATrigger(normMaterial, isPrinting))
             transitionToState(ASA_ABS_COOLING);
     }
 
@@ -178,46 +202,46 @@ void TemperatureRegulation::update()
     case IDLE:
         if (isPrinting)
         {
-            if (isPLATrigger(normMaterial))
+            if (isPLATrigger(normMaterial, isPrinting, effective.toolActual))
                 transitionToState(PLA_COOLING);
-            else if (isPETGTrigger(normMaterial))
+            else if (isPETGTrigger(normMaterial, isPrinting, effective.chamberActual))
                 transitionToState(PETG_COOLING);
-            else if (isASATrigger(normMaterial))
+            else if (isASATrigger(normMaterial, isPrinting))
                 transitionToState(ASA_ABS_COOLING);
         }
         else
         {
             // Post-print PETG cooling can start after the print ended.
-            if (isPETGTrigger(normMaterial))
+            if (isPETGTrigger(normMaterial, isPrinting, effective.chamberActual))
                 transitionToState(PETG_COOLING);
         }
         break;
 
     case PLA_COOLING:
-        updatePLALogic();
+        updatePLALogic(effective);
         break;
 
     case PETG_COOLING:
-        updatePETGLogic();
+        updatePETGLogic(effective);
         break;
 
     case ASA_ABS_COOLING:
-        updateASALogic();
+        updateASALogic(effective);
         break;
     }
 }
 
 // ==================== Material-Specific Logic ====================
 
-void TemperatureRegulation::updatePLALogic()
+void TemperatureRegulation::updatePLALogic(const OctoSnapshot &snap)
 {
     // PLA: open louvre and regulate chamber to 30°C with PID.
     // Run while printing; after print keep running until the bed cools
     // to TEMP_PLA_BED_COOLDOWN or the failsafe timeout expires.
 
-    double chamberTemp = printer->chamberActual();
-    double bedTemp = printer->bedActual();
-    bool isPrinting = printer->printing();
+    double chamberTemp = snap.chamberActual;
+    double bedTemp = snap.bedActual;
+    bool isPrinting = snap.printing;
 
     if (isPrinting)
     {
@@ -264,13 +288,13 @@ void TemperatureRegulation::updatePLALogic()
     Serial.println(fanSpeed);
 }
 
-void TemperatureRegulation::updatePETGLogic()
+void TemperatureRegulation::updatePETGLogic(const OctoSnapshot &snap)
 {
     // PETG: during print keep louvre open but fan off (avoid warping / stringing).
     // After print, cool only if chamber >= threshold, down to target.
 
-    double chamberTemp = printer->chamberActual();
-    bool isPrinting = printer->printing();
+    double chamberTemp = snap.chamberActual;
+    bool isPrinting = snap.printing;
 
     if (isPrinting)
     {
@@ -323,14 +347,14 @@ void TemperatureRegulation::updatePETGLogic()
     }
 }
 
-void TemperatureRegulation::updateASALogic()
+void TemperatureRegulation::updateASALogic(const OctoSnapshot &snap)
 {
     // ASA/ABS: keep chamber warm. Louvre opens at >= threshold, fan runs
     // gently only above target, everything closes below close-threshold.
     // While still printing we stay in this state (no flapping to IDLE).
 
-    double chamberTemp = printer->chamberActual();
-    bool isPrinting = printer->printing();
+    double chamberTemp = snap.chamberActual;
+    bool isPrinting = snap.printing;
 
     bool timedOut = (millis() - stateEnteredAt) >= ASA_MAX_MS;
     if (timedOut)
@@ -448,9 +472,8 @@ void TemperatureRegulation::applyRemoteCommand(const EnclosureCommand &cmd)
 
 // ==================== Trigger Detection ====================
 
-bool TemperatureRegulation::isPLATrigger(const String &normMaterial)
+bool TemperatureRegulation::isPLATrigger(const String &normMaterial, bool isPrinting, double nozzleTemp)
 {
-    bool isPrinting = printer->printing();
     if (!isPrinting)
         return false;
 
@@ -460,17 +483,14 @@ bool TemperatureRegulation::isPLATrigger(const String &normMaterial)
     // Fallback: unknown/empty filament name + nozzle in PLA range.
     if (normMaterial.length() == 0 || normMaterial == "UNKNOWN" || normMaterial == "UNKN")
     {
-        double nozzleTemp = printer->toolActual();
         return (nozzleTemp >= (TEMP_PLA_NOZZLE_TARGET - TEMP_PLA_NOZZLE_TOLERANCE) &&
                 nozzleTemp <= (TEMP_PLA_NOZZLE_TARGET + TEMP_PLA_NOZZLE_TOLERANCE));
     }
     return false;
 }
 
-bool TemperatureRegulation::isPETGTrigger(const String &normMaterial)
+bool TemperatureRegulation::isPETGTrigger(const String &normMaterial, bool isPrinting, double chamberTemp)
 {
-    bool isPrinting = printer->printing();
-
     if (isPrinting)
         return materialContains(normMaterial, "PETG");
 
@@ -482,15 +502,13 @@ bool TemperatureRegulation::isPETGTrigger(const String &normMaterial)
     bool petgPostPrint = materialContains(normMaterial, "PETG") || materialContains(lastMaterial, "PETG");
     if (petgPostPrint && sinceEnd < (PETG_POSTPRINT_MS + PETG_COOLDOWN_MAX_MS))
     {
-        double chamberTemp = printer->chamberActual();
         return chamberTemp >= TEMP_PETG_CHAMBER_THRESHOLD;
     }
     return false;
 }
 
-bool TemperatureRegulation::isASATrigger(const String &normMaterial)
+bool TemperatureRegulation::isASATrigger(const String &normMaterial, bool isPrinting)
 {
-    bool isPrinting = printer->printing();
     if (!isPrinting)
         return false;
 
@@ -517,7 +535,7 @@ bool TemperatureRegulation::isASATrigger(const String &normMaterial)
 
 String TemperatureRegulation::getMaterialType()
 {
-    return printer->filamentName();
+    return hasGoodData ? lastSnap.filament : String("");
 }
 
 String TemperatureRegulation::normalizeMaterial(const String &raw)
@@ -536,12 +554,12 @@ bool TemperatureRegulation::materialContains(const String &norm, const char *tok
     return norm.indexOf(t) >= 0;
 }
 
-bool TemperatureRegulation::isDataValid()
+bool TemperatureRegulation::isDataValid(const OctoSnapshot &s)
 {
-    if (printer->closedOrError())
+    if (!s.valid || s.closedOrError)
         return false;
     // All-zero readings mean no successful poll yet / printer unreachable.
-    if (printer->toolActual() == 0 && printer->bedActual() == 0 && printer->chamberActual() == 0)
+    if (s.toolActual == 0 && s.bedActual == 0 && s.chamberActual == 0)
         return false;
     return true;
 }

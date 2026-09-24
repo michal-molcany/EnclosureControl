@@ -97,7 +97,7 @@ private:
     lv_obj_t *_fanPlusButton = nullptr;
     lv_obj_t *_autoButton = nullptr;
     lv_obj_t *_manualButton = nullptr;
-    ChamberControl _chamberControl = ChamberControl::Manual;
+    ChamberControl _chamberControl = ChamberControl::Auto;
     int _chamberSetpoint = CHAMBER_SETPOINT_DEFAULT;
     bool _chamberSetpointSeeded = false;
     int _louvreOpen = LOUVRE_DEFAULT;
