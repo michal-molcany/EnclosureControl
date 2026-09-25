@@ -79,7 +79,8 @@ TemperatureRegulation::TemperatureRegulation(ServoLouver *servoLouver)
     : louver(servoLouver), pidController(PID_KP, PID_KI, PID_KD, PID_SETPOINT),
       fanActive(false), lastFanSpeed(0), louvreOpen(false), lastUpdate(0), printEndTime(0),
       printEndValid(false), printWasActive(false), lastMaterial(""),
-      invalidSince(0), currentState(IDLE), stateEnteredAt(0)
+      invalidSince(0), usingRemoteSetpoint(false), lastAppliedSetpoint(-1),
+      currentState(IDLE), stateEnteredAt(0)
 {
 }
 
@@ -176,9 +177,7 @@ void TemperatureRegulation::update(const OctoSnapshot &snap)
         return;
     }
 
-    // Automatic mode: a remote setpoint from the display overrides material targets.
-    if (hasRemoteSetpoint)
-        pidController.setSetpoint(remoteSetpoint);
+    applyActiveSetpoint();
 
     String normMaterial = normalizeMaterial(isPrinting ? liveFilament : lastMaterial);
     // Fall back to live name if latched copy is empty (e.g. boot mid-print).
@@ -315,7 +314,8 @@ void TemperatureRegulation::updatePETGLogic(const OctoSnapshot &snap)
         return;
     }
 
-    if (chamberTemp >= TEMP_PETG_CHAMBER_THRESHOLD && chamberTemp > TEMP_PETG_CHAMBER_TARGET)
+    const int target = pidController.getSetpoint();
+    if (chamberTemp >= TEMP_PETG_CHAMBER_THRESHOLD && chamberTemp > target)
     {
         if (!louvreOpen)
             openLouvre();
@@ -326,11 +326,11 @@ void TemperatureRegulation::updatePETGLogic(const OctoSnapshot &snap)
         Serial.print("[PETG] Cooling from ");
         Serial.print(chamberTemp);
         Serial.print("°C to target ");
-        Serial.print(TEMP_PETG_CHAMBER_TARGET);
+        Serial.print(target);
         Serial.print("°C, Fan speed: ");
         Serial.println(fanSpeed);
     }
-    else if (chamberTemp <= TEMP_PETG_CHAMBER_TARGET)
+    else if (chamberTemp <= target)
     {
         // Target reached (or chamber was never hot): done.
         stopFan();
@@ -374,7 +374,7 @@ void TemperatureRegulation::updateASALogic(const OctoSnapshot &snap)
             Serial.println("[ASA/ABS] Enclosure temperature high - opening louvre");
         }
 
-        if (chamberTemp > TEMP_ASA_CHAMBER_TARGET)
+        if (chamberTemp > pidController.getSetpoint())
         {
             // Gentle cooling: PID against the ASA setpoint, scaled down.
             uint8_t fanSpeed = (uint8_t)(getCurrentFanSpeed(chamberTemp) * TEMP_ASA_FAN_SCALE);
@@ -614,6 +614,48 @@ void TemperatureRegulation::closeLouvre()
     }
 }
 
+void TemperatureRegulation::applyActiveSetpoint()
+{
+    const bool useRemote = remoteLinkAlive() && hasRemoteSetpoint;
+    int target = PID_SETPOINT;
+    if (useRemote)
+    {
+        target = remoteSetpoint;
+    }
+    else
+    {
+        switch (currentState)
+        {
+        case PLA_COOLING:
+            target = TEMP_PLA_CHAMBER_TARGET;
+            break;
+        case PETG_COOLING:
+            target = TEMP_PETG_CHAMBER_TARGET;
+            break;
+        case ASA_ABS_COOLING:
+            target = TEMP_ASA_CHAMBER_TARGET;
+            break;
+        case IDLE:
+        default:
+            target = PID_SETPOINT;
+            break;
+        }
+    }
+
+    if (usingRemoteSetpoint != useRemote)
+    {
+        usingRemoteSetpoint = useRemote;
+        Serial.println(useRemote ? "[LINK] Using CYD setpoint"
+                                 : "[LINK] CYD unavailable - using material target");
+    }
+    if (lastAppliedSetpoint != target)
+    {
+        pidController.reset();
+        lastAppliedSetpoint = target;
+    }
+    pidController.setSetpoint(target);
+}
+
 void TemperatureRegulation::transitionToState(MaterialState newState)
 {
     if (newState != currentState)
@@ -621,23 +663,7 @@ void TemperatureRegulation::transitionToState(MaterialState newState)
         currentState = newState;
         stateEnteredAt = millis();
         pidController.reset();
-        // Per-material PID setpoints (previously fixed at 30 for all states).
-        switch (newState)
-        {
-        case PLA_COOLING:
-            pidController.setSetpoint(TEMP_PLA_CHAMBER_TARGET);
-            break;
-        case PETG_COOLING:
-            pidController.setSetpoint(TEMP_PETG_CHAMBER_TARGET);
-            break;
-        case ASA_ABS_COOLING:
-            pidController.setSetpoint(TEMP_ASA_CHAMBER_TARGET);
-            break;
-        case IDLE:
-        default:
-            pidController.setSetpoint(PID_SETPOINT);
-            break;
-        }
+        applyActiveSetpoint();
 
         Serial.print("State transition: ");
         Serial.println(getCurrentState());

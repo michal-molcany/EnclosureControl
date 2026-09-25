@@ -11,6 +11,9 @@ This project involves using an ESP32 microcontroller to monitor and display the 
 - Shows print progress percentage
 - Displays estimated print time remaining
 - Connects to OctoPrint server via WiFi
+- Controls the enclosure C3 over ESP-NOW
+
+For the exact CYD ↔ C3 packet layout, timing, fallback behavior, and security limitations, see [`ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md).
 
 ## Hardware Requirements
 

@@ -22,6 +22,7 @@ public:
     // Cooling PID: output grows when currentValue rises above setpoint.
     float calculate(float currentValue);
     void setSetpoint(float newSetpoint);
+    int getSetpoint() const { return (int)setpoint; }
     void reset();
 };
 
@@ -50,6 +51,8 @@ private:
     uint8_t manualFanPct = 0;    // 0-100, MANUAL only
     unsigned long lastRemoteRxMs = 0;
     bool hasRemoteRx = false;
+    bool usingRemoteSetpoint = false;
+    int lastAppliedSetpoint = -1;
     uint8_t lastLouvrePct = 0; // 0-100, tracked for telemetry
 
     // Material states
@@ -75,6 +78,7 @@ private:
     void updatePETGLogic(const OctoSnapshot &snap);
     void updateASALogic(const OctoSnapshot &snap);
     void updateManualLogic();
+    void applyActiveSetpoint();
     void transitionToState(MaterialState newState);
 
     // Helper functions
