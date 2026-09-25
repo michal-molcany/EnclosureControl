@@ -40,6 +40,7 @@ public:
     };
     static const MaterialPreset MATERIAL_PRESETS[MATERIAL_COUNT];
     static int matchMaterialIndex(const String &filament);
+    static uint8_t classifyFilament(const String &filament);
 
     void Initialization();
     void splashScreen(String message);
@@ -139,6 +140,7 @@ private:
     int _chamberSetpoint = CHAMBER_SETPOINT_DEFAULT;
     bool _chamberSetpointSeeded = false;
     int _materialIndex = MATERIAL_DEFAULT_INDEX;
+    uint8_t _commandMaterial = ENC_MATERIAL_PLA;
     int _louvreOpen = LOUVRE_DEFAULT;
     int _fanSpeed = FAN_DEFAULT;
     String _octoFilament;
@@ -148,6 +150,8 @@ private:
     bool _isDrawn = false;
     bool _jobLayoutInitialized = false;
     bool _jobLayoutActive = false;
+    bool _jobActive = false;
+    bool _enclosureCommandDirty = false;
     String _jobFileName;
     String _displayedFileName;
     String _lastRemaining;

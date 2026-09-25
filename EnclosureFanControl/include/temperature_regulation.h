@@ -29,7 +29,7 @@ public:
 class TemperatureRegulation
 {
 private:
-    OctoSnapshot lastSnap; // last-good snapshot (keep-last-good across failed polls)
+    OctoSnapshot lastSnap;
     bool hasGoodData = false;
     ServoLouver *louver;
     PIDController pidController;
@@ -37,57 +37,48 @@ private:
     uint8_t lastFanSpeed;
     bool louvreOpen;
     unsigned long lastUpdate;
-    unsigned long printEndTime;
-    bool printEndValid;
-    bool printWasActive;
-    String lastMaterial; // upper-cased, latched while printing (for post-print windows)
-    unsigned long invalidSince; // millis when data first went invalid (0 = valid)
+    unsigned long invalidSince;
+    bool jobWasActive = false;
+    uint8_t lastMaterial = ENC_MATERIAL_UNKNOWN;
+    bool emergencyActive = false;
+    bool emergencyCancelRequested = false;
 
-    // Remote control (PrinterDisplay via ESP-NOW)
-    uint8_t controlMode = ENC_MODE_AUTO; // EnclosureMode
-    uint8_t remoteSetpoint = 0;          // desired chamber C, AUTO only
+    uint8_t controlMode = ENC_MODE_AUTO;
+    uint8_t remoteSetpoint = 0;
     bool hasRemoteSetpoint = false;
-    uint8_t manualLouvrePct = 0; // 0-100, MANUAL only
-    uint8_t manualFanPct = 0;    // 0-100, MANUAL only
+    uint8_t remoteMaterial = ENC_MATERIAL_UNKNOWN;
+    bool hasRemoteMaterial = false;
+    bool remoteJobActive = false;
+    uint8_t manualLouvrePct = 0;
+    uint8_t manualFanPct = 0;
     unsigned long lastRemoteRxMs = 0;
     bool hasRemoteRx = false;
     bool usingRemoteSetpoint = false;
     int lastAppliedSetpoint = -1;
-    uint8_t lastLouvrePct = 0; // 0-100, tracked for telemetry
+    uint8_t lastLouvrePct = 0;
 
-    // Material states
     enum MaterialState
     {
         IDLE,
-        PLA_COOLING,
-        PETG_COOLING,
-        ASA_ABS_COOLING
-    } currentState;
-    unsigned long stateEnteredAt;
+        ACTIVE_AUTO,
+        COOLING_FAN,
+        COOLING_PASSIVE
+    } currentState = IDLE;
 
-    // PID fan control
-    uint8_t getCurrentFanSpeed(float chamberTemp);
-
-    // Material type detection (normalized: trimmed + upper-cased)
-    String getMaterialType(); // raw from last snapshot
-    static String normalizeMaterial(const String &raw);
-    bool materialContains(const String &norm, const char *token);
-
-    // State management (snapshot-driven, never touch the network here)
-    void updatePLALogic(const OctoSnapshot &snap);
-    void updatePETGLogic(const OctoSnapshot &snap);
-    void updateASALogic(const OctoSnapshot &snap);
-    void updateManualLogic();
-    void applyActiveSetpoint();
+    float coolingDemand(float chamberTemp);
+    void updateAutomatic(double chamberTemp);
+    void updateManual();
+    bool updateEmergency(double chamberTemp);
+    void applyActiveSetpoint(uint8_t material);
     void transitionToState(MaterialState newState);
-
-    // Helper functions
     static bool isDataValid(const OctoSnapshot &s);
-    bool isPLATrigger(const String &normMaterial, bool isPrinting, double nozzleTemp);
-    bool isPETGTrigger(const String &normMaterial, bool isPrinting, double chamberTemp);
-    bool isASATrigger(const String &normMaterial, bool isPrinting);
-    void openLouvre();
-    void closeLouvre();
+    static uint8_t classifyMaterial(const String &raw);
+    static bool validRemoteMaterial(uint8_t material);
+    static int materialTarget(uint8_t material);
+    static bool louvreOnly(uint8_t material);
+    void setLouvrePercent(uint8_t percent);
+    void setFanPercent(uint8_t percent);
+    void closeOutputs();
 
 public:
     explicit TemperatureRegulation(ServoLouver *servoLouver);
@@ -116,6 +107,7 @@ public:
     uint8_t fanPercent() const;  // 0-100
     uint8_t louvrePercent() const; // 0-100
     bool remoteLinkAlive() const;
+    bool jobIsActive() const { return jobWasActive; }
 };
 
 #endif

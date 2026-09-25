@@ -4,12 +4,12 @@
 
 The PrinterDisplay CYD and EnclosureFanControl C3 use ESP-NOW for low-latency enclosure control. Two packet types share one unidirectional flow each:
 
-- **CYD → C3:** `EnclosureCommand` — desired enclosure mode and values.
+- **CYD → C3:** `EnclosureCommand` — desired enclosure mode, values, material, and job state.
 - **C3 → CYD:** `EnclosureTelemetry` — live enclosure state.
 
 The shared C/C++ definitions are in [`lib/EnclosureProto/src/enclosure_proto.h`](lib/EnclosureProto/src/enclosure_proto.h).
 
-OctoPrint data is **not** transferred over ESP-NOW. Both boards poll OctoPrint independently over Wi-Fi.
+Actual temperatures are **not** transferred over ESP-NOW. Both boards poll OctoPrint independently; CYD forwards its control mode, setpoint, material classification, and active-job state.
 
 ## Transport and pairing
 
@@ -43,7 +43,7 @@ The structs are not packed. Alignment padding is included in the transmitted pac
 ## CYD → C3: `EnclosureCommand`
 
 **Direction:** PrinterDisplay CYD to EnclosureFanControl C3  
-**Size:** 8 bytes  
+**Size:** 10 bytes
 **Sent:** immediately after a UI change, then repeated every `ENC_CMD_HEARTBEAT_INTERVAL_MS` (2 seconds)
 
 ### Byte layout
@@ -56,22 +56,25 @@ The structs are not packed. Alignment padding is included in the transmitted pac
 | 4 | 1 | `setpoint` | Desired chamber temperature in whole °C, used in AUTO |
 | 5 | 1 | `louvrePct` | Desired louvre position 0–100%, used in MANUAL |
 | 6 | 1 | `fanPct` | Desired fan output 0–100%, used in MANUAL |
-| 7 | 1 | padding | Struct tail padding; normally zero |
+| 7 | 1 | `material` | `EnclosureMaterial` classification used for automatic strategy and cooldown |
+| 8 | 1 | `jobActive` | Printing or paused job is active |
+| 9 | 1 | padding | Struct tail padding; normally zero |
 
 The CYD sends a complete command every time. Fields that do not apply to the current mode are still present:
 
 - **Material tab:** `mode = AUTO`, `setpoint = selected material profile temperature`.
 - **Temp tab:** `mode = AUTO`, `setpoint = user-selected chamber temperature`.
 - **Manual tab:** `mode = MANUAL`, `louvrePct` and `fanPct` contain the selected outputs.
+- `material` and `jobActive` describe the CYD's current OctoPrint-derived material and whether a printing or paused job is active.
 
-The C3 currently accepts a valid AUTO setpoint from **10–80°C**. The current CYD UI constrains its setpoint to **20–60°C**.
+The C3 accepts a valid AUTO setpoint from **20–60°C**.
 
 In MANUAL mode, C3 clamps louvre and fan values above 100% to 100%.
 
 ### Example: AUTO, 30°C, sequence 7
 
 ```text
-4E 45 07 00 1E 00 00 00
+4E 45 07 00 1E 00 00 00 01 00
 ```
 
 | Byte | Value |
@@ -82,12 +85,14 @@ In MANUAL mode, C3 clamps louvre and fan values above 100% to 100%.
 | `setpoint` | `1E` = 30°C |
 | `louvrePct` | `00` |
 | `fanPct` | `00` |
+| `material` | `00` = PLA |
+| `jobActive` | `01` |
 | padding | `00` |
 
 ### Example: MANUAL, 40% louvre, 50% fan, sequence 8
 
 ```text
-4E 45 08 01 1E 28 32 00
+4E 45 08 01 1E 28 32 00 00 00
 ```
 
 The setpoint remains in the packet but is ignored while the mode is MANUAL.
@@ -130,7 +135,7 @@ When OctoPrint chamber data is invalid, C3 sends `ENC_CHAMBER_INVALID`, which is
 | 2 | `ENC_STATE_PETG` | PETG cooling state |
 | 3 | `ENC_STATE_ASA` | ASA/ABS and other high-temperature material state |
 
-The state comes from C3's own OctoPrint material detection. It is not the material profile selected on CYD.
+The state reflects the material and cooldown phase currently applied by C3, using CYD material data while the link is alive and C3 OctoPrint material as fallback.
 
 ### Mode values
 
@@ -194,21 +199,20 @@ ESP-NOW's send callback on C3 tracks local send success/failure counters, but th
 
 ## Desired-temperature ownership and fallback
 
-While CYD is available, CYD is the primary source of the desired chamber temperature.
+While CYD is available, CYD is the primary source of mode, setpoint, material, and job state. C3 continues to use its own chamber sensor and OctoPrint connection for temperature, emergency cancellation, and fallback data.
 
 C3 considers CYD unavailable after **10 seconds without receiving any valid CYD command**. On timeout:
 
-- C3 falls back to its material target.
-- PLA target: **30°C**.
-- PETG target: **30°C**.
-- ASA/ABS target: **50°C**.
+- C3 falls back to its own OctoPrint material and active-job state.
+- PLA/PETG target: **30°C**.
+- TPU target: **35°C**.
+- ASA/ABS/Nylon/other high-temperature target: **50°C**.
+- Unknown material uses the conservative 50°C, louvre-only automatic strategy.
 - The PID controller is reset when the active setpoint source or target changes.
 
 If CYD is in MANUAL mode when the link is lost, C3 returns to automatic control and then follows the fallback policy above.
 
-When CYD commands resume, its latest AUTO setpoint becomes primary again and overrides the material fallback target.
-
-C3 still uses its own OctoPrint material detection to select the cooling strategy, louvre behavior, cooldown logic, and fallback target. CYD separately uses OctoPrint material data to select and send its material profile setpoint.
+When CYD commands resume, its latest mode, setpoint, material, and job state become primary again.
 
 ## Validation and failure handling
 

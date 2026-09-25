@@ -17,11 +17,13 @@ namespace
     SemaphoreHandle_t snapshotMutex = nullptr;
     OctoSnapshot shared;
     volatile bool hasData = false;
+    volatile bool cancelRequested = false;
 
     void publishSnapshot()
     {
         OctoSnapshot copy;
         copy.printing = api.printing();
+        copy.paused = api.paused();
         copy.filament = api.filamentName();
         copy.toolActual = api.toolActual();
         copy.bedActual = api.bedActual();
@@ -39,13 +41,23 @@ namespace
 
     void pollTask(void *)
     {
+#if SERIAL_DEBUG
         Serial.println("[octoPoll] task started, begin()...");
+#endif
         api.begin();
+#if SERIAL_DEBUG
         Serial.println("[octoPoll] begin() done");
+#endif
         for (;;)
         {
             if (WiFi.status() == WL_CONNECTED)
             {
+                if (cancelRequested)
+                {
+                    cancelRequested = false;
+                    const int status = api.cancelJob();
+                    Serial.printf("[octoPoll] cancel job HTTP %d\n", status);
+                }
                 api.update();
                 publishSnapshot();
             }
@@ -76,4 +88,9 @@ bool octoPollerCopy(OctoSnapshot &out)
 bool octoPollerHasData()
 {
     return hasData;
+}
+
+void octoPollerRequestCancel()
+{
+    cancelRequested = true;
 }

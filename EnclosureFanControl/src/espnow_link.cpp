@@ -1,5 +1,6 @@
 #include "espnow_link.h"
 #include "temperature_regulation.h"
+#include "const.h"
 
 #include <WiFi.h>
 #include <esp_now.h>
@@ -72,8 +73,10 @@ namespace
 } // namespace
 
 void espnowLinkBegin(const uint8_t *peerMacIn){
+#if SERIAL_DEBUG
     Serial.print("[LINK] own MAC: ");
     Serial.println(WiFi.macAddress());
+#endif
 
     memcpy(peerMac, peerMacIn, 6);
     peerSet = !isZeroMac(peerMac);
@@ -92,8 +95,10 @@ void espnowLinkBegin(const uint8_t *peerMacIn){
         int ch = WiFi.channel();
         if (addOrUpdatePeer(ch))
         {
+#if SERIAL_DEBUG
             Serial.print("[LINK] peer added on channel ");
             Serial.println(ch);
+#endif
         }
         else
         {
@@ -130,6 +135,7 @@ void espnowLinkPoll(TemperatureRegulation &reg, double chamberTemp, bool chamber
     if (!peerSet && (now - lastReminderMs >= 10000UL))
     {
         lastReminderMs = now;
+#if SERIAL_DEBUG
         Serial.print("[LINK] own MAC ");
         Serial.print(WiFi.macAddress());
         Serial.print(" | ip ");
@@ -137,6 +143,7 @@ void espnowLinkPoll(TemperatureRegulation &reg, double chamberTemp, bool chamber
         Serial.print(" ch ");
         Serial.print(WiFi.channel());
         Serial.println(" | set ENC_PEER_MAC to enable TX");
+#endif
     }
 
     // ESP-NOW only works on the STA channel; follow AP channel changes.
@@ -148,8 +155,10 @@ void espnowLinkPoll(TemperatureRegulation &reg, double chamberTemp, bool chamber
         {
             if (addOrUpdatePeer(ch))
             {
+#if SERIAL_DEBUG
                 Serial.print("[LINK] peer channel resync -> ");
                 Serial.println(ch);
+#endif
             }
         }
     }
@@ -167,7 +176,12 @@ void espnowLinkPoll(TemperatureRegulation &reg, double chamberTemp, bool chamber
         tele.state = reg.stateCode();
         tele.mode = reg.controlModeCode();
         if (esp_now_send(peerMac, (const uint8_t *)&tele, sizeof(tele)) != ESP_OK)
+        {
             ++txFail;
+#if SERIAL_DEBUG
+            Serial.println("[LINK] telemetry send failed");
+#endif
+        }
     }
 }
 

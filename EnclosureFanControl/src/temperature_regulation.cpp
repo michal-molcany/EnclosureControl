@@ -2,14 +2,11 @@
 #include "const.h"
 #include "servo_louver.h"
 
-// ==================== PWM compat (Arduino-ESP32 v2 vs v3) ====================
-
 static void fanPwmInit()
 {
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
     ledcAttach(FAN_PIN, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
 #else
-    // Channel 4 (timer 2): channel 0 / timer 0 belongs to the servo (50 Hz).
     ledcSetup(FAN_PWM_CHANNEL, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
     ledcAttachPin(FAN_PIN, FAN_PWM_CHANNEL);
 #endif
@@ -24,41 +21,58 @@ static void fanPwmWrite(uint8_t value)
 #endif
 }
 
-// ==================== PIDController Implementation ====================
+static bool materialHasToken(const String &material, const char *token)
+{
+    if (material.length() == 0 || token == nullptr)
+        return false;
 
-PIDController::PIDController(float _kp, float _ki, float _kd, float _setpoint)
-    : kp(_kp), ki(_ki), kd(_kd), setpoint(_setpoint),
+    const int tokenLength = strlen(token);
+    if (tokenLength == 0)
+        return false;
+
+    auto isLetter = [](char value) {
+        return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+    };
+
+    for (int start = material.indexOf(token); start >= 0; start = material.indexOf(token, start + 1))
+    {
+        const int end = start + tokenLength;
+        const bool leftBoundary = start == 0 || !isLetter(material[start - 1]);
+        const bool rightBoundary = end >= material.length() || !isLetter(material[end]);
+        if (leftBoundary && rightBoundary)
+            return true;
+    }
+    return false;
+}
+
+PIDController::PIDController(float kpValue, float kiValue, float kdValue, float target)
+    : kp(kpValue), ki(kiValue), kd(kdValue), setpoint(target),
       lastError(0), integral(0), lastTime(millis())
 {
 }
 
 float PIDController::calculate(float currentValue)
 {
-    unsigned long currentTime = millis();
-    float timeStep = (currentTime - lastTime) / 1000.0; // Convert to seconds
+    const unsigned long currentTime = millis();
+    const float timeStep = (currentTime - lastTime) / 1000.0f;
     lastTime = currentTime;
 
     if (timeStep <= 0)
         return 0;
 
-    // Cooling: positive error (too hot) -> positive output (fan on).
-    // Previously this was (setpoint - current), which ran the fan when cold.
-    float error = currentValue - setpoint;
-
-    // Only integrate positive (cooling demand) error to avoid windup while cold.
+    const float error = currentValue - setpoint;
     if (error > 0)
         integral += error * timeStep;
     else
-        integral *= 0.9f; // decay stale integral when at/below target
+        integral *= 0.9f;
 
-    // Anti-windup: limit integral
-    integral = constrain(integral, -100, 100);
+    integral = constrain(integral, 0.0f, 200.0f);
 
-    float derivative = (error - lastError) / timeStep;
+    const float derivative = (error - lastError) / timeStep;
     lastError = error;
 
-    float output = kp * error + ki * integral + kd * derivative;
-    return constrain(output, 0.0, 255.0); // Output for PWM (0-255)
+    const float output = kp * error + ki * integral + kd * derivative;
+    return constrain(output, 0.0f, 200.0f);
 }
 
 void PIDController::setSetpoint(float newSetpoint)
@@ -73,14 +87,10 @@ void PIDController::reset()
     lastTime = millis();
 }
 
-// ==================== TemperatureRegulation Implementation ====================
-
 TemperatureRegulation::TemperatureRegulation(ServoLouver *servoLouver)
     : louver(servoLouver), pidController(PID_KP, PID_KI, PID_KD, PID_SETPOINT),
-      fanActive(false), lastFanSpeed(0), louvreOpen(false), lastUpdate(0), printEndTime(0),
-      printEndValid(false), printWasActive(false), lastMaterial(""),
-      invalidSince(0), usingRemoteSetpoint(false), lastAppliedSetpoint(-1),
-      currentState(IDLE), stateEnteredAt(0)
+      fanActive(false), lastFanSpeed(0), louvreOpen(false), lastUpdate(0),
+      invalidSince(0)
 {
 }
 
@@ -91,563 +101,226 @@ void TemperatureRegulation::begin()
     fanPwmWrite(0);
     fanActive = false;
     lastFanSpeed = 0;
-    stateEnteredAt = millis();
-
+    lastLouvrePct = 0;
+    lastUpdate = millis();
+    pidController.reset();
+#if SERIAL_DEBUG
     Serial.println("TemperatureRegulation initialized");
+#endif
 }
 
 void TemperatureRegulation::update(const OctoSnapshot &snap)
 {
-    // Prevent too frequent updates
-    if (millis() - lastUpdate < PID_UPDATE_INTERVAL)
+    const unsigned long now = millis();
+    if (now - lastUpdate < PID_UPDATE_INTERVAL)
         return;
-    lastUpdate = millis();
+    lastUpdate = now;
 
-    // Keep-last-good: latch fresh valid data, otherwise reuse the last-good
-    // snapshot so a single failed poll doesn't stall regulation.
-    // Fan stays off until the first good snapshot arrives.
-    OctoSnapshot effective;
-    bool haveData = false;
-    if (isDataValid(snap))
+    OctoSnapshot effective = snap;
+    bool haveData = isDataValid(snap);
+    if (haveData)
     {
         lastSnap = snap;
         hasGoodData = true;
         invalidSince = 0;
-        effective = snap;
-        haveData = true;
     }
     else if (hasGoodData)
     {
         if (invalidSince == 0)
         {
-            invalidSince = millis();
+            invalidSince = now;
+#if SERIAL_DEBUG
             Serial.println("[WARN] OctoPrint data invalid - using last-good snapshot");
+#endif
         }
         effective = lastSnap;
         haveData = true;
     }
 
-    bool isPrinting = haveData ? effective.printing : false;
-    String liveFilament = haveData ? effective.filament : String("");
+    const bool useRemote = remoteLinkAlive();
+    const bool jobActive = useRemote
+                               ? remoteJobActive
+                               : haveData && (effective.printing || effective.paused);
 
-    // Latch material while printing for post-print windows (filament may clear after end).
-    if (isPrinting)
+    uint8_t material = ENC_MATERIAL_UNKNOWN;
+    if (useRemote && hasRemoteMaterial)
+        material = remoteMaterial;
+    else if (haveData)
+        material = classifyMaterial(effective.filament);
+
+    if (jobActive)
     {
-        String norm = normalizeMaterial(liveFilament);
-        if (norm.length() > 0)
-            lastMaterial = norm;
-        printWasActive = true;
+        lastMaterial = material;
+        jobWasActive = true;
     }
-
-    // Check if print just ended
-    if (printWasActive && !isPrinting)
+    else if (jobWasActive)
     {
-        printWasActive = false;
-        printEndTime = millis();
-        printEndValid = true;
+        jobWasActive = false;
+        const MaterialState cooldownState =
+            (lastMaterial == ENC_MATERIAL_PLA || lastMaterial == ENC_MATERIAL_PETG)
+                ? COOLING_FAN
+                : COOLING_PASSIVE;
+        transitionToState(cooldownState);
+#if SERIAL_DEBUG
         Serial.println("Print ended - starting cooldown sequence");
+#endif
     }
 
-    // Remote manual control bypasses the material state machine entirely
-    // and does not depend on OctoPrint data.
+    if (jobActive)
+        transitionToState(ACTIVE_AUTO);
+
+    if (haveData && updateEmergency(effective.chamberActual))
+        return;
+
     if (controlMode == ENC_MODE_MANUAL)
     {
-        if (hasRemoteRx && (millis() - lastRemoteRxMs > ENC_LINK_LOSS_TIMEOUT_MS))
+        if (useRemote)
         {
-            controlMode = ENC_MODE_AUTO;
-            pidController.reset();
-            Serial.println("[LINK] Manual link lost - falling back to AUTO");
-            // fall through to automatic logic below
-        }
-        else
-        {
-            updateManualLogic();
+            updateManual();
             return;
         }
+
+        controlMode = ENC_MODE_AUTO;
+        pidController.reset();
+#if SERIAL_DEBUG
+        Serial.println("[LINK] Manual link lost - falling back to AUTO");
+#endif
     }
 
     if (!haveData)
     {
         if (invalidSince == 0)
         {
-            invalidSince = millis();
-            Serial.println("[WARN] OctoPrint data invalid - holding state (fan off)");
+            invalidSince = now;
+#if SERIAL_DEBUG
+            Serial.println("[WARN] OctoPrint data invalid - holding outputs closed");
+#endif
         }
-        stopFan();
+        closeOutputs();
         return;
     }
 
-    applyActiveSetpoint();
-
-    String normMaterial = normalizeMaterial(isPrinting ? liveFilament : lastMaterial);
-    // Fall back to live name if latched copy is empty (e.g. boot mid-print).
-    if (normMaterial.length() == 0)
-        normMaterial = normalizeMaterial(liveFilament);
-
-    // Material-change preemption: switch directly between cooling states.
-    if (currentState != IDLE && isPrinting)
+    if (currentState == COOLING_FAN)
     {
-        if (currentState != PLA_COOLING && isPLATrigger(normMaterial, isPrinting, effective.toolActual))
-            transitionToState(PLA_COOLING);
-        else if (currentState != PETG_COOLING && isPETGTrigger(normMaterial, isPrinting, effective.chamberActual))
-            transitionToState(PETG_COOLING);
-        else if (currentState != ASA_ABS_COOLING && isASATrigger(normMaterial, isPrinting))
-            transitionToState(ASA_ABS_COOLING);
-    }
-
-    // Execute material-specific logic
-    switch (currentState)
-    {
-    case IDLE:
-        if (isPrinting)
+        if (effective.chamberActual < TEMP_FAN_COOLDOWN_END)
         {
-            if (isPLATrigger(normMaterial, isPrinting, effective.toolActual))
-                transitionToState(PLA_COOLING);
-            else if (isPETGTrigger(normMaterial, isPrinting, effective.chamberActual))
-                transitionToState(PETG_COOLING);
-            else if (isASATrigger(normMaterial, isPrinting))
-                transitionToState(ASA_ABS_COOLING);
-        }
-        else
-        {
-            // Post-print PETG cooling can start after the print ended.
-            if (isPETGTrigger(normMaterial, isPrinting, effective.chamberActual))
-                transitionToState(PETG_COOLING);
-        }
-        break;
-
-    case PLA_COOLING:
-        updatePLALogic(effective);
-        break;
-
-    case PETG_COOLING:
-        updatePETGLogic(effective);
-        break;
-
-    case ASA_ABS_COOLING:
-        updateASALogic(effective);
-        break;
-    }
-}
-
-// ==================== Material-Specific Logic ====================
-
-void TemperatureRegulation::updatePLALogic(const OctoSnapshot &snap)
-{
-    // PLA: open louvre and regulate chamber to 30°C with PID.
-    // Run while printing; after print keep running until the bed cools
-    // to TEMP_PLA_BED_COOLDOWN or the failsafe timeout expires.
-
-    double chamberTemp = snap.chamberActual;
-    double bedTemp = snap.bedActual;
-    bool isPrinting = snap.printing;
-
-    if (isPrinting)
-    {
-        if (!louvreOpen)
-            openLouvre();
-        uint8_t fanSpeed = getCurrentFanSpeed(chamberTemp);
-        setFanSpeed(fanSpeed);
-
-        Serial.print("[PLA] Chamber: ");
-        Serial.print(chamberTemp);
-        Serial.print("°C, Bed: ");
-        Serial.print(bedTemp);
-        Serial.print("°C, Fan speed: ");
-        Serial.println(fanSpeed);
-        return;
-    }
-
-    // Not printing anymore.
-    bool pastMinWindow = !printEndValid || (millis() - printEndTime >= PLA_POSTPRINT_MIN_MS);
-    bool timedOut = (millis() - stateEnteredAt) >= PLA_COOLDOWN_MAX_MS;
-
-    if (bedTemp <= TEMP_PLA_BED_COOLDOWN || timedOut)
-    {
-        stopFan();
-        closeLouvre();
-        transitionToState(IDLE);
-        Serial.println(timedOut ? "[PLA] Failsafe timeout - returning to IDLE"
-                                : "[PLA] Cooldown complete - returning to IDLE");
-        return;
-    }
-
-    // Bed still hot (or within minimum post-print window): keep cooling.
-    (void)pastMinWindow; // window is a minimum; bed temperature governs the exit
-    if (!louvreOpen)
-        openLouvre();
-    uint8_t fanSpeed = getCurrentFanSpeed(chamberTemp);
-    setFanSpeed(fanSpeed);
-
-    Serial.print("[PLA] Post-print Chamber: ");
-    Serial.print(chamberTemp);
-    Serial.print("°C, Bed: ");
-    Serial.print(bedTemp);
-    Serial.print("°C, Fan speed: ");
-    Serial.println(fanSpeed);
-}
-
-void TemperatureRegulation::updatePETGLogic(const OctoSnapshot &snap)
-{
-    // PETG: during print keep louvre open but fan off (avoid warping / stringing).
-    // After print, cool only if chamber >= threshold, down to target.
-
-    double chamberTemp = snap.chamberActual;
-    bool isPrinting = snap.printing;
-
-    if (isPrinting)
-    {
-        if (!louvreOpen)
-            openLouvre();
-        stopFan();
-        return;
-    }
-
-    bool timedOut = (millis() - stateEnteredAt) >= PETG_COOLDOWN_MAX_MS;
-
-    if (timedOut)
-    {
-        stopFan();
-        closeLouvre();
-        transitionToState(IDLE);
-        Serial.println("[PETG] Failsafe timeout - returning to IDLE");
-        return;
-    }
-
-    const int target = pidController.getSetpoint();
-    if (chamberTemp >= TEMP_PETG_CHAMBER_THRESHOLD && chamberTemp > target)
-    {
-        if (!louvreOpen)
-            openLouvre();
-
-        uint8_t fanSpeed = getCurrentFanSpeed(chamberTemp);
-        setFanSpeed(fanSpeed);
-
-        Serial.print("[PETG] Cooling from ");
-        Serial.print(chamberTemp);
-        Serial.print("°C to target ");
-        Serial.print(target);
-        Serial.print("°C, Fan speed: ");
-        Serial.println(fanSpeed);
-    }
-    else if (chamberTemp <= target)
-    {
-        // Target reached (or chamber was never hot): done.
-        stopFan();
-        closeLouvre();
-        transitionToState(IDLE);
-        Serial.println("[PETG] Chamber cooled to target - returning to IDLE");
-    }
-    else
-    {
-        // Between target and threshold: hold louvre open, fan off.
-        if (!louvreOpen)
-            openLouvre();
-        stopFan();
-    }
-}
-
-void TemperatureRegulation::updateASALogic(const OctoSnapshot &snap)
-{
-    // ASA/ABS: keep chamber warm. Louvre opens at >= threshold, fan runs
-    // gently only above target, everything closes below close-threshold.
-    // While still printing we stay in this state (no flapping to IDLE).
-
-    double chamberTemp = snap.chamberActual;
-    bool isPrinting = snap.printing;
-
-    bool timedOut = (millis() - stateEnteredAt) >= ASA_MAX_MS;
-    if (timedOut)
-    {
-        stopFan();
-        closeLouvre();
-        transitionToState(IDLE);
-        Serial.println("[ASA/ABS] Failsafe timeout - returning to IDLE");
-        return;
-    }
-
-    if (chamberTemp >= TEMP_ASA_ENCLOSURE_THRESHOLD)
-    {
-        if (!louvreOpen)
-        {
-            openLouvre();
-            Serial.println("[ASA/ABS] Enclosure temperature high - opening louvre");
-        }
-
-        if (chamberTemp > pidController.getSetpoint())
-        {
-            // Gentle cooling: PID against the ASA setpoint, scaled down.
-            uint8_t fanSpeed = (uint8_t)(getCurrentFanSpeed(chamberTemp) * TEMP_ASA_FAN_SCALE);
-            setFanSpeed(fanSpeed);
-
-            Serial.print("[ASA/ABS] Slow cooling from ");
-            Serial.print(chamberTemp);
-            Serial.print("°C, Fan speed (slow): ");
-            Serial.println(fanSpeed);
-        }
-        else
-        {
-            stopFan(); // warm enough to vent passively, no forced cooling
-        }
-        return;
-    }
-
-    // Below open threshold.
-    if (chamberTemp <= TEMP_ASA_CLOSE_THRESHOLD || !isPrinting)
-    {
-        stopFan();
-        closeLouvre();
-        if (!isPrinting)
-        {
+            closeOutputs();
             transitionToState(IDLE);
-            Serial.println("[ASA/ABS] Print done and chamber normal - returning to IDLE");
+#if SERIAL_DEBUG
+            Serial.println("[COOLING] Fan cooldown complete");
+#endif
         }
-    }
-    else
-    {
-        // Hysteresis band (38-40°C): hold position, fan off.
-        stopFan();
-    }
-}
-
-// ==================== Remote Manual Logic ====================
-
-void TemperatureRegulation::updateManualLogic()
-{
-    if (louver)
-    {
-        louver->setPercent(manualLouvrePct);
-        lastLouvrePct = manualLouvrePct;
-        louvreOpen = (manualLouvrePct > 0);
-    }
-    uint8_t pwm = (uint8_t)(((uint16_t)manualFanPct * 255U) / 100U);
-    setFanSpeed(pwm);
-
-    Serial.print("[MAN] Louvre: ");
-    Serial.print(manualLouvrePct);
-    Serial.print("%, Fan: ");
-    Serial.print(manualFanPct);
-    Serial.println("%");
-}
-
-void TemperatureRegulation::applyRemoteCommand(const EnclosureCommand &cmd)
-{
-    if (cmd.magic != ENC_PROTO_MAGIC)
+        else
+        {
+            setLouvrePercent(100);
+            setFanPercent(100);
+        }
         return;
-    lastRemoteRxMs = millis();
-    hasRemoteRx = true;
-
-    if (cmd.mode == ENC_MODE_MANUAL)
-    {
-        controlMode = ENC_MODE_MANUAL;
-        manualLouvrePct = cmd.louvrePct > 100 ? 100 : cmd.louvrePct;
-        manualFanPct = cmd.fanPct > 100 ? 100 : cmd.fanPct;
-        Serial.print("[LINK] MANUAL louvre=");
-        Serial.print(manualLouvrePct);
-        Serial.print("% fan=");
-        Serial.print(manualFanPct);
-        Serial.println("%");
     }
-    else
+
+    if (currentState == COOLING_PASSIVE)
     {
-        if (controlMode != ENC_MODE_AUTO)
+        setFanPercent(0);
+        if (effective.chamberActual < TEMP_PASSIVE_COOLDOWN_END)
         {
-            controlMode = ENC_MODE_AUTO;
-            pidController.reset();
-            Serial.println("[LINK] AUTO mode");
+            setLouvrePercent(0);
+            transitionToState(IDLE);
+#if SERIAL_DEBUG
+            Serial.println("[COOLING] Passive cooldown complete");
+#endif
         }
-        if (cmd.setpoint >= 10 && cmd.setpoint <= 80)
+        else if (effective.chamberActual < TEMP_PASSIVE_COOLDOWN_START)
         {
-            if (!hasRemoteSetpoint || remoteSetpoint != cmd.setpoint)
-            {
-                Serial.print("[LINK] AUTO setpoint=");
-                Serial.print(cmd.setpoint);
-                Serial.println("C");
-            }
-            remoteSetpoint = cmd.setpoint;
-            hasRemoteSetpoint = true;
+            setLouvrePercent(100);
         }
+        else
+        {
+            setLouvrePercent(0);
+        }
+        return;
     }
-}
 
-// ==================== Trigger Detection ====================
-
-bool TemperatureRegulation::isPLATrigger(const String &normMaterial, bool isPrinting, double nozzleTemp)
-{
-    if (!isPrinting)
-        return false;
-
-    if (materialContains(normMaterial, "PLA"))
-        return true;
-
-    // Fallback: unknown/empty filament name + nozzle in PLA range.
-    if (normMaterial.length() == 0 || normMaterial == "UNKNOWN" || normMaterial == "UNKN")
+    if (currentState != ACTIVE_AUTO)
     {
-        return (nozzleTemp >= (TEMP_PLA_NOZZLE_TARGET - TEMP_PLA_NOZZLE_TOLERANCE) &&
-                nozzleTemp <= (TEMP_PLA_NOZZLE_TARGET + TEMP_PLA_NOZZLE_TOLERANCE));
+        closeOutputs();
+        return;
     }
-    return false;
+
+    updateAutomatic(effective.chamberActual);
 }
 
-bool TemperatureRegulation::isPETGTrigger(const String &normMaterial, bool isPrinting, double chamberTemp)
+bool TemperatureRegulation::updateEmergency(double chamberTemp)
 {
-    if (isPrinting)
-        return materialContains(normMaterial, "PETG");
-
-    // Post-print: latched PETG material within window, or still hot chamber
-    // shortly after any print (covers filament name clearing on job end).
-    if (!printEndValid)
-        return false;
-    unsigned long sinceEnd = millis() - printEndTime;
-    bool petgPostPrint = materialContains(normMaterial, "PETG") || materialContains(lastMaterial, "PETG");
-    if (petgPostPrint && sinceEnd < (PETG_POSTPRINT_MS + PETG_COOLDOWN_MAX_MS))
+    if (!emergencyActive && chamberTemp >= TEMP_EMERGENCY_TRIGGER)
     {
-        return chamberTemp >= TEMP_PETG_CHAMBER_THRESHOLD;
+        emergencyActive = true;
+        pidController.reset();
+        if (!emergencyCancelRequested)
+        {
+            octoPollerRequestCancel();
+            emergencyCancelRequested = true;
+        }
+        Serial.println("[EMERGENCY] 55C reached - cancelling print and forcing maximum cooling");
     }
-    return false;
-}
 
-bool TemperatureRegulation::isASATrigger(const String &normMaterial, bool isPrinting)
-{
-    if (!isPrinting)
-        return false;
-
-    if (materialContains(normMaterial, "ASA") || materialContains(normMaterial, "ABS"))
-        return true;
-
-    // Explicitly handled materials that are NOT high-temp.
-    if (materialContains(normMaterial, "PLA") || materialContains(normMaterial, "PETG"))
-        return false;
-
-    // Known high-temp / engineering materials default to ASA behaviour.
-    static const char *highTemp[] = {"TPU", "PC", "NYLON", "PA", "HIPS", "PVA", "WOOD", "FLEX", "PP", "PPS", "PEI", "ULTEM"};
-    for (const char *m : highTemp)
+    if (emergencyActive && chamberTemp < TEMP_EMERGENCY_CLEAR)
     {
-        if (materialContains(normMaterial, m))
-            return true;
+        emergencyActive = false;
+        emergencyCancelRequested = false;
+        pidController.reset();
+        Serial.println("[EMERGENCY] Temperature safe - restoring selected control");
     }
 
-    // Empty/unknown while printing: stay conservative (louvre closed unless hot).
-    return (normMaterial.length() == 0 || normMaterial == "UNKNOWN" || normMaterial == "UNKN");
-}
-
-// ==================== Helper Functions ====================
-
-String TemperatureRegulation::getMaterialType()
-{
-    return hasGoodData ? lastSnap.filament : String("");
-}
-
-String TemperatureRegulation::normalizeMaterial(const String &raw)
-{
-    String s = raw;
-    s.trim();
-    s.toUpperCase();
-    return s;
-}
-
-bool TemperatureRegulation::materialContains(const String &norm, const char *token)
-{
-    if (norm.length() == 0 || token == nullptr)
+    if (!emergencyActive)
         return false;
-    String t(token);
-    return norm.indexOf(t) >= 0;
-}
 
-bool TemperatureRegulation::isDataValid(const OctoSnapshot &s)
-{
-    if (!s.valid || s.closedOrError)
-        return false;
-    // All-zero readings mean no successful poll yet / printer unreachable.
-    if (s.toolActual == 0 && s.bedActual == 0 && s.chamberActual == 0)
-        return false;
+    setLouvrePercent(100);
+    setFanPercent(100);
     return true;
 }
 
-uint8_t TemperatureRegulation::getCurrentFanSpeed(float chamberTemp)
+void TemperatureRegulation::updateAutomatic(double chamberTemp)
 {
-    // Use PID controller to calculate fan speed based on chamber temperature
-    float pidOutput = pidController.calculate(chamberTemp);
-    return (uint8_t)pidOutput;
+    applyActiveSetpoint(lastMaterial);
+
+    float demand = coolingDemand((float)chamberTemp);
+    if (louvreOnly(lastMaterial))
+        demand = constrain(demand, 0.0f, 100.0f);
+
+    const uint8_t louvrePercent = demand >= 100.0f ? 100 : (uint8_t)lroundf(demand);
+    uint8_t fanPercent = 0;
+    if (!louvreOnly(lastMaterial) && demand > 100.0f)
+        fanPercent = (uint8_t)constrain(lroundf(demand) - 100, 0, 100);
+
+    setLouvrePercent(louvrePercent);
+    setFanPercent(fanPercent);
 }
 
-void TemperatureRegulation::setFanSpeed(uint8_t speed)
+void TemperatureRegulation::updateManual()
 {
-    // Always drive the pin so speed 0 actually stops the fan.
-    // Skip redundant writes to reduce PWM churn.
-    if (speed == lastFanSpeed && (fanActive == (speed > 0)))
-        return;
-    fanPwmWrite(speed);
-    lastFanSpeed = speed;
-    fanActive = (speed > 0);
+    setLouvrePercent(manualLouvrePct);
+    setFanPercent(manualFanPct);
 }
 
-void TemperatureRegulation::stopFan()
+float TemperatureRegulation::coolingDemand(float chamberTemp)
 {
-    if (!fanActive && lastFanSpeed == 0)
-        return;
-    fanPwmWrite(0);
-    lastFanSpeed = 0;
-    fanActive = false;
-    pidController.reset();
+    return pidController.calculate(chamberTemp);
 }
 
-void TemperatureRegulation::openLouvre()
-{
-    if (!louvreOpen && louver)
-    {
-        louver->setAngle(SERVO_ON_ANGLE);
-        louvreOpen = true;
-        lastLouvrePct = 100;
-        Serial.println("Louvre opened");
-    }
-}
-
-void TemperatureRegulation::closeLouvre()
-{
-    if (louvreOpen && louver)
-    {
-        louver->setAngle(SERVO_OFF_ANGLE);
-        louvreOpen = false;
-        lastLouvrePct = 0;
-        Serial.println("Louvre closed");
-    }
-}
-
-void TemperatureRegulation::applyActiveSetpoint()
+void TemperatureRegulation::applyActiveSetpoint(uint8_t material)
 {
     const bool useRemote = remoteLinkAlive() && hasRemoteSetpoint;
-    int target = PID_SETPOINT;
-    if (useRemote)
-    {
-        target = remoteSetpoint;
-    }
-    else
-    {
-        switch (currentState)
-        {
-        case PLA_COOLING:
-            target = TEMP_PLA_CHAMBER_TARGET;
-            break;
-        case PETG_COOLING:
-            target = TEMP_PETG_CHAMBER_TARGET;
-            break;
-        case ASA_ABS_COOLING:
-            target = TEMP_ASA_CHAMBER_TARGET;
-            break;
-        case IDLE:
-        default:
-            target = PID_SETPOINT;
-            break;
-        }
-    }
+    const int target = useRemote ? remoteSetpoint : materialTarget(material);
 
     if (usingRemoteSetpoint != useRemote)
     {
         usingRemoteSetpoint = useRemote;
+#if SERIAL_DEBUG
         Serial.println(useRemote ? "[LINK] Using CYD setpoint"
                                  : "[LINK] CYD unavailable - using material target");
+#endif
     }
+
     if (lastAppliedSetpoint != target)
     {
         pidController.reset();
@@ -656,21 +329,177 @@ void TemperatureRegulation::applyActiveSetpoint()
     pidController.setSetpoint(target);
 }
 
-void TemperatureRegulation::transitionToState(MaterialState newState)
+void TemperatureRegulation::applyRemoteCommand(const EnclosureCommand &cmd)
 {
-    if (newState != currentState)
-    {
-        currentState = newState;
-        stateEnteredAt = millis();
-        pidController.reset();
-        applyActiveSetpoint();
+    if (cmd.magic != ENC_PROTO_MAGIC)
+        return;
 
-        Serial.print("State transition: ");
-        Serial.println(getCurrentState());
+    lastRemoteRxMs = millis();
+    hasRemoteRx = true;
+    remoteJobActive = cmd.jobActive != 0;
+#if SERIAL_DEBUG
+    Serial.printf("[REMOTE] mode=%u setpoint=%u material=%u job=%u louvre=%u fan=%u\n",
+                  static_cast<unsigned>(cmd.mode),
+                  static_cast<unsigned>(cmd.setpoint),
+                  static_cast<unsigned>(cmd.material),
+                  static_cast<unsigned>(cmd.jobActive),
+                  static_cast<unsigned>(cmd.louvrePct),
+                  static_cast<unsigned>(cmd.fanPct));
+#endif
+
+    if (validRemoteMaterial(cmd.material))
+    {
+        remoteMaterial = cmd.material;
+        hasRemoteMaterial = true;
+    }
+
+    if (cmd.mode == ENC_MODE_MANUAL)
+    {
+        controlMode = ENC_MODE_MANUAL;
+        manualLouvrePct = cmd.louvrePct > 100 ? 100 : cmd.louvrePct;
+        manualFanPct = cmd.fanPct > 100 ? 100 : cmd.fanPct;
+        return;
+    }
+
+    if (cmd.mode == ENC_MODE_AUTO)
+    {
+        controlMode = ENC_MODE_AUTO;
+        if (cmd.setpoint >= REMOTE_SETPOINT_MIN && cmd.setpoint <= REMOTE_SETPOINT_MAX)
+        {
+            remoteSetpoint = cmd.setpoint;
+            hasRemoteSetpoint = true;
+        }
     }
 }
 
-// ==================== Status Functions ====================
+bool TemperatureRegulation::isDataValid(const OctoSnapshot &s)
+{
+    if (!s.valid || s.closedOrError)
+        return false;
+    if (s.toolActual == 0 && s.bedActual == 0 && s.chamberActual == 0)
+        return false;
+    return isfinite(s.toolActual) && isfinite(s.bedActual) && isfinite(s.chamberActual);
+}
+
+uint8_t TemperatureRegulation::classifyMaterial(const String &raw)
+{
+    String material = raw;
+    material.trim();
+    material.toUpperCase();
+
+    if (material.length() == 0)
+        return ENC_MATERIAL_UNKNOWN;
+    if (materialHasToken(material, "PLA"))
+        return ENC_MATERIAL_PLA;
+    if (materialHasToken(material, "PETG"))
+        return ENC_MATERIAL_PETG;
+    if (materialHasToken(material, "ASA"))
+        return ENC_MATERIAL_ASA;
+    if (materialHasToken(material, "ABS"))
+        return ENC_MATERIAL_ABS;
+    if (materialHasToken(material, "TPU"))
+        return ENC_MATERIAL_TPU;
+    if (materialHasToken(material, "NYLON") || materialHasToken(material, "POLYAMIDE") ||
+        materialHasToken(material, "PA"))
+        return ENC_MATERIAL_NYLON;
+
+    static const char *highTempMaterials[] = {
+        "PC", "POLYCARBONATE", "HIPS", "PVA", "WOOD", "FLEX", "PP", "PPSU", "PPS", "PEI", "ULTEM"
+    };
+    for (const char *candidate : highTempMaterials)
+    {
+        if (materialHasToken(material, candidate))
+            return ENC_MATERIAL_HIGH_TEMP;
+    }
+
+    return ENC_MATERIAL_UNKNOWN;
+}
+
+bool TemperatureRegulation::validRemoteMaterial(uint8_t material)
+{
+    return material <= ENC_MATERIAL_UNKNOWN;
+}
+
+int TemperatureRegulation::materialTarget(uint8_t material)
+{
+    switch (material)
+    {
+    case ENC_MATERIAL_PLA:
+    case ENC_MATERIAL_PETG:
+        return TEMP_STANDARD_TARGET;
+    case ENC_MATERIAL_TPU:
+        return TEMP_TPU_TARGET;
+    case ENC_MATERIAL_ASA:
+    case ENC_MATERIAL_ABS:
+    case ENC_MATERIAL_NYLON:
+    case ENC_MATERIAL_HIGH_TEMP:
+    case ENC_MATERIAL_UNKNOWN:
+    default:
+        return TEMP_HIGH_TEMP_TARGET;
+    }
+}
+
+bool TemperatureRegulation::louvreOnly(uint8_t material)
+{
+    return material == ENC_MATERIAL_ASA ||
+           material == ENC_MATERIAL_ABS ||
+           material == ENC_MATERIAL_UNKNOWN;
+}
+
+void TemperatureRegulation::transitionToState(MaterialState newState)
+{
+    if (newState == currentState)
+        return;
+
+    currentState = newState;
+    pidController.reset();
+    if (newState == ACTIVE_AUTO)
+        applyActiveSetpoint(lastMaterial);
+#if SERIAL_DEBUG
+    Serial.printf("State transition: %s\n", getCurrentState().c_str());
+#endif
+}
+
+void TemperatureRegulation::setLouvrePercent(uint8_t percent)
+{
+    if (percent > 100)
+        percent = 100;
+    if (lastLouvrePct != percent)
+    {
+        if (louver)
+            louver->setPercent(percent);
+        lastLouvrePct = percent;
+        louvreOpen = percent > 0;
+    }
+}
+
+void TemperatureRegulation::setFanPercent(uint8_t percent)
+{
+    if (percent > 100)
+        percent = 100;
+    setFanSpeed((uint8_t)(((uint16_t)percent * 255U) / 100U));
+}
+
+void TemperatureRegulation::setFanSpeed(uint8_t speed)
+{
+    if (speed == lastFanSpeed && fanActive == (speed > 0))
+        return;
+    fanPwmWrite(speed);
+    lastFanSpeed = speed;
+    fanActive = speed > 0;
+}
+
+void TemperatureRegulation::stopFan()
+{
+    setFanPercent(0);
+    pidController.reset();
+}
+
+void TemperatureRegulation::closeOutputs()
+{
+    setLouvrePercent(0);
+    setFanPercent(0);
+}
 
 bool TemperatureRegulation::isFanActive() const
 {
@@ -684,35 +513,32 @@ bool TemperatureRegulation::isLouvreOpen() const
 
 String TemperatureRegulation::getCurrentState() const
 {
+    if (emergencyActive)
+        return "EMERGENCY";
+
     switch (currentState)
     {
+    case ACTIVE_AUTO:
+        return "AUTO";
+    case COOLING_FAN:
+        return "FAN_COOLING";
+    case COOLING_PASSIVE:
+        return "PASSIVE_COOLING";
     case IDLE:
-        return "IDLE";
-    case PLA_COOLING:
-        return "PLA_COOLING";
-    case PETG_COOLING:
-        return "PETG_COOLING";
-    case ASA_ABS_COOLING:
-        return "ASA_ABS_COOLING";
     default:
-        return "UNKNOWN";
+        return "IDLE";
     }
 }
 
 uint8_t TemperatureRegulation::stateCode() const
 {
-    switch (currentState)
-    {
-    case PLA_COOLING:
-        return ENC_STATE_PLA;
-    case PETG_COOLING:
-        return ENC_STATE_PETG;
-    case ASA_ABS_COOLING:
-        return ENC_STATE_ASA;
-    case IDLE:
-    default:
+    if (currentState == IDLE)
         return ENC_STATE_IDLE;
-    }
+    if (lastMaterial == ENC_MATERIAL_PLA)
+        return ENC_STATE_PLA;
+    if (lastMaterial == ENC_MATERIAL_PETG)
+        return ENC_STATE_PETG;
+    return ENC_STATE_ASA;
 }
 
 uint8_t TemperatureRegulation::controlModeCode() const
@@ -732,5 +558,5 @@ uint8_t TemperatureRegulation::louvrePercent() const
 
 bool TemperatureRegulation::remoteLinkAlive() const
 {
-    return hasRemoteRx && (millis() - lastRemoteRxMs <= ENC_LINK_LOSS_TIMEOUT_MS);
+    return hasRemoteRx && millis() - lastRemoteRxMs <= ENC_LINK_LOSS_TIMEOUT_MS;
 }
