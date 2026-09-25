@@ -68,6 +68,7 @@ public:
     void jobUpdate(const PrinterSnapshot &snap);
     void setPreheatButtonsVisibility(bool visible);
     void setPrintButtonsVisibility(bool visible);
+    void setJobActive(bool active);
     void setButtonActions(Action preheat215, Action preheat230, Action preheatOff,
                            Action pause, Action stop, Action resume);
 
@@ -78,6 +79,8 @@ private:
     void createChamberView();
     void refreshChamberDetail();
     void refreshEnclosureLinkHeader();
+    void applyMainJobLayout(bool active);
+    void clearJobDisplay();
     void pushEnclosureCommand();
     // Auto-switch Material profile from OctoPrint filament (Material tab only).
     void autoSelectMaterial(const String &filament, bool jobActive);
@@ -86,6 +89,12 @@ private:
 
     lv_display_t *_display = nullptr;
     lv_obj_t *_stateLabel = nullptr;
+    lv_obj_t *_toolPanel = nullptr;
+    lv_obj_t *_bedPanel = nullptr;
+    lv_obj_t *_chamberPanel = nullptr;
+    lv_obj_t *_progressPanel = nullptr;
+    lv_obj_t *_filamentPanel = nullptr;
+    lv_obj_t *_filePanel = nullptr;
     lv_obj_t *_toolLabel = nullptr;
     lv_obj_t *_bedLabel = nullptr;
     lv_obj_t *_chamberLabel = nullptr;
@@ -97,7 +106,7 @@ private:
     lv_obj_t *_lastLayerLabel = nullptr;
     lv_obj_t *_fileNameLabel = nullptr;
     lv_obj_t *_wifiBars[4] = {};
-    lv_obj_t *_encLinkLabel = nullptr; // header C3 indicator, green = link up
+    lv_obj_t *_encLinkIcon = nullptr;
     bool _encLinkUp = false;
     lv_obj_t *_splashLabel = nullptr;
     lv_obj_t *_splashSpinner = nullptr;
@@ -137,6 +146,8 @@ private:
     String _lastAutoFilament;
     EnclosureSnapshot _enclosure; // last telemetry from EnclosureFanControl
     bool _isDrawn = false;
+    bool _jobLayoutInitialized = false;
+    bool _jobLayoutActive = false;
     String _jobFileName;
     String _displayedFileName;
     String _lastRemaining;
