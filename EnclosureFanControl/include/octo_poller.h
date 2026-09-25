@@ -9,6 +9,7 @@
 struct OctoSnapshot
 {
     bool printing = false;
+    bool paused = false;
     String filament;
     double toolActual = 0;
     double bedActual = 0;
@@ -38,5 +39,6 @@ bool octoPollerCopy(OctoSnapshot &out);
 
 // True once at least one poll cycle has published data.
 bool octoPollerHasData();
+void octoPollerRequestCancel();
 
 #endif // OCTO_POLLER_H

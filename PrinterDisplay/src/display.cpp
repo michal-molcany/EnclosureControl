@@ -27,7 +27,7 @@ int Display::matchMaterialIndex(const String &filament)
 {
     const String norm = normalizeFilament(filament);
     if (norm.length() == 0)
-        return MATERIAL_DEFAULT_INDEX; // unknown/empty -> PLA 30
+        return -1;
     if (filamentContains(norm, "PLA"))
         return 0;
     if (filamentContains(norm, "PETG"))
@@ -38,9 +38,28 @@ int Display::matchMaterialIndex(const String &filament)
         return 3;
     if (filamentContains(norm, "TPU"))
         return 4;
-    if (filamentContains(norm, "NYLON") || filamentContains(norm, "PA"))
+    if (filamentContains(norm, "NYLON") || filamentContains(norm, "POLYAMIDE") ||
+        filamentContains(norm, "PA"))
         return 5;
-    return MATERIAL_DEFAULT_INDEX;
+    return -1;
+}
+
+uint8_t Display::classifyFilament(const String &filament)
+{
+    const int matched = matchMaterialIndex(filament);
+    if (matched >= 0)
+        return (uint8_t)matched;
+
+    const String norm = normalizeFilament(filament);
+    static const char *highTempMaterials[] = {
+        "PC", "POLYCARBONATE", "HIPS", "PVA", "WOOD", "FLEX", "PP", "PPSU", "PPS", "PEI", "ULTEM"
+    };
+    for (const char *candidate : highTempMaterials)
+    {
+        if (filamentContains(norm, candidate))
+            return ENC_MATERIAL_HIGH_TEMP;
+    }
+    return ENC_MATERIAL_UNKNOWN;
 }
 
 String Display::normalizeFilament(const String &raw)
@@ -55,7 +74,24 @@ bool Display::filamentContains(const String &norm, const char *token)
 {
     if (norm.length() == 0 || token == nullptr)
         return false;
-    return norm.indexOf(token) >= 0;
+
+    const int tokenLength = strlen(token);
+    if (tokenLength == 0)
+        return false;
+
+    auto isLetter = [](char value) {
+        return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+    };
+
+    for (int start = norm.indexOf(token); start >= 0; start = norm.indexOf(token, start + 1))
+    {
+        const int end = start + tokenLength;
+        const bool leftBoundary = start == 0 || !isLetter(norm[start - 1]);
+        const bool rightBoundary = end >= norm.length() || !isLetter(norm[end]);
+        if (leftBoundary && rightBoundary)
+            return true;
+    }
+    return false;
 }
 
 namespace
@@ -726,6 +762,7 @@ void Display::selectMaterial(int index)
     if (index < 0 || index >= MATERIAL_COUNT)
         return;
     _materialIndex = index;
+    _commandMaterial = (uint8_t)index;
     _chamberTab = ChamberTab::Material;
     _chamberControl = ChamberControl::Auto;
     _chamberSetpoint = constrain(MATERIAL_PRESETS[index].setpoint,
@@ -745,29 +782,41 @@ void Display::autoSelectMaterial(const String &filament, bool jobActive)
         _octoFilament = filament;
     if (!jobActive)
         return;
-    // Material tab only; Temperature/Manual never auto-switch.
     if (_chamberTab != ChamberTab::Material)
     {
+        const uint8_t detectedMaterial = classifyFilament(filament);
+        if (_commandMaterial != detectedMaterial)
+        {
+            _commandMaterial = detectedMaterial;
+            _enclosureCommandDirty = true;
+        }
         _lastAutoFilament = norm;
         return;
     }
+
     const bool startEdge = !wasActive;
     const bool changed = norm.length() > 0 && norm != _lastAutoFilament;
     if (!startEdge && !changed)
         return;
     _lastAutoFilament = norm;
-    const int matched = matchMaterialIndex(filament); // empty/unknown -> PLA
-    if (matched == _materialIndex && _chamberSetpointSeeded)
+
+    const int matched = matchMaterialIndex(filament);
+    if (matched >= 0)
     {
-        refreshChamberDetail();
-        return;
+        _materialIndex = matched;
+        _commandMaterial = (uint8_t)matched;
+        _chamberSetpoint = constrain(MATERIAL_PRESETS[matched].setpoint,
+                                     CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
     }
-    _materialIndex = matched;
-    _chamberSetpoint = constrain(MATERIAL_PRESETS[matched].setpoint,
-                                 CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
+    else
+    {
+        _commandMaterial = classifyFilament(filament);
+        _chamberSetpoint = MATERIAL_ASA_SETPOINT;
+    }
+
     _chamberSetpointSeeded = true;
+    _enclosureCommandDirty = true;
     refreshChamberDetail();
-    pushEnclosureCommand();
 }
 
 void Display::fillEnclosureCommand(EnclosureCommand &cmd) const
@@ -776,6 +825,8 @@ void Display::fillEnclosureCommand(EnclosureCommand &cmd) const
     cmd.setpoint = (uint8_t)constrain(_chamberSetpoint, 0, 255);
     cmd.louvrePct = (uint8_t)constrain(_louvreOpen, 0, 100);
     cmd.fanPct = (uint8_t)constrain(_fanSpeed, 0, 100);
+    cmd.material = _commandMaterial;
+    cmd.jobActive = _jobActive ? 1 : 0;
 }
 
 void Display::pushEnclosureCommand()
@@ -1006,15 +1057,23 @@ void Display::applyMainJobLayout(bool active)
 
 void Display::setJobActive(bool active)
 {
-    if (_jobLayoutInitialized && _jobLayoutActive == active)
-        return;
-    _jobLayoutInitialized = true;
-    _jobLayoutActive = active;
-    if (!active)
-        clearJobDisplay();
-    applyMainJobLayout(active);
-    setPreheatButtonsVisibility(!active);
-    setPrintButtonsVisibility(active);
+    const bool changed = !_jobLayoutInitialized || _jobLayoutActive != active;
+    _jobActive = active;
+    if (changed)
+    {
+        _jobLayoutInitialized = true;
+        _jobLayoutActive = active;
+        if (!active)
+            clearJobDisplay();
+        applyMainJobLayout(active);
+        setPreheatButtonsVisibility(!active);
+        setPrintButtonsVisibility(active);
+    }
+    if (changed || _enclosureCommandDirty)
+    {
+        _enclosureCommandDirty = false;
+        pushEnclosureCommand();
+    }
 }
 
 void Display::setPreheatButtonsVisibility(bool visible)

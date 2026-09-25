@@ -52,13 +52,19 @@ void ServoLouver::selfTest()
     // setAngle() rate-limits moves; begin() just parked at OFF, so let the
     // interval expire first to guarantee both moves execute.
     delay(SERVO_MIN_MOVE_INTERVAL_MS + 100);
+#if SERIAL_DEBUG
     Serial.println("Louvre self-test: opening 100%...");
+#endif
     setPercent(100);
     delay(1000);
+#if SERIAL_DEBUG
     Serial.println("Louvre self-test: closing...");
+#endif
     setAngle(SERVO_OFF_ANGLE);
     delay(SERVO_MIN_MOVE_INTERVAL_MS + 100);
+#if SERIAL_DEBUG
     Serial.println("Louvre self-test done");
+#endif
 }
 
 void ServoLouver::updateForPrinter(bool isPrinting, String filamentName)
@@ -80,10 +86,12 @@ void ServoLouver::updateForPrinter(bool isPrinting, String filamentName)
     {
         setAngle(targetAngle);
 
+#if SERIAL_DEBUG
         Serial.print("Printer is ");
         Serial.print(isPrinting ? "printing " : "idle");
         Serial.print(filamentName);
         Serial.print(", setting servo angle to ");
         Serial.println(targetAngle);
+#endif
     }
 }

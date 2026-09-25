@@ -108,6 +108,17 @@ void loop()
 
     // ESP-NOW telemetry to PrinterDisplay + inbound remote commands.
     espnowLinkPoll(tempRegulation, chamberTemp, valid);
+#if SERIAL_DEBUG
+    Serial.printf("[DBG] mode=%s state=%s temp=%.1fC valid=%u job=%u louvre=%u fan=%u link=%u\n",
+                  tempRegulation.controlModeCode() == ENC_MODE_MANUAL ? "MANUAL" : "AUTO",
+                  tempRegulation.getCurrentState().c_str(),
+                  chamberTemp,
+                  static_cast<unsigned>(valid),
+                  static_cast<unsigned>(tempRegulation.jobIsActive()),
+                  static_cast<unsigned>(tempRegulation.louvrePercent()),
+                  static_cast<unsigned>(tempRegulation.fanPercent()),
+                  static_cast<unsigned>(linked));
+#endif
   }
 
   delay(50);

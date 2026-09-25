@@ -33,6 +33,18 @@ enum EnclosureMode : uint8_t
     ENC_MODE_MANUAL = 1
 };
 
+enum EnclosureMaterial : uint8_t
+{
+    ENC_MATERIAL_PLA = 0,
+    ENC_MATERIAL_PETG = 1,
+    ENC_MATERIAL_ASA = 2,
+    ENC_MATERIAL_ABS = 3,
+    ENC_MATERIAL_TPU = 4,
+    ENC_MATERIAL_NYLON = 5,
+    ENC_MATERIAL_HIGH_TEMP = 6,
+    ENC_MATERIAL_UNKNOWN = 7
+};
+
 // C3 -> CYD, sent every TELEMETRY_INTERVAL_MS.
 struct EnclosureTelemetry
 {
@@ -50,12 +62,14 @@ struct EnclosureTelemetry
 // CYD -> C3, sent on every UI change + heartbeat.
 struct EnclosureCommand
 {
-    uint16_t magic;    // ENC_PROTO_MAGIC
-    uint8_t seq;       // wraps
-    uint8_t mode;      // EnclosureMode
-    uint8_t setpoint;  // desired chamber C, used in AUTO (20-60)
-    uint8_t louvrePct; // 0-100, used in MANUAL
-    uint8_t fanPct;    // 0-100, used in MANUAL
+    uint16_t magic;      // ENC_PROTO_MAGIC
+    uint8_t seq;         // wraps
+    uint8_t mode;        // EnclosureMode
+    uint8_t setpoint;    // desired chamber C, used in AUTO (20-60)
+    uint8_t louvrePct;   // 0-100, used in MANUAL
+    uint8_t fanPct;      // 0-100, used in MANUAL
+    uint8_t material;
+    uint8_t jobActive;
 };
 
 #define ENC_TELEMETRY_INTERVAL_MS 1000UL

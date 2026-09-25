@@ -23,11 +23,11 @@ public:
     // Init display + show splash. Safe to call before WiFi is up.
     void begin();
 
-    // Draw small chamber temp on top, big louvre/fan in the middle, small
-    // link state at the bottom. Throttled internally.
+    // Draw small chamber temp on top, big louvre/fan in the middle, and
+    // operating mode plus link state at the bottom. Throttled internally.
     // Pass valid=false when OctoPrint data is stale/offline (shows "---").
     // In manual mode the middle line shows commanded values ("ML25F60").
-    // linked=true shows "+CYD LINK OK", else "-CYD NO LINK".
+    // linked=true appends "+CYD OK", else "NO CYD".
     void update(double chamberTemp, bool valid, const String &state, bool fanActive,
                 bool manual = false, bool linked = false,
                 uint8_t louvrePct = 0, uint8_t fanPct = 0);

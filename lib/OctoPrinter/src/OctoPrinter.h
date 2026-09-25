@@ -6,7 +6,9 @@
 #include "IPAddress.h"
 #include "ArduinoJson.h"
 
+#ifndef SERIAL_DEBUG
 #define SERIAL_DEBUG 0
+#endif
 
 struct temperatureTracker
 {
