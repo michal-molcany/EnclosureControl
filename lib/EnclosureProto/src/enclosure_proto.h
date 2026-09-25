@@ -1,11 +1,11 @@
 // Shared ESP-NOW protocol: PrinterDisplay (CYD) <-> EnclosureFanControl (C3).
 //
-// Transport: ESP-NOW, fire-and-forget. Reliability comes from repetition:
-//   - C3 broadcasts telemetry every TELEMETRY_INTERVAL_MS.
+// Transport: ESP-NOW, fire-and-forget peer unicasts. Reliability comes from repetition:
+//   - C3 sends telemetry to CYD every TELEMETRY_INTERVAL_MS.
 //   - CYD sends a command on every UI change plus a CMD_HEARTBEAT_INTERVAL_MS
 //     heartbeat so a lost packet self-heals within seconds.
-// Failsafe: if the C3 hears nothing for LINK_LOSS_TIMEOUT_MS while in manual
-// mode it falls back to automatic material control.
+// Failsafe: after LINK_LOSS_TIMEOUT_MS without CYD commands, manual control
+// falls back to automatic regulation and CYD setpoints fall back to C3 material targets.
 // Pairing: static peer MACs (see ENC_PEER_MAC in each project's const.h).
 // Both boards must sit on the same WiFi channel (same AP); each side
 // re-syncs its peer channel to WiFi.channel() in its link task.
