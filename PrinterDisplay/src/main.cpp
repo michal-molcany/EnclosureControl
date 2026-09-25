@@ -58,8 +58,7 @@ void octoPrintUpdate()
     }
     disp.jobUpdate(snapshot);
     const bool activeJob = snapshot.printing || snapshot.paused;
-    disp.setPreheatButtonsVisibility(!activeJob);
-    disp.setPrintButtonsVisibility(activeJob);
+    disp.setJobActive(activeJob);
 
     // Enclosure link: feed live louvre/fan telemetry into the chamber view
     // (throttled to 1 Hz; stale data is greyed out by the view itself).

@@ -5,6 +5,7 @@
 #include "enclosure_link.h"
 
 #include "icons/icon_bed.h"
+#include "icons/icon_c3.h"
 #include "icons/icon_chamber.h"
 #include "icons/icon_fan.h"
 #include "icons/icon_filament.h"
@@ -435,13 +436,12 @@ void Display::createLabes()
         lv_obj_add_flag(_wifiBars[index], LV_OBJ_FLAG_HIDDEN);
     }
 
-    // Enclosure-link indicator in the header, left of the WiFi bars.
-    // Green "C3" = fresh telemetry, grey = stale / never received.
-    _encLinkLabel = lv_label_create(_mainContainer);
-    lv_label_set_text(_encLinkLabel, "C3");
-    lv_obj_set_pos(_encLinkLabel, 250, 5);
-    styleLabel(_encLinkLabel);
-    lv_obj_set_style_text_color(_encLinkLabel, lv_color_hex(0x808080), 0);
+    _encLinkIcon = lv_image_create(_mainContainer);
+    lv_image_set_src(_encLinkIcon, &icon_c3);
+    lv_obj_set_size(_encLinkIcon, 16, 16);
+    lv_obj_set_pos(_encLinkIcon, 252, 6);
+    lv_obj_set_style_image_recolor(_encLinkIcon, color565(0x808080), 0);
+    lv_obj_set_style_image_recolor_opa(_encLinkIcon, LV_OPA_COVER, 0);
     _encLinkUp = false;
 
     lv_obj_t *separator = lv_obj_create(_mainContainer);
@@ -450,50 +450,44 @@ void Display::createLabes()
     lv_obj_set_style_bg_color(separator, color565(FONT_COL), 0);
     lv_obj_set_style_border_width(separator, 0, 0);
 
-    lv_obj_t *toolPanel;
-    lv_obj_t *bedPanel;
-    lv_obj_t *chamberPanel;
-    lv_obj_t *progressPanel;
-    lv_obj_t *filamentPanel;
-    lv_obj_t *filePanel;
-    createPanel(_mainContainer, &toolPanel, 5, 35, 130, 36);
-    createPanel(_mainContainer, &bedPanel, 5, 76, 130, 36);
-    createPanel(_mainContainer, &chamberPanel, 5, 117, 130, 36);
-    createPanel(_mainContainer, &progressPanel, 140, 35, 175, 48);
-    createPanel(_mainContainer, &filamentPanel, 140, 88, 175, 30);
-    createPanel(_mainContainer, &filePanel, 140, 123, 175, 30);
-    lv_obj_add_flag(chamberPanel, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(chamberPanel, chamberPanelEvent, LV_EVENT_CLICKED, nullptr);
+    createPanel(_mainContainer, &_toolPanel, 5, 35, 130, 36);
+    createPanel(_mainContainer, &_bedPanel, 5, 76, 130, 36);
+    createPanel(_mainContainer, &_chamberPanel, 5, 117, 130, 36);
+    createPanel(_mainContainer, &_progressPanel, 140, 35, 175, 48);
+    createPanel(_mainContainer, &_filamentPanel, 140, 88, 175, 30);
+    createPanel(_mainContainer, &_filePanel, 140, 123, 175, 30);
+    lv_obj_add_flag(_chamberPanel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_chamberPanel, chamberPanelEvent, LV_EVENT_CLICKED, nullptr);
 
-    createPanelIcon(toolPanel, &icon_nozzle);
-    createPanelIcon(bedPanel, &icon_bed);
-    createPanelIcon(chamberPanel, &icon_chamber);
-    createPanelIcon(progressPanel, &icon_progress);
-    createPanelIcon(filamentPanel, &icon_filament);
-    lv_obj_align(createPanelIcon(filamentPanel, &icon_nozzle_size), LV_ALIGN_LEFT_MID, 82, 0);
-    _toolLabel = createPanelLabel(toolPanel, "-- / -- C", 50, 6);
-    _bedLabel = createPanelLabel(bedPanel, "-- / -- C", 50, 6);
-    _chamberLabel = createPanelLabel(chamberPanel, "-- C", 60, 6);
+    createPanelIcon(_toolPanel, &icon_nozzle);
+    createPanelIcon(_bedPanel, &icon_bed);
+    createPanelIcon(_chamberPanel, &icon_chamber);
+    createPanelIcon(_progressPanel, &icon_progress);
+    createPanelIcon(_filamentPanel, &icon_filament);
+    lv_obj_align(createPanelIcon(_filamentPanel, &icon_nozzle_size), LV_ALIGN_LEFT_MID, 82, 0);
+    _toolLabel = createPanelLabel(_toolPanel, "-- / -- C", 50, 6);
+    _bedLabel = createPanelLabel(_bedPanel, "-- / -- C", 50, 6);
+    _chamberLabel = createPanelLabel(_chamberPanel, "-- C", 60, 6);
     lv_obj_align(_toolLabel, LV_ALIGN_RIGHT_MID, -4, 0);
     lv_obj_align(_bedLabel, LV_ALIGN_RIGHT_MID, -4, 0);
     lv_obj_align(_chamberLabel, LV_ALIGN_RIGHT_MID, -4, 0);
-    _lastLayerLabel = createPanelLabel(progressPanel, "L --", 32, 2);
-    _timeLabel = createPanelLabel(progressPanel, "--", 0, 2);
+    _lastLayerLabel = createPanelLabel(_progressPanel, "L --", 32, 2);
+    _timeLabel = createPanelLabel(_progressPanel, "--", 0, 2);
     lv_obj_align(_timeLabel, LV_ALIGN_TOP_RIGHT, -4, 2);
-    _progressLabel = createPanelLabel(progressPanel, "-- %", 32, 22);
+    _progressLabel = createPanelLabel(_progressPanel, "-- %", 32, 22);
     lv_label_set_long_mode(_progressLabel, LV_LABEL_LONG_DOT);
     lv_obj_set_width(_progressLabel, 70);
-    _layerLabel = createPanelLabel(progressPanel, "L--/--", 0, 22);
+    _layerLabel = createPanelLabel(_progressPanel, "L--/--", 0, 22);
     lv_obj_align(_layerLabel, LV_ALIGN_TOP_RIGHT, -4, 22);
-    _filamentLabel = createPanelLabel(filamentPanel, "--", 32, 0);
+    _filamentLabel = createPanelLabel(_filamentPanel, "--", 32, 0);
     lv_obj_align(_filamentLabel, LV_ALIGN_LEFT_MID, 32, 0);
     lv_label_set_long_mode(_filamentLabel, LV_LABEL_LONG_DOT);
     lv_obj_set_width(_filamentLabel, 46);
-    _nozzleLabel = createPanelLabel(filamentPanel, "--", 110, 0);
+    _nozzleLabel = createPanelLabel(_filamentPanel, "--", 110, 0);
     lv_obj_align(_nozzleLabel, LV_ALIGN_LEFT_MID, 110, 0);
     lv_label_set_long_mode(_nozzleLabel, LV_LABEL_LONG_DOT);
     lv_obj_set_width(_nozzleLabel, 53);
-    _fileNameLabel = createPanelLabel(filePanel, "--", 4, 0);
+    _fileNameLabel = createPanelLabel(_filePanel, "--", 4, 0);
     lv_obj_align(_fileNameLabel, LV_ALIGN_LEFT_MID, 4, 0);
     lv_label_set_long_mode(_fileNameLabel, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_width(_fileNameLabel, 159);
@@ -544,6 +538,7 @@ void Display::createLabes()
     showMainView();
     refreshChamberDetail();
     _isDrawn = true;
+    setJobActive(false);
     Serial.printf("[HEAP] createLabes free=%u min=%u maxblock=%u lvglPool=%u lvglTest=%d\n",
                   ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
                   (unsigned)LV_MEM_SIZE, (int)lv_mem_test());
@@ -800,13 +795,13 @@ void Display::enclosureUpdate(const EnclosureSnapshot &snap)
 
 void Display::refreshEnclosureLinkHeader()
 {
-    if (!_encLinkLabel)
+    if (!_encLinkIcon)
         return;
     const bool up = _enclosure.valid && (millis() - _enclosure.rxMs < ENC_LINK_STALE_MS);
     if (up == _encLinkUp)
         return;
     _encLinkUp = up;
-    lv_obj_set_style_text_color(_encLinkLabel, up ? lv_color_hex(0x00FF00) : lv_color_hex(0x808080), 0);
+    lv_obj_set_style_image_recolor(_encLinkIcon, color565(up ? TFT_GREEN : 0x808080), 0);
 }
 
 void Display::chamberSetpointDelta(int delta)
@@ -930,6 +925,96 @@ void Display::setButtonVisibility(lv_obj_t **buttons, size_t count, bool visible
         else
             lv_obj_add_flag(buttons[index], LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+void Display::clearJobDisplay()
+{
+    _jobFileName = "";
+    _displayedFileName = "";
+    _lastRemaining = "";
+    _progressCompletion = -1;
+    _lastLayerCurrent = -1;
+    _lastLayerTotal = -1;
+    _lastLastDuration = "";
+    setLabelTextOnce(_progressLabel, "-- %");
+    setLabelTextOnce(_layerLabel, "L--/--");
+    setLabelTextOnce(_timeLabel, "--");
+    setLabelTextOnce(_lastLayerLabel, "L --");
+    setLabelTextOnce(_filamentLabel, "--");
+    setLabelTextOnce(_nozzleLabel, "--");
+    if (_progressBar)
+    {
+        lv_bar_set_value(_progressBar, 0, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(_progressBar, color565(TFT_GREEN), LV_PART_INDICATOR);
+    }
+}
+
+void Display::applyMainJobLayout(bool active)
+{
+    if (active)
+    {
+        lv_obj_set_pos(_toolPanel, 5, 35);
+        lv_obj_set_size(_toolPanel, 130, 36);
+        lv_obj_set_pos(_bedPanel, 5, 76);
+        lv_obj_set_size(_bedPanel, 130, 36);
+        lv_obj_set_pos(_chamberPanel, 5, 117);
+        lv_obj_set_size(_chamberPanel, 130, 36);
+        lv_obj_set_pos(_progressPanel, 140, 35);
+        lv_obj_set_size(_progressPanel, 175, 48);
+        lv_obj_set_pos(_filamentPanel, 140, 88);
+        lv_obj_set_size(_filamentPanel, 175, 30);
+        lv_obj_set_pos(_filePanel, 140, 123);
+        lv_obj_set_size(_filePanel, 175, 30);
+        lv_obj_set_hidden(_progressPanel, false);
+        lv_obj_set_hidden(_filamentPanel, false);
+        lv_obj_set_hidden(_filePanel, false);
+        lv_obj_set_hidden(_progressBar, false);
+        lv_obj_set_pos(_progressBar, 2, 160);
+        lv_obj_set_width(_fileNameLabel, 159);
+        lv_label_set_long_mode(_fileNameLabel, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_align(_fileNameLabel, LV_ALIGN_LEFT_MID, 4, 0);
+        for (int index = 0; index < 3; ++index)
+        {
+            lv_obj_set_pos(_preheatButtons[index], 10 + index * 90, 180);
+            lv_obj_set_pos(_printButtons[index], index == 0 ? 5 : (index == 1 ? 100 : 205), 180);
+        }
+    }
+    else
+    {
+        lv_obj_set_pos(_toolPanel, 5, 35);
+        lv_obj_set_size(_toolPanel, 145, 50);
+        lv_obj_set_pos(_bedPanel, 170, 35);
+        lv_obj_set_size(_bedPanel, 145, 50);
+        lv_obj_set_pos(_chamberPanel, 5, 95);
+        lv_obj_set_size(_chamberPanel, 145, 50);
+        lv_obj_set_pos(_filePanel, 170, 95);
+        lv_obj_set_size(_filePanel, 145, 50);
+        lv_obj_set_hidden(_progressPanel, true);
+        lv_obj_set_hidden(_filamentPanel, true);
+        lv_obj_set_hidden(_progressBar, true);
+        lv_obj_set_width(_fileNameLabel, 135);
+        lv_label_set_long_mode(_fileNameLabel, LV_LABEL_LONG_DOT);
+        setLabelTextOnce(_fileNameLabel, "No active print");
+        lv_obj_center(_fileNameLabel);
+        for (int index = 0; index < 3; ++index)
+        {
+            lv_obj_set_pos(_preheatButtons[index], 10 + index * 90, 190);
+            lv_obj_set_pos(_printButtons[index], index == 0 ? 5 : (index == 1 ? 100 : 205), 190);
+        }
+    }
+}
+
+void Display::setJobActive(bool active)
+{
+    if (_jobLayoutInitialized && _jobLayoutActive == active)
+        return;
+    _jobLayoutInitialized = true;
+    _jobLayoutActive = active;
+    if (!active)
+        clearJobDisplay();
+    applyMainJobLayout(active);
+    setPreheatButtonsVisibility(!active);
+    setPrintButtonsVisibility(active);
 }
 
 void Display::setPreheatButtonsVisibility(bool visible)
