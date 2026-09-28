@@ -27,7 +27,7 @@ String ChamberDisplay::shortState(const String &state)
     if (state == "FAN_COOLING")
         return "FAN";
     if (state == "PASSIVE_COOLING")
-        return "PASS";
+        return "PASSIVE";
     return "IDLE";
 }
 
