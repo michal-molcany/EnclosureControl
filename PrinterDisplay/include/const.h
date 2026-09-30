@@ -30,7 +30,7 @@
 #define BACKGROUND 0x18E3
 #define FONT_COL TFT_WHITE
 
-#define SERIAL_DEBUG 0
+#define SERIAL_DEBUG 1
 
 #define CHAMBER_SETPOINT_MIN 20
 #define CHAMBER_SETPOINT_MAX 60
@@ -60,6 +60,38 @@
 
 // Telemetry older than this counts as stale (greyed out / "--").
 #define ENC_LINK_STALE_MS 5000
+
+// Force the Wi-Fi channel after joining. 0 = follow the access point.
+//
+// ESP-NOW only works between peers on the same channel, and "the same SSID" does
+// not guarantee that. An AP with roaming, band steering, per-client channel
+// assignment, or a second radio broadcasting the same SSID will put two boards
+// onto different channels, and the link then fails with every send erroring and no
+// frame ever arriving.
+//
+// MEASURED ON THIS HARDWARE, both directions dead, 0 of 760 sends acknowledged:
+//   C3   bssid C6:6E:2A:01:38:C0  we=ch11  10.201.93.245
+//   CYD  bssid C6:6E:2A:01:35:D0  we=ch1   10.201.93.29
+// The peer MACs were verified correct, so the channel is the only fault. But note
+// the BSSIDs differ: the two boards are on two different AP radios broadcasting the
+// same SSID, which is a mesh or extender. A channel pin CANNOT fix that - forcing
+// this station off the AP it is associated with just gets it deauthenticated, and
+// it re-associates to the same radio it was trying to escape. So the pin stays 0
+// (follow the AP) and the fix is network-side: every AP broadcasting this SSID must
+// use one 2.4GHz channel, or the two boards must be moved onto a single radio.
+//
+// Set this to that channel in BOTH projects once the APs agree. A pin is best
+// effort: the AP re-synchronises the station on every beacon, so one it will not
+// honour costs the association, and it is abandoned after 20s rather than fought
+// forever - see EnclosureChannelPin.
+#define ENC_WIFI_CHANNEL 0
+
+// Firmware update paths (lib/HttpOta). The board serves HTTP on
+// OTA_HTTP_PORT; the uploader makes an outbound request, which works behind a
+// default Windows Firewall that would block ArduinoOTA's inbound callback.
+#define OTA_HTTP_PORT 8080
+#define OTA_HTTP_USER "enclosure"
+#define OTA_ARDUINO_HOSTNAME "enclosure-display"
 
 // ESP-NOW peer (EnclosureFanControl C3 WiFi MAC). All zeros = receive-only
 // until set. Both firmwares log their own MAC at boot - copy them over.

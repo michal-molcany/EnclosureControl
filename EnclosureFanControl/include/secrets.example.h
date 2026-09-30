@@ -14,11 +14,18 @@ class secrets
 {
 public:
     String getOctoprintApiKey();
+    String getOTAPassword();
 };
 
 inline String secrets::getOctoprintApiKey()
 {
     return "REPLACE_WITH_OCTOPRINT_API_KEY";
+}
+
+// Password for ArduinoOTA over WiFi. Leave empty to disable OTA auth.
+inline String secrets::getOTAPassword()
+{
+    return "REPLACE_WITH_OTA_PASSWORD";
 }
 
 // IP address of the OctoPrint server

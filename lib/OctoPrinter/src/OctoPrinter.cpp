@@ -409,10 +409,9 @@ void OctoPrinter::_parseLayerProgress(String json)
     Serial.println(error.c_str());
     return;
   }
-  if (SERIAL_DEBUG)
-  {
+#if OCTO_DEBUG_LOG
     Serial.println("Layer Progress JSON: " + json);
-  }
+#endif
   JsonObject layer = doc["layer"];
   if (layer.isNull())
     return;
@@ -442,10 +441,9 @@ void OctoPrinter::_parsePrinter(String json)
     return;
   }
 
-  if (SERIAL_DEBUG)
-  {
+#if OCTO_DEBUG_LOG
     Serial.println("Printer JSON: " + json);
-  }
+#endif
   JsonObject temperature = doc["temperature"];
   if (temperature.isNull())
     return;
@@ -520,10 +518,9 @@ void OctoPrinter::_parseJob(String json)
     Serial.println(error.c_str());
     return;
   }
-  if (SERIAL_DEBUG)
-  {
+#if OCTO_DEBUG_LOG
     Serial.println("Job JSON: " + json);
-  }
+#endif
   JsonObject progress = doc["progress"];
   if (progress.isNull())
   {
@@ -548,8 +545,8 @@ int OctoPrinter::_parseFilament(String json)
   {
     if (json.indexOf(_filamentName[i]) != -1)
     {
-#if (SERIAL_DEBUG)
-      Serial.println("Parsed filament: " + _filamentName[i]);
+#if OCTO_DEBUG_LOG
+        Serial.println("Parsed filament: " + _filamentName[i]);
 #endif
       return i;
     }
@@ -563,8 +560,8 @@ String OctoPrinter::_parseNozzle(String json)
   {
     if (json.indexOf(_nozzleName[i]) != -1)
     {
-#if (SERIAL_DEBUG)
-      Serial.println("Parsed nozzle: " + _nozzleName[i]);
+#if OCTO_DEBUG_LOG
+        Serial.println("Parsed nozzle: " + _nozzleName[i]);
 #endif
       return _nozzleName[i];
     }

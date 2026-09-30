@@ -13,6 +13,7 @@
 #ifndef ENCLOSURE_PROTO_H
 #define ENCLOSURE_PROTO_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define ENC_PROTO_MAGIC 0x454E // "EN"
@@ -76,5 +77,44 @@ struct EnclosureCommand
 #define ENC_CMD_HEARTBEAT_INTERVAL_MS 2000UL
 #define ENC_LINK_LOSS_TIMEOUT_MS 10000UL
 #define ENC_CHANNEL_RESYNC_MS 5000UL
+// How often each board prints its one-line link status. A silent link is the
+// hardest failure mode to debug, so both boards report on a timer rather than
+// only on state change.
+#define ENC_DIAG_INTERVAL_MS 5000UL
+
+// Why an inbound packet was discarded. Both boards use the same set so a
+// capture from either side reads the same way.
+enum EnclosureRxDrop : uint8_t
+{
+    ENC_DROP_NONE = 0,
+    ENC_DROP_LEN,    // length != sizeof(the expected struct)
+    ENC_DROP_MAGIC,  // magic != ENC_PROTO_MAGIC
+    ENC_DROP_SENDER, // source MAC != the configured peer
+    ENC_DROP_BUSY,   // snapshot mutex not acquired in time
+};
+
+// Both packet types are sent as the raw in-memory struct using sizeof(), so
+// alignment padding is part of the wire format. These asserts turn a silent
+// mismatch - which shows up only as "the link is dead" - into a build error.
+// ESP32 (CYD) and ESP32-C3 (fan control) are both 32-bit little-endian with
+// 2-byte alignment on uint16_t/int16_t, so the two layouts must agree.
+static_assert(sizeof(EnclosureTelemetry) == 10, "EnclosureTelemetry must stay 10 bytes on the wire");
+static_assert(offsetof(EnclosureTelemetry, magic) == 0, "telemetry magic offset");
+static_assert(offsetof(EnclosureTelemetry, seq) == 2, "telemetry seq offset");
+static_assert(offsetof(EnclosureTelemetry, louvrePct) == 3, "telemetry louvrePct offset");
+static_assert(offsetof(EnclosureTelemetry, fanPct) == 4, "telemetry fanPct offset");
+static_assert(offsetof(EnclosureTelemetry, chamberCx10) == 6, "telemetry chamberCx10 needs 1 pad byte at offset 5");
+static_assert(offsetof(EnclosureTelemetry, state) == 8, "telemetry state offset");
+static_assert(offsetof(EnclosureTelemetry, mode) == 9, "telemetry mode offset");
+
+static_assert(sizeof(EnclosureCommand) == 10, "EnclosureCommand must stay 10 bytes on the wire");
+static_assert(offsetof(EnclosureCommand, magic) == 0, "command magic offset");
+static_assert(offsetof(EnclosureCommand, seq) == 2, "command seq offset");
+static_assert(offsetof(EnclosureCommand, mode) == 3, "command mode offset");
+static_assert(offsetof(EnclosureCommand, setpoint) == 4, "command setpoint offset");
+static_assert(offsetof(EnclosureCommand, louvrePct) == 5, "command louvrePct offset");
+static_assert(offsetof(EnclosureCommand, fanPct) == 6, "command fanPct offset");
+static_assert(offsetof(EnclosureCommand, material) == 7, "command material offset");
+static_assert(offsetof(EnclosureCommand, jobActive) == 8, "command jobActive offset");
 
 #endif // ENCLOSURE_PROTO_H

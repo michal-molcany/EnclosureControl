@@ -2,6 +2,7 @@
 #include <ArduinoOTA.h>
 #include <WiFi.h>
 
+#include "HttpOta.h"
 #include "const.h"
 #include "display.h"
 #include "poller.h"
@@ -15,6 +16,16 @@ bool enclosure_seeded = false;
 Display disp;
 secrets sec;
 PrinterSnapshot snapshot;
+
+// The splash overlay stays up while lib/HttpOta reports busy (uploading, or
+// briefly after a failure so the reason is readable), then comes off.
+static bool otaSplashUp = false;
+
+static void otaStatus(const char *text)
+{
+    disp.splashScreen(String("OTA ") + text);
+    otaSplashUp = true;
+}
 
 void preheat215()
 {
@@ -95,9 +106,14 @@ void setup()
         disp.splashScreen("Connecting to WiFi");
     }
 
+    // Before the link starts: the link task calls esp_now_init() as its first
+    // action, so power save still enabled at that point would leave the radio in
+    // a power-saving state for the rest of the session and hurt ESP-NOW latency.
+    WiFi.setSleep(false); // mains-powered: minimize ESP-NOW latency
+
     pollerStart();
     enclosureLinkStart(ENC_PEER_MAC);
-    WiFi.setSleep(false); // mains-powered: minimize ESP-NOW latency
+
     const uint32_t bootStart = millis();
     while (!pollerHasData() && (millis() - bootStart < 20000))
     {
@@ -105,15 +121,28 @@ void setup()
         delay(100);
     }
 
-    ArduinoOTA.setHostname("enclosure-display");
+    ArduinoOTA.setHostname(OTA_ARDUINO_HOSTNAME);
     ArduinoOTA.setPassword(sec.getOTAPassword().c_str());
     ArduinoOTA.begin();
+    // Primary update path: the board listens and the uploader POSTs to it, so
+    // only outbound traffic is needed (ArduinoOTA is blocked by the host
+    // firewall - see the README).
+    HttpOta::begin(OTA_HTTP_PORT, OTA_HTTP_USER, sec.getOTAPassword().c_str(),
+                   SERIAL_DEBUG != 0, otaStatus);
     disp.createLabes();
 }
 
 void loop()
 {
     ArduinoOTA.handle();
+    HttpOta::poll();
+    // A failed upload is not a reboot, so put the main view back once the
+    // status hold expires. A successful one reboots and never gets here.
+    if (otaSplashUp && !HttpOta::busy())
+    {
+        disp.hideSplash();
+        otaSplashUp = false;
+    }
     octoPrintUpdate();
     lv_tick_inc(5);
     lv_timer_handler();
