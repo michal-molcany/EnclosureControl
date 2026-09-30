@@ -6,8 +6,23 @@
 #include "IPAddress.h"
 #include "ArduinoJson.h"
 
-#ifndef SERIAL_DEBUG
-#define SERIAL_DEBUG 0
+// Master switch for this library's verbose logging. OFF by default.
+//
+// When on, every poll dumps the raw OctoPrint JSON to the serial console - several
+// KB per poll across Printer JSON, Job JSON and Layer Progress JSON. That is
+// enough to bury everything else on the line, including the ESP-NOW link status
+// line, which is the one output that matters when a link is down.
+//
+// This deliberately does NOT use SERIAL_DEBUG. Both projects define that for their
+// own diagnostics (the C3 sets it to 1 for its [DBG] and [REMOTE] lines), and this
+// library used to squat on the same macro with a `#ifndef` default, which meant
+// turning on project logging silently turned on megabytes of JSON here too. Keep
+// the two switches independent.
+//
+// Enable per project from platformio.ini with e.g. -DOCTO_DEBUG_LOG=1, or locally
+// by defining it before including this header.
+#ifndef OCTO_DEBUG_LOG
+#define OCTO_DEBUG_LOG 0
 #endif
 
 struct temperatureTracker

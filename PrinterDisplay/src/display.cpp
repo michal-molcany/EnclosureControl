@@ -390,6 +390,24 @@ void Display::splashScreen(String message)
     lv_refr_now(_display);
 }
 
+void Display::hideSplash()
+{
+    // Mirrors the teardown in createLabes(), but keeps the view containers that
+    // were built after the splash.
+    if (_splashSpinner)
+    {
+        lv_obj_del(_splashSpinner);
+        _splashSpinner = nullptr;
+    }
+    if (_splashLabel)
+    {
+        lv_obj_del(_splashLabel);
+        _splashLabel = nullptr;
+    }
+    _splashFrame = 0;
+    lv_obj_set_style_bg_color(lv_screen_active(), color565(BACKGROUND), 0);
+}
+
 void Display::createPanel(lv_obj_t *parent, lv_obj_t **panel, lv_coord_t x, lv_coord_t y, lv_coord_t width, lv_coord_t height)
 {
     *panel = lv_obj_create(parent ? parent : lv_screen_active());

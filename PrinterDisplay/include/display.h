@@ -44,6 +44,10 @@ public:
 
     void Initialization();
     void splashScreen(String message);
+    // Remove the splash overlay and restore the background. splashScreen() only
+    // adds objects, so after a failed OTA (which is not a reboot) this is what
+    // brings the main view back.
+    void hideSplash();
     void drawWiFiSignal(int32_t rssi);
     void createLabes();
     void showMainView();

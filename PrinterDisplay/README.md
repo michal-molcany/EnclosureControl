@@ -90,18 +90,161 @@ Configure the OctoPrint server IP address and port in `const.h`:
 
 Once configured and powered on, the ESP32 will automatically connect to your WiFi network and begin polling the OctoPrint server for status updates, displaying the information on the CYD screen.
 
-## OTA Updates
+### Enclosure link (C3)
 
-The first upload must be made over USB so the ESP32 can install the OTA-enabled firmware:
+The chamber view receives louvre/fan telemetry from the EnclosureFanControl C3
+over ESP-NOW.
+
+**You do not need to configure the C3's MAC to use this.** Both boards register
+the ESP-NOW broadcast address and exchange a short hello every 2 s; whichever
+board hears a hello from the other adopts it as its peer. `ENC_PEER_MAC` in
+`include/const.h` is only the starting value, so a wrong or stale one repairs
+itself within a couple of seconds instead of producing a permanently dead link.
+
+ESP-NOW frames never leave the radio, so this works only between boards on the
+**same AP and the same Wi-Fi channel**. "Same SSID" does not guarantee that — an
+enterprise AP with band steering, split 2.4/5 GHz SSIDs, or several mesh nodes on
+different channels will happily put the two boards on different ones. That is
+the failure this setup actually hit: the C3 came up on channel 11 and the CYD on
+channel 1, so 1120 transmissions were sent and not one was acknowledged.
+
+The CYD reports its channel at boot and continuously thereafter:
 
 ```text
-platformio run --target upload --environment esp32dev --upload-port COMx
+[ENC-LINK] own MAC: 5C:01:3B:8A:63:54
+[ENC-LINK] joined on channel 1
+[ENC-LINK] ch=1 rx=0 tx=5/5 drop=0 last=- age=0ms
+[ENC-LINK] discovery hellosRx=0 we=ch1 NO PEER HEARD
 ```
 
-After the board connects to WiFi, upload later builds over OTA using its mDNS hostname (OTA is password-protected via `getOTAPassword()` in `secrets.h`):
+- **`we=ch` is the number to check.** If the C3 prints a different `we=ch`, the
+  boards are on different channels and nothing will ever cross. That is a
+  network problem — put both on a 2.4 GHz AP with one fixed channel, move them
+  closer together so they hit the same AP, or re-provision one onto an SSID on
+  the other's channel. See [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) for
+  the full decision tree.
+- **`tx=0/N` with a large N is the signature of a channel split** — every send
+  fails because the peer never hears it.
+- `discovery: peer learned …` → pairing succeeded; the address shown is what the
+  C3 is actually using.
+- `ch=`, `rx=`, `drop=`, `last=` describe the unicast link. A `last=sender` with
+  a climbing `drop=` means packets are arriving from a board that is not the
+  current peer.
+
+`ENC_WIFI_CHANNEL` in `include/const.h` can pin the channel, but it is best
+effort and off by default: the AP re-synchronises the station on every beacon, so
+a pin it will not honour either does nothing or drops Wi-Fi entirely.
+
+The small C3 icon in the top-right of the main view goes green while telemetry is
+fresh and grey once it is older than 5 s. It reports the C3→CYD direction only;
+the C3's own `+CYD OK` footer reports the other way.
+
+
+
+## OTA Updates
+
+Two paths are available. **Use HTTP** unless you know the uploader can accept
+inbound connections.
+
+### HTTP (recommended — no firewall changes needed)
+
+The board listens on port **8080** and the uploader makes an ordinary *outbound*
+request, so a default Windows Firewall does not interfere. A browser form is
+served at `/`, or upload directly:
+
+```text
+curl -u enclosure:YOUR_OTA_PASSWORD -F "firmware=@firmware.bin" http://<board-ip>:8080/update
+```
+
+The password is HTTP Basic auth, reusing `secrets::getOTAPassword()` — the same
+value that guards the ArduinoOTA path. An empty password disables auth entirely.
+`enclosure-display.local:8080` works too if mDNS resolves. The board writes the
+image to the inactive OTA slot, validates it, and reboots.
+
+The full-screen splash reports progress, and the main view comes back
+automatically if an upload fails:
+
+```text
+OTA starting  ->  OTA 42%  ->  OTA done reboot
+```
+
+The response body is `OK` (HTTP 200) or the short failure name — `end`,
+`write`, `begin`, `stalled`, `busy` (HTTP 500) — so the uploader can tell a
+real flash from a failed one. On success the board **reboots itself** once the
+response has been sent, so the new image is the one actually running; it is
+back on the network roughly 15 seconds later.
+
+`GET /status` reports the same state without uploading, which matters here
+because `SERIAL_DEBUG` is off:
+
+```text
+curl -u enclosure:YOUR_OTA_PASSWORD http://<board>:8080/status
+busy=0 ok=0 starts=0 written=0 total=0 age=54905ms err=
+```
+
+`starts` counts upload attempts since boot and `age` is time since the last
+chunk, so a rising `age` means the board is up and idle rather than wedged.
+A transfer that stops mid-stream is abandoned after 30s (`err=stalled`) so a
+half-open connection cannot leave the splash stuck on screen.
+
+Per-chunk progress is also written to the serial log about once a second when
+`SERIAL_DEBUG` is enabled in `const.h`.
+
+The endpoint lives in the shared [`../lib/HttpOta`](../lib/HttpOta) library,
+which the C3 uses too, so the auth and flash logic exist once.
+
+### ArduinoOTA (may be blocked by the host firewall)
+
+The board also serves ArduinoOTA at **`enclosure-display.local`** on port 3232:
 
 ```text
 platformio run --target upload --environment esp32dev --upload-protocol espota --upload-port enclosure-display.local --upload-flags --auth=YOUR_OTA_PASSWORD
 ```
 
-If mDNS is unavailable, replace `enclosure-display.local` with the ESP32 IP address shown in the serial monitor. The `esphome run` command is not applicable to this PlatformIO project.
+**This path often fails on Windows.** ArduinoOTA always makes the *board* dial
+out to the uploader, so the uploader's PC must accept an inbound connection. A
+default Windows Firewall blocks that, and the board reports:
+
+```text
+[OTA] failed: connect (2)      <- OTA_CONNECT_ERROR
+[OTA] failed: end (4)         <- OTA_END_ERROR
+[E][ArduinoOTA.cpp:360] _runUpdate(): Update ERROR: Aborted
+```
+
+`Authenticating...OK` still appears, because the UDP handshake is allowed as a
+reply to the uploader's own outbound flow — only the new inbound TCP connection
+is dropped, which makes the failure look like a mystery. Changing the port does
+**not** help: the default policy is block-all-inbound, not block-by-port, and
+port 80 fails identically. The HTTP path above avoids it entirely by reversing
+the direction.
+
+### Uploading from VS Code
+
+`Ctrl+Shift+B` runs **CYD: Build + OTA**; pick the others via
+**Terminal → Run Task…**:
+
+| Task | What it does |
+| --- | --- |
+| `CYD: Build + OTA` | build, then upload over the air (default) |
+| `CYD: OTA (skip build)` | upload whatever is already in `.pio/build` |
+| `CYD: Build only` | compile, no upload; errors land in the Problems panel |
+| `CYD: Flash over USB` | USB flash on `COM7` (CH340 USB-UART bridge) |
+| `CYD: Monitor serial` | serial output until `Ctrl+C` |
+| `CYD: OTA web page` | open the board's upload form in a browser |
+
+These drive the shared [`../tools/ota-upload.ps1`](../tools/ota-upload.ps1), the
+same script the C3 uses. It reads the password from the git-ignored
+`include/secrets.h`, resolves the board by mDNS, and refuses to upload if the
+build failed.
+
+> **The PlatformIO toolbar's "Upload" button only ever flashes over USB.** It
+> cannot do OTA.
+
+The first OTA-enabled firmware must still be flashed over USB, and the **CYD has
+much less flash headroom than the C3** — the image is ~1.26 MB against a 1.31 MB
+app slot, so the default partition table leaves only ~50 KB. PlatformIO's size
+check fails the build if an image outgrows the slot, but additions to this
+firmware should be kept small or the partition table should be revisited (the
+project uses no filesystem at all, so its 1.31 MB SPIFFS partition is currently
+unused and could be traded for larger app slots).
+
