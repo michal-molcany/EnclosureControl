@@ -13,12 +13,45 @@
 // Fan Control (PWM)
 // IMPORTANT: LEDC channel/timer reservation (Arduino maps chan->timer fixed):
 //   servo (ESP32Servo) -> channel 0, timer 0 @ 50 Hz
-//   fan               -> channel 4, timer 2 @ 5 kHz
+//   fan               -> channel 4, timer 2 @ 25 kHz
 // Sharing a channel retunes the shared timer and kills the other output.
 #define FAN_PIN 1
-#define FAN_PWM_FREQ 5000 // 5kHz PWM frequency
+// 25 kHz, not the previous 5 kHz. 5 kHz is squarely inside human hearing (20Hz -
+// 20kHz) and was the source of a tonal whine on this fan. The driver picks the
+// nearest integer divider from the 80MHz APB clock, so this lands at ~24.0kHz
+// (80e6 / (256 * 13)), which is above the audible band.
+#define FAN_PWM_FREQ 25000
 #define FAN_PWM_RESOLUTION 8
 #define FAN_PWM_CHANNEL 4
+
+// Minimum duty for any nonzero fan request.
+//
+// A 2/3-wire fan on a low-side switch cannot break away from rest below roughly
+// half duty, and between half duty and full speed it spins unevenly so blade-pass
+// becomes tonal. Both were observed on this hardware: nothing spun below ~50%
+// and it resonated below ~60%. Commanding a percentage that the rotor cannot
+// actually achieve is worse than useless - it looks like control while the fan
+// sits dead or screams.
+//
+// The floor costs nothing in usable control resolution, because the louvre is
+// already commanded at 1% steps across 0-100 and saturates before the fan is
+// even engaged (the fan only runs when PID demand exceeds 100).
+#define FAN_MIN_RUN_PCT 60
+
+// Break-away boost. Static friction is highest at rest and worse when the fan is
+// cold, so a step straight from 0 to FAN_MIN_RUN_PCT can still fail to start.
+// Full power briefly, then settle to the target.
+#define FAN_START_BOOST_PCT 100
+#define FAN_START_BOOST_MS 300
+
+// Anti-chatter. update() is gated to 1Hz, so a PID demand hovering at the
+// engage threshold can toggle the fan every second - and each start re-triggers
+// the boost above, which would be far more audible than the original fault. Once
+// running, the fan is held on at least this long.
+//
+// Fail-safe shutdowns (invalid OctoPrint data, leaving the active-auto state)
+// bypass this via forceFanOff(), so a safety action is never delayed.
+#define FAN_MIN_ON_MS 3000
 
 #define TEMP_STANDARD_TARGET 30
 #define TEMP_TPU_TARGET 35

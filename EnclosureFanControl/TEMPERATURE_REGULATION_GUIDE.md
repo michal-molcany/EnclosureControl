@@ -94,10 +94,43 @@ This system automatically controls the enclosure fan and louver based on printer
 ### Fan Control
 
 - **Pin:** GPIO 1
-- **PWM Channel:** Channel 0
-- **Frequency:** 5 kHz
+- **PWM Channel:** Channel 4, timer 2
+- **Frequency:** 25 kHz
 - **Resolution:** 8-bit (0-255 speed levels)
 - **Control:** PID-based smooth regulation
+
+> **Do not move the fan to channel 0.** Channel 0, timer 0 belongs to the louvre
+> servo (ESP32Servo runs at 50 Hz there). Arduino maps channel to timer, so
+> putting the fan on the same timer makes each retune the other and the servo
+> stops working. The split is deliberate.
+
+**The fan's usable duty range is not 0-100%.** A 2/3-wire fan on a low-side
+switch cannot break away from rest below roughly half duty, and between half duty
+and full speed it spins unevenly so blade-pass becomes tonal. Measured on this
+hardware: nothing spun below ~50%, and it resonated below ~60%. Three mechanisms
+in `const.h` map the commanded 0-100% onto the range the rotor can actually
+achieve:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `FAN_MIN_RUN_PCT` | 60 | Any nonzero request is raised to this. Below it the fan stalls or screams. |
+| `FAN_START_BOOST_PCT` / `_MS` | 100 / 300 ms | Full power briefly on off→on, because break-away torque is highest at rest and worse cold. |
+| `FAN_MIN_ON_MS` | 3000 | Holds the fan on after it starts. `update()` is gated to 1 Hz, so a PID demand near the engage threshold would otherwise chop the fan every second and re-trigger the boost — audibly worse than the original fault. |
+
+`FAN_MIN_ON_MS` is bypassed by the fail-safe paths (invalid OctoPrint data,
+leaving the active-auto state) via `forceFanOff()`, so a safety shutdown is never
+delayed. `serviceFan()` must be called from `loop()` on every iteration to end the
+boost promptly; `update()` alone only reaches the fan once a second.
+
+**Control resolution is not lost to the floor.** The louvre is commanded at 1%
+steps across 0-100 and saturates before the fan is even engaged — in automatic
+mode the fan only runs once PID demand exceeds 100 (`demand - 100`). So the
+0-100% span is still covered, just by the louvre at the bottom and the fan at the
+top.
+
+The reported `fanPercent()` is the **actual** PWM duty, not the request, so the
+CYD shows 60% when 10% was asked for rather than displaying a value the fan is
+not honouring.
 
 ### PID Parameters
 
@@ -251,6 +284,22 @@ If cooling is too slow or too aggressive, adjust PID gains:
 - Check PIN 1 connections and PWM configuration
 - Verify `tempRegulation.begin()` is called in setup
 - Check serial output for state transitions
+- **Confirm it is not a duty-floor problem.** If the fan is commanded to 0% it is
+  genuinely off, and any request from 1% up is raised to `FAN_MIN_RUN_PCT` (60%).
+  A fan that will not start is usually below the floor, not broken — see
+  [Fan Control](#fan-control). If it will not start *at* 60% or above, the break-away
+  boost (`FAN_START_BOOST_PCT`/`_MS`) is the thing to check.
+- **If the louvre servo stopped moving too**, the fan and servo have been put on
+  the same LEDC timer. Check that the fan is still on channel 4 and the servo on
+  channel 0.
+
+### Fan Whines or Resonates
+
+- **Whine (steady tone):** PWM switching noise. `FAN_PWM_FREQ` must be above
+  ~20 kHz; 5 kHz is audible and is what caused the original whine.
+- **Resonance (tone that changes with speed, or visible shaking):** the rotor is
+  spinning unevenly under partial drive. Raise `FAN_MIN_RUN_PCT` so the fan never
+  operates in that band rather than lowering it.
 
 ### Chamber Not Cooling
 
@@ -277,7 +326,11 @@ If cooling is too slow or too aggressive, adjust PID gains:
 - **Update frequency:** 1 second minimum (prevents spam)
 - **Memory usage:** ~2KB for TemperatureRegulation class
 - **CPU impact:** Minimal (simple state machine)
-- **Fan PWM:** 5 kHz (inaudible frequency range)
+- **Fan PWM:** 25 kHz, requested. The driver picks the nearest integer divider from
+  the 80 MHz APB clock, so this lands at ~24.0 kHz (80e6 / (256 × 13)) — above
+  the 20 kHz top of human hearing. This was previously 5 kHz, which is *inside*
+  the audible band and produced a tonal whine on this fan; the earlier claim that
+  5 kHz was inaudible was simply wrong.
 
 ## Future Enhancements
 

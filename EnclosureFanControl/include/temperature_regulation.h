@@ -35,6 +35,11 @@ private:
     PIDController pidController;
     bool fanActive;
     uint8_t lastFanSpeed;
+    // What the regulator asked for (0-255), as opposed to what is currently on
+    // the PWM. They differ while a break-away boost is in progress.
+    uint8_t fanTargetSpeed = 0;
+    unsigned long fanBoostUntilMs = 0; // 0 = not boosting
+    unsigned long fanStartedMs = 0;    // for FAN_MIN_ON_MS anti-chatter
     bool louvreOpen;
     unsigned long lastUpdate;
     unsigned long invalidSince;
@@ -78,6 +83,15 @@ private:
     static bool louvreOnly(uint8_t material);
     void setLouvrePercent(uint8_t percent);
     void setFanPercent(uint8_t percent);
+    // Immediate off, bypassing the duty floor, the break-away boost and
+    // FAN_MIN_ON_MS. Used by the fail-safe paths (invalid OctoPrint data, leaving
+    // the active-auto state) so a safety shutdown is never delayed.
+    void forceFanOff();
+    // Applies the floor and boost/min-on-time, then delegates to applyFanSpeed.
+    void setFanTarget(uint8_t speed);
+    // The only place that writes the PWM, so the change-detection early-out and
+    // fanActive bookkeeping cannot be bypassed.
+    void applyFanSpeed(uint8_t speed);
     void closeOutputs();
 
 public:
@@ -91,8 +105,13 @@ public:
     // when the fresh copy is invalid; fan stays off until first good data.
     void update(const OctoSnapshot &snap);
 
+    // Call this from loop() on EVERY iteration, not on a timer. update() is
+    // gated to PID_UPDATE_INTERVAL (1Hz), which is far too coarse to end a
+    // sub-second break-away boost - without this the fan holds full power for a
+    // whole second on every start. Does nothing when no boost is in progress.
+    void serviceFan();
+
     // Control functions
-    void setFanSpeed(uint8_t speed); // 0-255
     void stopFan();
 
     // Remote control (ESP-NOW commands from PrinterDisplay)

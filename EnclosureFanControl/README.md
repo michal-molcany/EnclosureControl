@@ -25,6 +25,42 @@ CYD <-> C3 packet layout, timing and fallback rules are in
 - **OTA firmware updates over WiFi** (HTTP on port 8080, plus ArduinoOTA), with
   progress shown on the OLED
 
+## This board is updated over the air
+
+**USB is not used to update this board, and is not needed for a first flash** — it
+already runs OTA-capable firmware. Over-the-air is the normal path; USB exists only
+for recovery, and is described as such below.
+
+Consequences worth knowing up front:
+
+- Reach the board by its **mDNS name** (`enclosure-fan-control.local`), not by IP.
+  A DHCP address change then needs no action. See the warning about mDNS below
+  before changing anything about `ArduinoOTA.begin()`.
+- There is no serial cable in the loop, so **`/status` replaces the serial log**
+  for checking reachability and diagnosing an update.
+- An interrupted update is safe: the image is written to the *inactive* OTA slot,
+  so the running firmware stays bootable. It takes two consecutive failed updates
+  to strand the board.
+
+Check the board is reachable and idle before pushing anything:
+
+```text
+curl -u enclosure:YOUR_OTA_PASSWORD http://enclosure-fan-control.local:8080/status
+```
+
+```text
+busy=0 ok=0 starts=0 written=0 total=0 age=5396946ms err=
+```
+
+`busy=0` means nothing is in flight. `ok=1` means the last completed upload
+succeeded, and `err=` names the reason if one failed. `starts=0` means the board
+has not been updated since boot.
+
+One trap: `age=` is time since the last chunk was written, so **before any upload
+it is just board uptime**, not the time since a last update. A large `age` on a
+board reporting `starts=0` is a board that has been running a while, not one that
+is stuck.
+
 ## Configuration
 
 Copy `include/secrets.example.h` to `include/secrets.h` and fill in the real
@@ -104,12 +140,13 @@ quick way to confirm the CYD→C3 direction without a serial cable.
 
 Full troubleshooting matrix: [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md).
 
-Both OTA paths need the board on your network. If the C3 has no stored
-credentials, the WiFiManager captive portal opens (AP `EnclosureFanControl`,
-password protected) and you must enter your WiFi details once through it. The
-serial log distinguishes the two states: `Connected to WiFi` followed by an IP
-address means you are on the network, while `Connecting to WiFi...` with no IP
-means the portal is waiting for input.
+Both OTA paths need the board on your network, reached by its mDNS name
+(`enclosure-fan-control.local`) rather than by IP. The captive portal is a
+first-time-only concern: if the C3 has no stored credentials, the WiFiManager
+portal opens (AP `EnclosureFanControl`, password protected) and you must enter your
+WiFi details once through it. Without a serial cable, the way to tell the two
+states apart is whether `/status` answers at all — a board still sitting in the
+portal will not be on the network to serve it.
 
 ## Building
 
@@ -117,8 +154,9 @@ means the portal is waiting for input.
 pio run -e esp32-c3-devkitm-1
 ```
 
-The firmware is roughly 970 KB and the default partition table provides two
-1.25 MB app slots, so images up to ~1.25 MB can be sent OTA.
+The firmware is roughly 975 KB and the default partition table provides two
+1.25 MB app slots, so images up to ~1.25 MB can be sent OTA. The current build
+sits at 74.4% of its slot, leaving about 335 KB of headroom.
 
 ## Uploading from VS Code
 
@@ -131,9 +169,13 @@ then pushes the image to the board over HTTP. Pick the others via
 | `C3: Build + OTA` | build, then upload over the air (default) |
 | `C3: OTA (skip build)` | upload whatever is already in `.pio/build` |
 | `C3: Build only` | compile, no upload; errors land in the Problems panel |
-| `C3: Flash over USB` | USB recovery flash on `COM11` |
+| `C3: Flash over USB` | USB **recovery** flash on `COM11` |
 | `C3: Monitor serial` | serial output until `Ctrl+C` |
 | `C3: OTA web page` | open the board's upload form in a browser |
+
+`C3: Monitor serial` and `C3: Flash over USB` need the board cabled to the PC.
+While it is not, use the `/status` endpoint instead — it reports the same
+reachability and upload outcome without a cable.
 
 > **The PlatformIO toolbar's "Upload" button only ever flashes over USB.** It
 > cannot do OTA, which is the most likely way to accidentally reach for the
@@ -154,11 +196,29 @@ no credential is ever stored in a tracked file. It resolves the board by mDNS
 name, so a DHCP address change needs no action, and it **refuses to upload if the
 build failed** rather than pushing the previous binary.
 
-## Flashing over USB
+> **mDNS is a side effect of `ArduinoOTA.begin()`, and nothing else starts it.**
+> No code in this firmware calls `MDNS.begin()` directly; the name is registered
+> because `ArduinoOTA.begin()` calls it internally with the hostname set by
+> `ArduinoOTA.setHostname(OTA_ARDUINO_HOSTNAME)`.
+>
+> Two consequences, both silent:
+>
+> - Removing `ArduinoOTA.begin()` — an easy thing to do while chasing a few KB of
+>   flash — breaks OTA-by-**name** on this board *and* on the CYD. The uploader
+>   would fall back to needing `-Device <ip>`, which then breaks on any DHCP
+>   change. If ArduinoOTA ever goes, mDNS has to be started explicitly with
+>   `MDNS.begin(OTA_ARDUINO_HOSTNAME)` first.
+> - This is why the board should always be addressed by
+>   `enclosure-fan-control.local` and not by IP.
 
-The first upload must go over USB so the board can install OTA-enabled
-firmware. The C3 uses native USB, and `ARDUINO_USB_CDC_ON_BOOT=1` routes
-`Serial` to the USB port; the board enumerates as `COM11` here.
+## Flashing over USB (recovery only)
+
+**Not the normal path, and not needed for a first flash.** The board already runs
+OTA-capable firmware, so there is no bootstrap step that requires USB. Use it only
+when the board cannot be reached over the network, or when both app slots are bad.
+
+The C3 uses native USB, and `ARDUINO_USB_CDC_ON_BOOT=1` routes `Serial` to the USB
+port; the board enumerates as `COM11` when it is cabled.
 
 ```text
 pio run -t upload -e esp32-c3-devkitm-1 --upload-port COM11
@@ -215,7 +275,27 @@ Work down this list:
 ## OTA Updates
 
 Two paths are available. **Use HTTP** unless you know the uploader can accept
-inbound connections.
+inbound connections. HTTP is also the only one that works from a PC behind a
+default Windows Firewall, because the board listens and the PC connects outbound
+rather than the other way round.
+
+### If OTA is the only path to this board
+
+With no serial cable and no USB, three things are worth stating explicitly:
+
+- **An interrupted update is recoverable.** The image is written to the inactive
+  OTA slot, so the partition the board is currently running from is untouched. A
+  push that dies halfway leaves a still-bootable board on its old firmware; it
+  takes two consecutive failed updates to strand it. Do not panic halfway through
+  a transfer and reset the board — let it finish or let it fail.
+- **The credential crosses the network in cleartext.** The password is HTTP Basic
+  auth over plain HTTP, and so is the firmware image. That is a deliberate
+  trade-off for a trusted LAN, but it means anyone on the network can *attempt* a
+  push; the password is the only thing stopping them. Rotating
+  `secrets::getOTAPassword()` is the only control available.
+- **Reachability depends on the name, not the address.** If `mDNS` stops working —
+  see the warning above — the board can only be addressed by IP, and a DHCP change
+  then makes it unreachable until one is rediscovered.
 
 ### HTTP (recommended — no firewall changes needed)
 

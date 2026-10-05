@@ -101,6 +101,9 @@ void TemperatureRegulation::begin()
     fanPwmWrite(0);
     fanActive = false;
     lastFanSpeed = 0;
+    fanTargetSpeed = 0;
+    fanBoostUntilMs = 0;
+    fanStartedMs = 0;
     lastLouvrePct = 0;
     lastUpdate = millis();
     pidController.reset();
@@ -477,10 +480,73 @@ void TemperatureRegulation::setFanPercent(uint8_t percent)
 {
     if (percent > 100)
         percent = 100;
-    setFanSpeed((uint8_t)(((uint16_t)percent * 255U) / 100U));
+
+    // Duty floor. Below FAN_MIN_RUN_PCT the rotor cannot break away, and between
+    // it and full speed it spins unevenly and tones up. A 0 request still means
+    // "off" - only nonzero requests are raised, so the fan can always be stopped.
+    const uint8_t target = (percent == 0)
+                               ? 0
+                               : (uint8_t)constrain((int)percent, (int)FAN_MIN_RUN_PCT, 100);
+
+    setFanTarget((uint8_t)(((uint16_t)target * 255U) / 100U));
 }
 
-void TemperatureRegulation::setFanSpeed(uint8_t speed)
+void TemperatureRegulation::forceFanOff()
+{
+    // Deliberately unconditional: no floor, no boost to unwind, and no
+    // FAN_MIN_ON_MS hold. This is the path a fail-safe shutdown takes.
+    fanBoostUntilMs = 0;
+    fanTargetSpeed = 0;
+    applyFanSpeed(0);
+}
+
+void TemperatureRegulation::setFanTarget(uint8_t speed)
+{
+    fanTargetSpeed = speed;
+
+    if (speed == 0)
+    {
+        // Anti-chatter: hold the fan on briefly after it starts, so a PID demand
+        // oscillating at the 1Hz update rate cannot chop it on and off and
+        // re-trigger the break-away boost every second.
+        if (fanActive && (millis() - fanStartedMs) < FAN_MIN_ON_MS)
+            return;
+        fanBoostUntilMs = 0;
+        applyFanSpeed(0);
+        return;
+    }
+
+    if (!fanActive)
+    {
+        // Off -> on. Break-away torque is highest at rest and worse when cold, so
+        // go to full power briefly rather than stepping straight to the floor.
+        fanStartedMs = millis();
+        fanBoostUntilMs = fanStartedMs + FAN_START_BOOST_MS;
+        applyFanSpeed((uint8_t)(((uint16_t)FAN_START_BOOST_PCT * 255U) / 100U));
+        return;
+    }
+
+    // Still boosting: serviceFan() settles it when the deadline passes, because
+    // update() only reaches here once a second.
+    if (fanBoostUntilMs != 0 && millis() < fanBoostUntilMs)
+        return;
+
+    applyFanSpeed(speed);
+}
+
+void TemperatureRegulation::serviceFan()
+{
+    if (fanBoostUntilMs == 0)
+        return;
+    if (millis() < fanBoostUntilMs)
+        return;
+    fanBoostUntilMs = 0;
+    // Whatever the regulator asked for may have changed during the boost; the
+    // latest target wins.
+    applyFanSpeed(fanTargetSpeed);
+}
+
+void TemperatureRegulation::applyFanSpeed(uint8_t speed)
 {
     if (speed == lastFanSpeed && fanActive == (speed > 0))
         return;
@@ -498,7 +564,7 @@ void TemperatureRegulation::stopFan()
 void TemperatureRegulation::closeOutputs()
 {
     setLouvrePercent(0);
-    setFanPercent(0);
+    forceFanOff();
 }
 
 bool TemperatureRegulation::isFanActive() const

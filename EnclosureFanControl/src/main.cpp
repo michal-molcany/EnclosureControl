@@ -203,6 +203,11 @@ void loop()
   // Update temperature regulation (internally gated to PID_UPDATE_INTERVAL).
   tempRegulation.update(effective);
 
+  // Settle a break-away boost. Must run every iteration: update() is gated to
+  // 1Hz, so a 300ms boost could not otherwise be ended on time and the fan
+  // would sit at full power for a second on every start. No-op when idle.
+  tempRegulation.serviceFan();
+
   // Show chamber temperature + state on the onboard OLED (~1s, non-blocking).
   // While unpaired, show the MAC pairing screen instead (no serial needed).
   // Linked = peer configured AND commands recently received from the CYD.
