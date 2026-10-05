@@ -23,6 +23,25 @@ const Display::MaterialPreset Display::MATERIAL_PRESETS[MATERIAL_COUNT] = {
     {"Nylon", MATERIAL_NYLON_SETPOINT},
 };
 
+// Same order as MATERIAL_PRESETS, so index N is the same material in all three.
+const int Display::TOOL_PRESETS[MATERIAL_COUNT] = {
+    TOOL_PLA_TEMP,
+    TOOL_PETG_TEMP,
+    TOOL_ASA_TEMP,
+    TOOL_ABS_TEMP,
+    TOOL_TPU_TEMP,
+    TOOL_NYLON_TEMP,
+};
+
+const int Display::BED_PRESETS[MATERIAL_COUNT] = {
+    BED_PLA_TEMP,
+    BED_PETG_TEMP,
+    BED_ASA_TEMP,
+    BED_ABS_TEMP,
+    BED_TPU_TEMP,
+    BED_NYLON_TEMP,
+};
+
 int Display::matchMaterialIndex(const String &filament)
 {
     const String norm = normalizeFilament(filament);
@@ -99,7 +118,16 @@ namespace
     TFT_eSPI displayTft;    SPIClass touchSPI(HSPI);
     XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
     lv_color_t drawBuffer[320 * 10];
-    Display::Action buttonActions[6] = {};
+    // Job buttons on the main view (pause/stop/resume), in JobCommand order.
+    Display::Action buttonActions[3] = {};
+    // Main-view tool preheats: PLA / PETG / ASA / off.
+    Display::Action toolActions[4] = {};
+    // Four material buttons across the 320px width; applyMainJobLayout() reuses these,
+    // so they cannot live inside createLabes(). Geometry is
+    // 5 + 73 + 6 + 73 + 6 + 73 + 6 + 73 + 5 = 320: equal margins and gaps, so the
+    // row is symmetric instead of running flush to the right edge.
+    const lv_coord_t preheatX[4] = {5, 84, 163, 242};
+    constexpr lv_coord_t kPreheatButtonWidth = 73;
     Display *activeDisplay = nullptr;
 
     lv_color_t color565(uint16_t color)
@@ -181,8 +209,94 @@ namespace
         if (lv_event_get_code(event) == LV_EVENT_CLICKED)
         {
             const uintptr_t index = reinterpret_cast<uintptr_t>(lv_event_get_user_data(event));
-            if (index < 6 && buttonActions[index])
+            if (index < 3 && buttonActions[index])
                 buttonActions[index]();
+        }
+    }
+
+    void toolButtonEvent(lv_event_t *event)
+    {
+        // Main-view quick preheats: fixed 215 / 230 / off. The nozzle screen
+        // reaches the same API with presets and a stepper; these stay because they
+        // are one tap instead of two.
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED)
+        {
+            const uintptr_t index = reinterpret_cast<uintptr_t>(lv_event_get_user_data(event));
+            if (index < 4 && toolActions[index])
+                toolActions[index]();
+        }
+    }
+
+    void bedPanelEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->showBedView();
+    }
+
+    void toolPanelEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->showToolView();
+    }
+
+    // The preheat screens are generated from one template, so a single event
+    // callback serves both. Each button carries a pointer to one of these to say
+    // which target it belongs to and what it does. A static array keeps those
+    // pointers valid for the life of the program, which is what lets them travel
+    // through LVGL as user_data.
+    struct PreheatBinding
+    {
+        Display::PreheatKind kind;
+        int value;
+    };
+    PreheatBinding preheatBindings[2 * (MATERIAL_COUNT + 3)];
+    uint8_t preheatBindingCount = 0;
+
+    PreheatBinding *addPreheatBinding(Display::PreheatKind kind, int value)
+    {
+        if (preheatBindingCount >= sizeof(preheatBindings) / sizeof(preheatBindings[0]))
+            return nullptr;
+        PreheatBinding *binding = &preheatBindings[preheatBindingCount++];
+        binding->kind = kind;
+        binding->value = value;
+        return binding;
+    }
+
+    const PreheatBinding *eventBinding(lv_event_t *event)
+    {
+        return static_cast<const PreheatBinding *>(lv_event_get_user_data(event));
+    }
+
+    void preheatPresetEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) != LV_EVENT_CLICKED || !activeDisplay)
+            return;
+        const PreheatBinding *binding = eventBinding(event);
+        if (!binding)
+            return;
+        Serial.printf("[PREHEAT] preset kind=%d idx=%d\n", (int)binding->kind, binding->value);
+        activeDisplay->selectPreheatPreset(binding->kind, binding->value);
+    }
+
+    void preheatStepperEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) != LV_EVENT_CLICKED || !activeDisplay)
+            return;
+        const PreheatBinding *binding = eventBinding(event);
+        if (!binding)
+            return;
+        activeDisplay->stepPreheatTarget(binding->kind, binding->value);
+    }
+
+    void preheatOffEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+        {
+            const PreheatBinding *binding = eventBinding(event);
+            if (!binding)
+                return;
+            Serial.printf("[PREHEAT] off kind=%d\n", (int)binding->kind);
+            activeDisplay->setPreheatTarget(binding->kind, 0);
         }
     }
 
@@ -240,16 +354,22 @@ namespace
         activeDisplay->selectMaterial(static_cast<int>(index));
     }
 
-    lv_obj_t *createChamberStepperButton(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
+    // The chamber steppers pass their delta as user_data; the preheat screens pass a
+    // pointer to a binding instead (see PreheatBinding), so both fit in one void*.
+    void *stepData(int delta)
+    {
+        return reinterpret_cast<void *>(static_cast<intptr_t>(delta));
+    }
+
+lv_obj_t *createChamberStepperButton(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
                                         const char *text, uint16_t color,
-                                        lv_event_cb_t handler, int delta)
+                                        lv_event_cb_t handler, void *userData)
     {
         lv_obj_t *button = lv_button_create(parent);
         lv_obj_set_size(button, 60, 36);
         lv_obj_set_pos(button, x, y);
         styleButton(button, color);
-        lv_obj_add_event_cb(button, handler, LV_EVENT_CLICKED,
-                            reinterpret_cast<void *>(static_cast<intptr_t>(delta)));
+        lv_obj_add_event_cb(button, handler, LV_EVENT_CLICKED, userData);
         lv_obj_t *label = lv_label_create(button);
         lv_label_set_text(label, text);
         lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
@@ -384,6 +504,18 @@ void Display::splashScreen(String message)
         styleLabel(_splashLabel);
         lv_obj_align(_splashLabel, LV_ALIGN_CENTER, 0, 35);
     }
+    // The view containers are full-screen siblings drawn under the splash, so
+    // repainting the screen background alone is not enough to make this opaque:
+    // hide them while the splash is up. No-ops during boot, when they are still
+    // null.
+    if (_mainContainer)
+        lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
+    if (_chamberContainer)
+        lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
+    for (size_t slot = 0; slot < kPreheatCount; ++slot)
+        if (_preheat[slot].container)
+            lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
+
     _splashFrame = (_splashFrame + 1) % 12;
     lv_arc_set_rotation(_splashSpinner, 270 + _splashFrame * 30);
     lv_label_set_text(_splashLabel, message.c_str());
@@ -406,6 +538,15 @@ void Display::hideSplash()
     }
     _splashFrame = 0;
     lv_obj_set_style_bg_color(lv_screen_active(), color565(BACKGROUND), 0);
+    // Restore whichever view was up before splashScreen() hid it.
+    if (_view == View::Chamber)
+        showChamberView();
+    else if (_view == View::Tool)
+        showToolView();
+    else if (_view == View::Bed)
+        showBedView();
+    else
+        showMainView();
 }
 
 void Display::createPanel(lv_obj_t *parent, lv_obj_t **panel, lv_coord_t x, lv_coord_t y, lv_coord_t width, lv_coord_t height)
@@ -472,6 +613,8 @@ void Display::createLabes()
 
     _mainContainer = createViewContainer(false);
     _chamberContainer = createViewContainer(true);
+    for (size_t slot = 0; slot < kPreheatCount; ++slot)
+        _preheat[slot].container = createViewContainer(true);
 
     _stateLabel = lv_label_create(_mainContainer);
     lv_label_set_text(_stateLabel, "State: ");
@@ -512,6 +655,10 @@ void Display::createLabes()
     createPanel(_mainContainer, &_filePanel, 140, 123, 175, 30);
     lv_obj_add_flag(_chamberPanel, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(_chamberPanel, chamberPanelEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_flag(_bedPanel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_bedPanel, bedPanelEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_flag(_toolPanel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_toolPanel, toolPanelEvent, LV_EVENT_CLICKED, nullptr);
 
     createPanelIcon(_toolPanel, &icon_nozzle);
     createPanelIcon(_bedPanel, &icon_bed);
@@ -555,17 +702,28 @@ void Display::createLabes()
     lv_obj_set_style_border_width(_progressBar, 1, LV_PART_MAIN);
     lv_obj_set_style_bg_color(_progressBar, color565(TFT_GREEN), LV_PART_INDICATOR);
 
-    const char *preheatLabels[] = {"215C", "230C", "Off"};
-    const uint32_t preheatColors[] = {TFT_ORANGE, TFT_RED, TFT_BLUE};
-    for (size_t index = 0; index < 3; ++index)
+    // One press sets the nozzle AND the bed together, which is what you actually
+    // want before a print; a nozzle-only preheat just runs the bed cold. The
+    // temperatures come from TOOL_PRESETS / BED_PRESETS (indexed by material),
+    // so these buttons and the preheat screens can never disagree.
+    const char *preheatLabels[] = {"PLA", "PETG", "ASA", "Off"};
+    // Every one of these carries white text, so none of them can be a light
+    // colour. TFT_YELLOW (0xFFFF00) in particular was unreadable on the CYD -
+    // it is the brightest value the panel can show. PETG gets a dark gold that
+    // still reads as "warm" but leaves enough contrast for white text.
+    const uint32_t preheatColors[] = {TFT_ORANGE, 0xC88900, TFT_RED, TFT_BLUE};
+    for (size_t index = 0; index < 4; ++index)
     {
         _preheatButtons[index] = lv_button_create(_mainContainer);
-        lv_obj_set_size(_preheatButtons[index], 80, 40);
-        lv_obj_set_pos(_preheatButtons[index], 10 + index * 90, 180);
+        lv_obj_set_size(_preheatButtons[index], kPreheatButtonWidth, 40);
+        lv_obj_set_pos(_preheatButtons[index], preheatX[index], 180);
         styleButton(_preheatButtons[index], preheatColors[index]);
-        lv_obj_add_event_cb(_preheatButtons[index], buttonEvent, LV_EVENT_CLICKED, reinterpret_cast<void *>(index));
+        lv_obj_add_event_cb(_preheatButtons[index], toolButtonEvent, LV_EVENT_CLICKED, reinterpret_cast<void *>(index));
         lv_obj_t *label = lv_label_create(_preheatButtons[index]);
         lv_label_set_text(label, preheatLabels[index]);
+        // Explicit: the default label colour left "Off" looking dimmer than the
+        // rest of the row.
+        lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
         lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_center(label);
     }
@@ -580,7 +738,7 @@ void Display::createLabes()
         lv_obj_set_size(_printButtons[index], printWidths[index], 40);
         lv_obj_set_pos(_printButtons[index], printX[index], 180);
         styleButton(_printButtons[index], printColors[index]);
-        lv_obj_add_event_cb(_printButtons[index], buttonEvent, LV_EVENT_CLICKED, reinterpret_cast<void *>(index + 3));
+        lv_obj_add_event_cb(_printButtons[index], buttonEvent, LV_EVENT_CLICKED, reinterpret_cast<void *>(index));
         lv_obj_t *label = lv_label_create(_printButtons[index]);
         lv_label_set_text(label, printLabels[index]);
         lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE);
@@ -589,6 +747,8 @@ void Display::createLabes()
     setPrintButtonsVisibility(false);
     setPreheatButtonsVisibility(true);
     createChamberView();
+    createPreheatView(PreheatKind::Tool, "Nozzle Preheat");
+    createPreheatView(PreheatKind::Bed, "Bed Preheat");
     showMainView();
     refreshChamberDetail();
     _isDrawn = true;
@@ -691,9 +851,9 @@ void Display::createChamberView()
     lv_obj_set_style_text_font(_chamberSetpointLabel, &lv_font_montserrat_20, 0);
     lv_obj_set_pos(_chamberSetpointLabel, 40, 20);
     _tempMinusButton = createChamberStepperButton(_tempContainer, 186, 4, "-", TFT_BLUE,
-                                                  stepperEvent, -CHAMBER_SETPOINT_STEP);
+                                                  stepperEvent, stepData(-CHAMBER_SETPOINT_STEP));
     _tempPlusButton = createChamberStepperButton(_tempContainer, 252, 4, "+", TFT_ORANGE,
-                                                 stepperEvent, CHAMBER_SETPOINT_STEP);
+                                                 stepperEvent, stepData(CHAMBER_SETPOINT_STEP));
     _tempInfoLabel = lv_label_create(_tempContainer);
     lv_label_set_text(_tempInfoLabel, "Print: --");
     styleLabel(_tempInfoLabel);
@@ -714,9 +874,9 @@ void Display::createChamberView()
     styleLabel(_louvreLabel);
     lv_obj_set_pos(_louvreLabel, 40, 13);
     _louvreMinusButton = createChamberStepperButton(_manContainer, 186, 4, "-", TFT_BLUE,
-                                                    louvreStepperEvent, -LOUVRE_STEP);
+                                                    louvreStepperEvent, stepData(-LOUVRE_STEP));
     _louvrePlusButton = createChamberStepperButton(_manContainer, 252, 4, "+", TFT_ORANGE,
-                                                   louvreStepperEvent, LOUVRE_STEP);
+                                                   louvreStepperEvent, stepData(LOUVRE_STEP));
 
     placeRowIcon(_manContainer, &icon_fan, 56);
     _fanLabel = lv_label_create(_manContainer);
@@ -724,9 +884,194 @@ void Display::createChamberView()
     styleLabel(_fanLabel);
     lv_obj_set_pos(_fanLabel, 40, 59);
     _fanMinusButton = createChamberStepperButton(_manContainer, 186, 50, "-", TFT_BLUE,
-                                                 fanStepperEvent, -FAN_STEP);
+                                                 fanStepperEvent, stepData(-FAN_STEP));
     _fanPlusButton = createChamberStepperButton(_manContainer, 252, 50, "+", TFT_ORANGE,
-                                                fanStepperEvent, FAN_STEP);
+                                                fanStepperEvent, stepData(FAN_STEP));
+}
+
+int Display::preheatMax(PreheatKind kind)
+{
+    return kind == PreheatKind::Tool ? TOOL_TARGET_MAX : BED_TARGET_MAX;
+}
+
+int Display::preheatMin(PreheatKind kind)
+{
+    return kind == PreheatKind::Tool ? TOOL_TARGET_MIN : BED_TARGET_MIN;
+}
+
+const int *Display::preheatPresets(PreheatKind kind)
+{
+    return kind == PreheatKind::Tool ? TOOL_PRESETS : BED_PRESETS;
+}
+
+Display::View Display::preheatView(PreheatKind kind)
+{
+    return kind == PreheatKind::Tool ? View::Tool : View::Bed;
+}
+
+// One preheat screen template, instantiated once per target.
+void Display::createPreheatView(PreheatKind kind, const char *title)
+{
+    const size_t slot = static_cast<size_t>(kind);
+    PreheatView &view = _preheat[slot];
+    lv_obj_t *parent = view.container;
+    const int *presets = preheatPresets(kind);
+    const int step = kind == PreheatKind::Tool ? TOOL_TARGET_STEP : BED_TARGET_STEP;
+    view.target = kind == PreheatKind::Tool ? TOOL_TARGET_DEFAULT : BED_TARGET_DEFAULT;
+
+    // Same shape as the chamber view: back button, title, then content.
+    lv_obj_t *backButton = lv_button_create(parent);
+    lv_obj_set_size(backButton, 100, 36);
+    lv_obj_set_pos(backButton, 5, 5);
+    styleButton(backButton, TFT_DARKGREY);
+    lv_obj_add_event_cb(backButton, backEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *backLabel = lv_label_create(backButton);
+    lv_label_set_text(backLabel, LV_SYMBOL_LEFT " Back");
+    lv_obj_remove_flag(backLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(backLabel);
+
+    lv_obj_t *titleLabel = lv_label_create(parent);
+    lv_label_set_text(titleLabel, title);
+    styleLabel(titleLabel);
+    lv_obj_align(titleLabel, LV_ALIGN_TOP_MID, 20, 12);
+
+    // --- Material preset grid: 2 columns x 3 rows, mirroring the Material tab. ---
+    const lv_coord_t gridX[] = {10, 165};
+    const lv_coord_t gridY[] = {46, 82, 118};
+    for (int index = 0; index < MATERIAL_COUNT; ++index)
+    {
+        view.presetButtons[index] = lv_button_create(parent);
+        lv_obj_set_size(view.presetButtons[index], 145, 32);
+        lv_obj_set_pos(view.presetButtons[index], gridX[index % 2], gridY[index / 2]);
+        lv_obj_add_event_cb(view.presetButtons[index], preheatPresetEvent, LV_EVENT_CLICKED,
+                            addPreheatBinding(kind, index));
+        lv_obj_t *label = lv_label_create(view.presetButtons[index]);
+        lv_label_set_text(label, (String(MATERIAL_PRESETS[index].name) + " " +
+                                  String(presets[index]) + "C")
+                                     .c_str());
+        lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(label);
+    }
+
+    // --- Custom stepper row. ---
+    view.currentLabel = lv_label_create(parent);
+    lv_label_set_text(view.currentLabel, "-- C");
+    styleLabel(view.currentLabel);
+    lv_obj_set_pos(view.currentLabel, 10, 158);
+    view.targetLabel = lv_label_create(parent);
+    lv_label_set_text(view.targetLabel, "-- C");
+    lv_obj_set_style_text_color(view.targetLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(view.targetLabel, &lv_font_montserrat_20, 0);
+    lv_obj_set_pos(view.targetLabel, 10, 176);
+    view.minusButton = createChamberStepperButton(parent, 186, 158, "-", TFT_BLUE,
+                                                  preheatStepperEvent,
+                                                  addPreheatBinding(kind, -step));
+    view.plusButton = createChamberStepperButton(parent, 252, 158, "+", TFT_ORANGE,
+                                                 preheatStepperEvent,
+                                                 addPreheatBinding(kind, step));
+
+    // Off needs its own button: 0 is the value a step-down would take a long
+    // time to reach, and it is the one action with real wait behind it.
+    view.offButton = lv_button_create(parent);
+    lv_obj_set_size(view.offButton, 145, 32);
+    lv_obj_set_pos(view.offButton, 10, 202);
+    styleButton(view.offButton, TFT_BLUE);
+    lv_obj_add_event_cb(view.offButton, preheatOffEvent, LV_EVENT_CLICKED,
+                        addPreheatBinding(kind, 0));
+    lv_obj_t *offLabel = lv_label_create(view.offButton);
+    lv_label_set_text(offLabel, "Off");
+    lv_obj_remove_flag(offLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(offLabel);
+
+    setPreheatControlsEnabled(kind, !_jobActive);
+}
+
+void Display::setPreheatTarget(PreheatKind kind, int temp)
+{
+    PreheatView &view = _preheat[static_cast<size_t>(kind)];
+    // Changing a target mid-print is almost always a slip, and OctoPrint will
+    // happily accept it. The controls are also greyed out, but guard here too:
+    // _jobActive is the authority, not the visual state.
+    if (_jobActive)
+    {
+        Serial.printf("[PREHEAT] kind=%d REJECTED %dC jobActive\n", (int)kind, temp);
+        return;
+    }
+    view.target = constrain(temp, preheatMin(kind), preheatMax(kind));
+    Serial.printf("[PREHEAT] kind=%d set %dC action=%p\n", (int)kind, view.target,
+                  (void *)_preheatAction[static_cast<size_t>(kind)]);
+    if (_preheatAction[static_cast<size_t>(kind)])
+    {
+        view.sentMs = millis();
+        _preheatAction[static_cast<size_t>(kind)](view.target);
+    }
+    refreshPreheatDetail(kind);
+}
+
+void Display::selectPreheatPreset(PreheatKind kind, int index)
+{
+    if (index < 0 || index >= MATERIAL_COUNT)
+        return;
+    setPreheatTarget(kind, preheatPresets(kind)[index]);
+}
+
+void Display::stepPreheatTarget(PreheatKind kind, int delta)
+{
+    if (_jobActive)
+        return;
+    PreheatView &view = _preheat[static_cast<size_t>(kind)];
+    // Step from the live target when there is one, so the first tap off a cold
+    // target lands on a sane value instead of one step from the default.
+    int base = view.target;
+    if (base == 0)
+        base = kind == PreheatKind::Tool ? TOOL_TARGET_DEFAULT : BED_TARGET_DEFAULT;
+    setPreheatTarget(kind, base + delta);
+}
+
+void Display::setPreheatControlsEnabled(PreheatKind kind, bool enabled)
+{
+    PreheatView &view = _preheat[static_cast<size_t>(kind)];
+    if (view.controlsEnabled == enabled)
+        return;
+    view.controlsEnabled = enabled;
+    // Clearing CLICKABLE is what actually stops the taps; the opacity change is
+    // only so it is visible that they are inert.
+    lv_obj_t *controls[MATERIAL_COUNT + 3];
+    for (int index = 0; index < MATERIAL_COUNT; ++index)
+        controls[index] = view.presetButtons[index];
+    controls[MATERIAL_COUNT] = view.offButton;
+    controls[MATERIAL_COUNT + 1] = view.minusButton;
+    controls[MATERIAL_COUNT + 2] = view.plusButton;
+    for (lv_obj_t *control : controls)
+    {
+        if (!control)
+            continue;
+        if (enabled)
+        {
+            lv_obj_add_flag(control, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_style_bg_opa(control, LV_OPA_COVER, 0);
+        }
+        else
+        {
+            lv_obj_clear_flag(control, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_style_bg_opa(control, LV_OPA_50, 0);
+        }
+    }
+    if (view.targetLabel)
+        lv_obj_set_style_text_opa(view.targetLabel, enabled ? LV_OPA_COVER : LV_OPA_50, 0);
+}
+
+void Display::refreshPreheatDetail(PreheatKind kind)
+{
+    const PreheatView &view = _preheat[static_cast<size_t>(kind)];
+    if (!view.targetLabel)
+        return;
+    if (view.target == 0)
+        setLabelTextOnce(view.targetLabel, "Off");
+    else
+        setLabelTextOnce(view.targetLabel, String(view.target) + " C");
+    if (view.currentLabel && view.actualValid)
+        setLabelTextOnce(view.currentLabel, String(view.actual, 1) + " C");
 }
 
 void Display::showMainView()
@@ -736,6 +1081,35 @@ void Display::showMainView()
         lv_obj_clear_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
     if (_chamberContainer)
         lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
+    for (size_t slot = 0; slot < kPreheatCount; ++slot)
+        if (_preheat[slot].container)
+            lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
+}
+
+void Display::showToolView()
+{
+    showPreheatView(PreheatKind::Tool);
+}
+
+void Display::showBedView()
+{
+    showPreheatView(PreheatKind::Bed);
+}
+
+void Display::showPreheatView(PreheatKind kind)
+{
+    const size_t slot = static_cast<size_t>(kind);
+    if (!_mainContainer || !_preheat[slot].container)
+        return;
+    _view = preheatView(kind);
+    refreshPreheatDetail(kind);
+    lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
+    if (_chamberContainer)
+        lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
+    for (size_t other = 0; other < kPreheatCount; ++other)
+        if (_preheat[other].container)
+            lv_obj_add_flag(_preheat[other].container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
 }
 
 void Display::showChamberView()
@@ -974,15 +1348,24 @@ void Display::refreshChamberDetail()
         styleButton(_fanPlusButton, fanDimmed ? TFT_DARKGREY : TFT_ORANGE);
 }
 
-void Display::setButtonActions(Action preheat215, Action preheat230, Action preheatOff,
-                               Action pause, Action stop, Action resume)
+void Display::setButtonActions(Action pause, Action stop, Action resume)
 {
-    buttonActions[0] = preheat215;
-    buttonActions[1] = preheat230;
-    buttonActions[2] = preheatOff;
-    buttonActions[3] = pause;
-    buttonActions[4] = stop;
-    buttonActions[5] = resume;
+    buttonActions[0] = pause;
+    buttonActions[1] = stop;
+    buttonActions[2] = resume;
+}
+
+void Display::setToolActions(Action pla, Action petg, Action asa, Action off)
+{
+    toolActions[0] = pla;
+    toolActions[1] = petg;
+    toolActions[2] = asa;
+    toolActions[3] = off;
+}
+
+void Display::setPreheatAction(PreheatKind kind, PreheatAction action)
+{
+    _preheatAction[static_cast<size_t>(kind)] = action;
 }
 
 void Display::setButtonVisibility(lv_obj_t **buttons, size_t count, bool visible)
@@ -1042,11 +1425,10 @@ void Display::applyMainJobLayout(bool active)
         lv_obj_set_width(_fileNameLabel, 159);
         lv_label_set_long_mode(_fileNameLabel, LV_LABEL_LONG_SCROLL_CIRCULAR);
         lv_obj_align(_fileNameLabel, LV_ALIGN_LEFT_MID, 4, 0);
+        for (int index = 0; index < 4; ++index)
+            lv_obj_set_pos(_preheatButtons[index], preheatX[index], 180);
         for (int index = 0; index < 3; ++index)
-        {
-            lv_obj_set_pos(_preheatButtons[index], 10 + index * 90, 180);
             lv_obj_set_pos(_printButtons[index], index == 0 ? 5 : (index == 1 ? 100 : 205), 180);
-        }
     }
     else
     {
@@ -1065,11 +1447,10 @@ void Display::applyMainJobLayout(bool active)
         lv_label_set_long_mode(_fileNameLabel, LV_LABEL_LONG_DOT);
         setLabelTextOnce(_fileNameLabel, "No active print");
         lv_obj_center(_fileNameLabel);
+        for (int index = 0; index < 4; ++index)
+            lv_obj_set_pos(_preheatButtons[index], preheatX[index], 190);
         for (int index = 0; index < 3; ++index)
-        {
-            lv_obj_set_pos(_preheatButtons[index], 10 + index * 90, 190);
             lv_obj_set_pos(_printButtons[index], index == 0 ? 5 : (index == 1 ? 100 : 205), 190);
-        }
     }
 }
 
@@ -1077,6 +1458,10 @@ void Display::setJobActive(bool active)
 {
     const bool changed = !_jobLayoutInitialized || _jobLayoutActive != active;
     _jobActive = active;
+    // Bed targets go inert mid-print regardless of which view is up, so this sits
+    // outside the layout guard.
+    setPreheatControlsEnabled(PreheatKind::Tool, !active);
+    setPreheatControlsEnabled(PreheatKind::Bed, !active);
     if (changed)
     {
         _jobLayoutInitialized = true;
@@ -1096,7 +1481,7 @@ void Display::setJobActive(bool active)
 
 void Display::setPreheatButtonsVisibility(bool visible)
 {
-    setButtonVisibility(_preheatButtons, 3, visible);
+    setButtonVisibility(_preheatButtons, 4, visible);
 }
 
 void Display::setPrintButtonsVisibility(bool visible)
@@ -1134,7 +1519,32 @@ void Display::printerStatisticUpdate(const PrinterSnapshot &snap)
     if (!snap.state.length())
         return;
     setLabelTextOnce(_stateLabel, "State: " + snap.state);
-    updateTempLabel(_toolLabel, snap.toolActual, snap.toolTarget);    updateTempLabel(_bedLabel, snap.bedActual, snap.bedTarget);
+    updateTempLabel(_toolLabel, snap.toolActual, snap.toolTarget);
+    updateTempLabel(_bedLabel, snap.bedActual, snap.bedTarget);
+
+    // Feed both preheat screens from the same snapshot.
+    _preheat[static_cast<size_t>(PreheatKind::Tool)].actual = snap.toolActual;
+    _preheat[static_cast<size_t>(PreheatKind::Tool)].actualValid = true;
+    _preheat[static_cast<size_t>(PreheatKind::Bed)].actual = snap.bedActual;
+    _preheat[static_cast<size_t>(PreheatKind::Bed)].actualValid = true;
+
+    // Adopt OctoPrint's target as the truth rather than echoing what we last
+    // sent, so a change made from a gcode macro or from OctoPrint itself shows up
+    // here too. But the poll runs slower than a tap, so a snapshot that predates
+    // the last press would drag the label backwards; hold our own value briefly
+    // after sending.
+    for (size_t slot = 0; slot < kPreheatCount; ++slot)
+    {
+        const auto kind = static_cast<PreheatKind>(slot);
+        if (_view != preheatView(kind))
+            continue;
+        const int polled = kind == PreheatKind::Tool ? snap.toolTarget : snap.bedTarget;
+        PreheatView &view = _preheat[slot];
+        if (!_jobActive && millis() - view.sentMs > PREHEAT_TARGET_SETTLE_MS)
+            view.target = constrain(polled, preheatMin(kind), preheatMax(kind));
+        refreshPreheatDetail(kind);
+    }
+
     if (!_chamberSetpointSeeded && snap.chamberTarget >= CHAMBER_SETPOINT_MIN &&
         snap.chamberTarget <= CHAMBER_SETPOINT_MAX && snap.chamberTarget != 0)
     {

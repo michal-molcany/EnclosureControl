@@ -17,7 +17,19 @@ public:
     enum class View
     {
         Main,
-        Chamber
+        Chamber,
+        Tool,
+        Bed
+    };
+
+    // Targets that get their own preheat screen, reached by tapping the
+    // matching panel on the main view. Index PreheatKind::Count maps directly
+    // onto the internal per-target state array.
+    enum class PreheatKind
+    {
+        Tool = 0,
+        Bed = 1,
+        Count = 2
     };
 
     enum class ChamberControl
@@ -42,6 +54,10 @@ public:
     static int matchMaterialIndex(const String &filament);
     static uint8_t classifyFilament(const String &filament);
 
+    // Target presets, indexed in the same order as MATERIAL_PRESETS.
+    static const int TOOL_PRESETS[MATERIAL_COUNT];
+    static const int BED_PRESETS[MATERIAL_COUNT];
+
     void Initialization();
     void splashScreen(String message);
     // Remove the splash overlay and restore the background. splashScreen() only
@@ -52,6 +68,12 @@ public:
     void createLabes();
     void showMainView();
     void showChamberView();
+    void showToolView();
+    void showBedView();
+    // Send a target to OctoPrint. Inert while a print is active.
+    void setPreheatTarget(PreheatKind kind, int temp);
+    void selectPreheatPreset(PreheatKind kind, int index);
+    void stepPreheatTarget(PreheatKind kind, int delta);
     void chamberSetpointDelta(int delta);
     void louvreDelta(int delta);
     void fanDelta(int delta);
@@ -74,14 +96,52 @@ public:
     void setPreheatButtonsVisibility(bool visible);
     void setPrintButtonsVisibility(bool visible);
     void setJobActive(bool active);
-    void setButtonActions(Action preheat215, Action preheat230, Action preheatOff,
-                           Action pause, Action stop, Action resume);
+    // Only the three job buttons live on the main view. Tool preheats go straight
+    // to the poll task from main.cpp; bed targets are set through the bed view.
+    void setButtonActions(Action pause, Action stop, Action resume);
+    // Main-view preheat buttons: PLA / PETG / ASA / off, each setting nozzle + bed.
+    void setToolActions(Action pla, Action petg, Action asa, Action off);
+    // The preheat views send through this. It takes the temperature rather than
+    // being one of a fixed set, because the stepper produces open-ended values.
+    using PreheatAction = void (*)(int temp);
+    void setPreheatAction(PreheatKind kind, PreheatAction action);
 
 private:
+    // One preheat screen's worth of widgets plus the state that drives it. The
+    // nozzle and bed screens are the same UI over different targets, so they
+    // share this type and a single set of helpers rather than duplicating them.
+    struct PreheatView
+    {
+        lv_obj_t *container = nullptr;
+        lv_obj_t *presetButtons[MATERIAL_COUNT] = {};
+        lv_obj_t *offButton = nullptr;
+        lv_obj_t *minusButton = nullptr;
+        lv_obj_t *plusButton = nullptr;
+        lv_obj_t *currentLabel = nullptr;
+        lv_obj_t *targetLabel = nullptr;
+        // Current state, mirrored so the screen survives leaving and returning.
+        int target = 0;
+        uint32_t sentMs = 0;
+        double actual = 0;
+        bool actualValid = false;
+        bool controlsEnabled = true;
+    };
+
+    static constexpr size_t kPreheatCount = static_cast<size_t>(PreheatKind::Count);
+    static int preheatMax(PreheatKind kind);
+    static int preheatMin(PreheatKind kind);
+    static const int *preheatPresets(PreheatKind kind);
+    static View preheatView(PreheatKind kind);
+
     void createPanel(lv_obj_t *parent, lv_obj_t **panel, lv_coord_t x, lv_coord_t y, lv_coord_t width, lv_coord_t height);
     lv_obj_t *createPanelLabel(lv_obj_t *parent, const char *text, lv_coord_t x, lv_coord_t y);
     void setButtonVisibility(lv_obj_t **buttons, size_t count, bool visible);
-    void createChamberView();
+void createChamberView();
+    void createPreheatView(PreheatKind kind, const char *title);
+    void showPreheatView(PreheatKind kind);
+    void refreshPreheatDetail(PreheatKind kind);
+    // Grey out and unclick a preheat screen's controls while a print runs.
+    void setPreheatControlsEnabled(PreheatKind kind, bool enabled);
     void refreshChamberDetail();
     void refreshEnclosureLinkHeader();
     void applyMainJobLayout(bool active);
@@ -117,11 +177,13 @@ private:
     lv_obj_t *_splashSpinner = nullptr;
     uint8_t _splashFrame = 0;
     lv_obj_t *_progressBar = nullptr;
-    lv_obj_t *_preheatButtons[3] = {};
+    lv_obj_t *_preheatButtons[4] = {};
     lv_obj_t *_printButtons[3] = {};
     View _view = View::Main;
     lv_obj_t *_mainContainer = nullptr;
     lv_obj_t *_chamberContainer = nullptr;
+    PreheatView _preheat[kPreheatCount];
+    PreheatAction _preheatAction[kPreheatCount] = {};
     lv_obj_t *_chamberCurrentLabel = nullptr;
     lv_obj_t *_chamberSetpointLabel = nullptr;
     lv_obj_t *_louvreLabel = nullptr;

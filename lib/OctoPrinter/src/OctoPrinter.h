@@ -93,8 +93,11 @@ public:
   int toggleJobPauseState();
 
   // temperature control functions
-  int preheat(int toolTemp);
-  int preheatOff();
+  int preheatTool(int toolTemp);
+  int preheatToolOff();
+  // Bed target. Unlike the tool, 0 is just "target 0" (bed off), so there is no
+  // separate off variant.
+  int preheatBed(int bedTemp);
 
   // give server related information
   String serverVersion();

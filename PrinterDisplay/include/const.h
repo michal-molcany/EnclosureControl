@@ -32,6 +32,44 @@
 
 #define SERIAL_DEBUG 1
 
+// Bed target presets for the bed view, one per entry in MATERIAL_PRESETS so the
+// two views agree on what a material wants. Bed temps differ from chamber
+// setpoints above.
+#define BED_PLA_TEMP 60
+#define BED_PETG_TEMP 70
+#define BED_ASA_TEMP 100
+#define BED_ABS_TEMP 100
+#define BED_TPU_TEMP 30
+#define BED_NYLON_TEMP 70
+
+// Stepper bounds on the bed view. MAX is a per-printer cap: lower it if your
+// bed heater cannot reach 120C (many cannot).
+#define BED_TARGET_MIN 0
+#define BED_TARGET_MAX 120
+#define BED_TARGET_STEP 5
+#define BED_TARGET_DEFAULT BED_PLA_TEMP
+
+// Nozzle target presets for the nozzle view, one per entry in MATERIAL_PRESETS so
+// the two views agree on what a material wants.
+#define TOOL_PLA_TEMP 215
+#define TOOL_PETG_TEMP 235
+#define TOOL_ASA_TEMP 260
+#define TOOL_ABS_TEMP 250
+#define TOOL_TPU_TEMP 230
+#define TOOL_NYLON_TEMP 270
+
+// Stepper bounds on the nozzle view. MAX is a per-printer cap: lower it if your
+// hotend cannot reach it (many stock hotends max out at 250-260, the V6 at 285).
+#define TOOL_TARGET_MIN 0
+#define TOOL_TARGET_MAX 285
+#define TOOL_TARGET_STEP 5
+#define TOOL_TARGET_DEFAULT TOOL_PLA_TEMP
+
+// How long a preheat view keeps showing the value it just sent, instead of
+// adopting the polled target. OctoPrint polls every API_REFRESH_TIME, so a
+// snapshot taken before the press would otherwise drag the label backwards.
+#define PREHEAT_TARGET_SETTLE_MS 6000
+
 #define CHAMBER_SETPOINT_MIN 20
 #define CHAMBER_SETPOINT_MAX 60
 #define CHAMBER_SETPOINT_STEP 1
@@ -96,14 +134,13 @@
 // ESP-NOW peer (EnclosureFanControl C3 WiFi MAC). All zeros = receive-only
 // until set. Both firmwares log their own MAC at boot - copy them over.
 static const uint8_t ENC_PEER_MAC[6] = {0xAC, 0xEB, 0xE6, 0x4B, 0x46, 0x1C};
-enum ButtonFunction
+
+// Job control codes, carried as PollerCommand::value when target == Job.
+enum JobCommand
 {
-    PREHEAT_215 = 215,
-    PREHEAT_230 = 230,
-    PREHEAT_OFF = 0,
-    PAUSE_PRINT_BUTTON = -1,
-    RESUME_PRINT_BUTTON = -2,
-    STOP_PRINT_BUTTON = -3,
+    PAUSE_JOB = 1,
+    STOP_JOB,
+    RESUME_JOB
 };
 
 #endif

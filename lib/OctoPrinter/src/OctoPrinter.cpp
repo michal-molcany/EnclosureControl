@@ -611,17 +611,29 @@ String OctoPrinter::apiVersion()
   return _server._apiVersion;
 }
 
-int OctoPrinter::preheat(int toolTemp)
+int OctoPrinter::preheatTool(int toolTemp)
 {
   String command = "{\"command\": \"target\", \"targets\": {\"tool0\": " + String(toolTemp) + "}}";
   String response = _poster("/api/printer/tool", command);
   return response.toInt();
 }
 
-int OctoPrinter::preheatOff()
+int OctoPrinter::preheatToolOff()
 {
   String command = "{\"command\": \"target\", \"targets\": {\"tool0\": 0}}";
   String response = _poster("/api/printer/tool", command);
+  return response.toInt();
+}
+
+int OctoPrinter::preheatBed(int bedTemp)
+{
+  // NOTE: the bed endpoint does NOT mirror the tool's body shape. /api/printer/tool
+  // takes a "targets" map keyed by tool name ({"targets": {"tool0": N}}), but
+  // /api/printer/bed takes a scalar "target". Sending the tool's shape here is
+  // rejected with HTTP 400 "Mandatory parameters missing". 0 turns the bed off,
+  // so it needs no separate call.
+  String command = "{\"command\": \"target\", \"target\": " + String(bedTemp) + "}";
+  String response = _poster("/api/printer/bed", command);
   return response.toInt();
 }
 

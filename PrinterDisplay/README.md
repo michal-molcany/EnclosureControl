@@ -139,6 +139,58 @@ The small C3 icon in the top-right of the main view goes green while telemetry i
 fresh and grey once it is older than 5 s. It reports the C3→CYD direction only;
 the C3's own `+CYD OK` footer reports the other way.
 
+### Nozzle and bed preheat
+
+Tapping the nozzle panel or the bed panel on the main view opens a preheat screen
+for that target. The two screens are the same UI generated from one template.
+
+The bed and tool endpoints take **different** JSON bodies, which is easy to get
+wrong because the OctoPrint docs describe them in the same breath:
+
+```text
+/api/printer/tool   {"command": "target", "targets": {"tool0": 215}}   # a map
+/api/printer/bed    {"command": "target", "target": 40}                # a scalar
+```
+
+Sending the tool's `targets` map to the bed endpoint is rejected with
+`400 Mandatory parameters missing`, and the temperature silently does not change.
+
+Each screen offers one preset per material (parallel to the chamber's Material
+tab), a `+/-` stepper for an arbitrary setpoint, and `Off`:
+
+| Material | Nozzle | Bed |
+| --- | --- | --- |
+| PLA | 205C | 60C |
+| PETG | 235C | 70C |
+| ASA | 260C | 100C |
+| ABS | 250C | 100C |
+| TPU | 230C | 30C |
+| Nylon | 270C | 70C |
+
+The screen's large number shows the target, the small one above it the live
+actual. The target is adopted from OctoPrint's polled value rather than echoing
+what was last sent, so a change made from a gcode macro shows up too — but the
+value just sent is held for `PREHEAT_TARGET_SETTLE_MS`, because a poll that
+predates the press would otherwise drag the label backwards.
+
+**All preheat controls go inert while a print is running.** Changing a target
+mid-print is almost always a slip, so they grey out and stop accepting taps. The
+screens stay readable, so you can still watch temperatures during a print.
+
+The presets live in `TOOL_PLA_TEMP` / `BED_PLA_TEMP` and friends in
+`include/const.h`, indexed the same order as `MATERIAL_PRESETS`. `TOOL_TARGET_MAX`
+(285C) and `BED_TARGET_MAX` (120C) are per-printer caps — **lower them if your
+hardware cannot reach them**, since the stepper would otherwise set a target that
+is never reached.
+
+The main view's four preheat buttons are **PLA / PETG / ASA / Off**, and one press
+sets the **nozzle and the bed together** — a nozzle-only preheat just runs the bed
+cold. They are hidden while a print runs, same as the preheat screens.
+
+The material buttons reach the same presets as the preheat screens, from the same
+`TOOL_PRESETS` / `BED_PRESETS` tables, so the two can never disagree. Off sends
+target 0 to both.
+
 
 
 ## OTA Updates
