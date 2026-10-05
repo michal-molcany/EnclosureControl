@@ -39,7 +39,27 @@ bool pollerCopySnapshot(PrinterSnapshot &out);
 // True once at least one poll cycle has published data.
 bool pollerHasData();
 
-// Non-blocking enqueue of a ButtonFunction command for the poll task.
-void pollerSendCommand(int code);
+// One command for the poll task to execute off the UI task.
+//
+// Carries a target and a payload rather than a flat code enum, because a
+// temperature is open-ended: the bed view's stepper produces values that no
+// fixed set of enum constants can name. An earlier revision encoded the tool
+// temperature directly in the enum (PREHEAT_215 = 215), which silently breaks if
+// those constants are ever renumbered.
+struct PollerCommand
+{
+    enum Target : uint8_t
+    {
+        Tool,
+        Bed,
+        Job
+    };
+
+    Target target;
+    int value; // temperature in C for Tool/Bed (0 = off); JobCommand for Job
+};
+
+// Non-blocking enqueue of a command for the poll task.
+void pollerSendCommand(const PollerCommand &cmd);
 
 #endif

@@ -27,29 +27,63 @@ static void otaStatus(const char *text)
     otaSplashUp = true;
 }
 
-void preheat215()
+void preheatTool(int temp)
 {
-    pollerSendCommand(PREHEAT_215);
+    pollerSendCommand({PollerCommand::Tool, temp});
 }
-void preheat230()
+void preheatBed(int temp)
 {
-    pollerSendCommand(PREHEAT_230);
+    pollerSendCommand({PollerCommand::Bed, temp});
+}
+
+// A material press sets the nozzle AND the bed in one go, which is what you
+// actually want before a print. Two queue entries, executed back to back by the
+// poll task; the queue is 8 deep, so this cannot overrun it.
+//
+// Index is a position in TOOL_PRESETS / BED_PRESETS, which are indexed by the
+// same order as MATERIAL_PRESETS. kMaterialCount bounds it; anything else is
+// treated as off.
+static const int kMaterialCount = 3;
+
+void preheatMaterial(int index)
+{
+    if (index < 0 || index >= kMaterialCount)
+    {
+        preheatTool(0);
+        preheatBed(0);
+        return;
+    }
+    preheatTool(Display::TOOL_PRESETS[index]);
+    preheatBed(Display::BED_PRESETS[index]);
+}
+
+void preheatPLA()
+{
+    preheatMaterial(0);
+}
+void preheatPETG()
+{
+    preheatMaterial(1);
+}
+void preheatASA()
+{
+    preheatMaterial(2);
 }
 void preheatOff()
 {
-    pollerSendCommand(PREHEAT_OFF);
+    preheatMaterial(kMaterialCount);
 }
 void pausePrint()
 {
-    pollerSendCommand(PAUSE_PRINT_BUTTON);
+    pollerSendCommand({PollerCommand::Job, PAUSE_JOB});
 }
 void stopPrint()
 {
-    pollerSendCommand(STOP_PRINT_BUTTON);
+    pollerSendCommand({PollerCommand::Job, STOP_JOB});
 }
 void resumePrint()
 {
-    pollerSendCommand(RESUME_PRINT_BUTTON);
+    pollerSendCommand({PollerCommand::Job, RESUME_JOB});
 }
 
 void octoPrintUpdate()
@@ -95,7 +129,10 @@ void setup()
 {
     Serial.begin(115200);
     disp.Initialization();
-    disp.setButtonActions(preheat215, preheat230, preheatOff, pausePrint, stopPrint, resumePrint);
+    disp.setButtonActions(pausePrint, stopPrint, resumePrint);
+disp.setToolActions(preheatPLA, preheatPETG, preheatASA, preheatOff);
+disp.setPreheatAction(Display::PreheatKind::Tool, preheatTool);
+disp.setPreheatAction(Display::PreheatKind::Bed, preheatBed);
 
     WiFi.mode(WIFI_STA);
     WiFi.begin(sec.getWiFiSSID(), sec.getWiFiPassword());
