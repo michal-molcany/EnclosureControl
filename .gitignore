@@ -3,3 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# OctoPrint server address, shared by both firmwares. Copy
+# include/octoprint_endpoint.example.h to include/octoprint_endpoint.h.
+include/octoprint_endpoint.h

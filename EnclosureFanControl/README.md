@@ -71,13 +71,24 @@ copy include\secrets.example.h include\secrets.h   (Windows)
 cp include/secrets.example.h include/secrets.h     (Unix)
 ```
 
-Set the OctoPrint API key, server IP/port, and the OTA password:
+Set the OctoPrint API key and the OTA password:
 
 ```cpp
 inline String secrets::getOctoprintApiKey() { return "OCTOPRINT API"; }
 inline String secrets::getOTAPassword()     { return "OTA PASSWORD"; }
-#define OCTOPRINT_IP   "192.168.0.100"
-#define OCTOPRINT_PORT 5000
+```
+
+The OctoPrint server address is **not** in `secrets.h`. It is shared with the
+CYD (PrinterDisplay) firmware and lives in one git-ignored header at the repo
+root, so both boards cannot drift to different servers:
+
+```text
+copy include\octoprint_endpoint.example.h include\octoprint_endpoint.h
+```
+
+```cpp
+#define OCTOPRINT_IP "192.168.1.xxx" // OctoPrint server IP address
+#define OCTOPRINT_PORT 80            // OctoPrint server port
 ```
 
 `include/secrets.h` is git-ignored; only `include/secrets.example.h` is tracked.

@@ -1,8 +1,16 @@
 #ifndef const_h
 #define const_h
 
-#define OCTOTPRINT_PORT 80            // Port of the OctoPrint server
-#define OCTOTPRINT_IP "10.201.93.207" // IP address of the OctoPrint server (change this to your OctoPrint server IP address)
+// OctoPrint server address. SHARED with the C3 (EnclosureFanControl), so it
+// lives in one git-ignored header at the repo root rather than being duplicated
+// here - the two boards used to be configured separately and could silently
+// drift apart.
+#if defined(__has_include)
+#  if !__has_include("octoprint_endpoint.h")
+#    error "Missing ../include/octoprint_endpoint.h - copy include/octoprint_endpoint.example.h to include/octoprint_endpoint.h (at the repo root) and set your OctoPrint address."
+#  endif
+#endif
+#include "octoprint_endpoint.h"
 
 /*Set to your screen resolution and rotation*/
 #define TFT_HOR_RES 240

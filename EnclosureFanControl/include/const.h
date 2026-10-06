@@ -1,12 +1,23 @@
 #ifndef ENCLOSURE_CONST_H
 #define ENCLOSURE_CONST_H
 
+// OctoPrint server address. SHARED with the CYD (PrinterDisplay), so it lives in
+// one git-ignored header at the repo root rather than being duplicated here -
+// the two boards used to be configured separately and could silently drift
+// apart.
+#if defined(__has_include)
+#  if !__has_include("octoprint_endpoint.h")
+#    error "Missing ../include/octoprint_endpoint.h - copy include/octoprint_endpoint.example.h to include/octoprint_endpoint.h (at the repo root) and set your OctoPrint address."
+#  endif
+#endif
+#include "octoprint_endpoint.h"
+
 #define SERVO_PIN 0
 #define SERVO_PWM_FREQ 50
 #define SERVO_MIN 500
 #define SERVO_MAX 2400
 #define SERVO_OFF_ANGLE 0
-#define SERVO_ON_ANGLE 130
+#define SERVO_ON_ANGLE 120
 // Minimum time between physical servo moves (replaces blocking delay).
 #define SERVO_MIN_MOVE_INTERVAL_MS 500
 

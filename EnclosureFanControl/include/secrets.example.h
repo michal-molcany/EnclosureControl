@@ -28,17 +28,8 @@ inline String secrets::getOTAPassword()
     return "REPLACE_WITH_OTA_PASSWORD";
 }
 
-// IP address of the OctoPrint server
-#define OCTOPRINT_IP "192.168.0.100"
-// Port of the OctoPrint server
-#define OCTOPRINT_PORT 5000
-
-// Keep legacy misspelled macro working for older code.
-#ifndef OCTOTPRINT_IP
-#define OCTOTPRINT_IP OCTOPRINT_IP
-#endif
-#ifndef OCTOTPRINT_PORT
-#define OCTOTPRINT_PORT OCTOPRINT_PORT
-#endif
+// The OctoPrint server address is NOT here. It is shared with the PrinterDisplay
+// (CYD) firmware, so it lives in one file at the repo root:
+//   copy include\octoprint_endpoint.example.h include\octoprint_endpoint.h
 
 #endif // SECRETS_EXAMPLE_H
