@@ -9,7 +9,7 @@
 namespace
 {
     secrets sec;
-    OctoPrinter api(sec.getOctoprintApiKey(), OCTOTPRINT_IP, OCTOTPRINT_PORT);
+    OctoPrinter api(sec.getOctoprintApiKey(), OCTOPRINT_IP, OCTOPRINT_PORT);
     SemaphoreHandle_t snapshotMutex = nullptr;
     QueueHandle_t commandQueue = nullptr;
     PrinterSnapshot shared;

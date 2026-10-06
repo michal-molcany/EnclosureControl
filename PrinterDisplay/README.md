@@ -74,15 +74,36 @@ String secrets::getOTAPassword()
 
 `include/secrets.h` is git-ignored. Only `include/secrets.h.example` is tracked.
 
+A **fresh clone needs two copies**, not one:
+
+```text
+copy include\secrets.h.example include\secrets.h
+copy include\octoprint_endpoint.example.h include\octoprint_endpoint.h
+```
+
+The second file holds the OctoPrint address; see below. Both builds fail with a
+readable message if either is missing.
+
 ### OctoPrint Server Settings
 
-Configure the OctoPrint server IP address and port in `const.h`:
+The OctoPrint server address is **shared with the C3 firmware**, so it does not
+live in this project's `const.h`. It is one git-ignored header at the repo root,
+included by both projects:
+
+```text
+copy include\octoprint_endpoint.example.h include\octoprint_endpoint.h
+```
 
 ```cpp
-#define OCTOTPRINT_PORT 80            // Port of the OctoPrint server
-#define OCTOTPRINT_IP "192.168.1.xxx" // IP address of the OctoPrint server (change this to your OctoPrint server IP address)
-
+#define OCTOPRINT_IP "192.168.1.xxx" // OctoPrint server IP address
+#define OCTOPRINT_PORT 80            // OctoPrint server port
 ```
+
+Change it there and both boards follow on their next build. They previously held
+separate copies — this one in a tracked `const.h`, the C3's in its `secrets.h` —
+which meant they agreed only by hand and could drift apart silently.
+
+Both projects fail the build with a readable message if this file is missing.
 
 > WARNING: Rotate your WiFi password and OctoPrint API key if they were ever committed.
 

@@ -9,11 +9,7 @@
 namespace
 {
     secrets sec;
-#ifdef OCTOPRINT_IP
     OctoPrinter api(sec.getOctoprintApiKey(), OCTOPRINT_IP, OCTOPRINT_PORT);
-#else
-    OctoPrinter api(sec.getOctoprintApiKey(), OCTOTPRINT_IP, OCTOTPRINT_PORT);
-#endif
     SemaphoreHandle_t snapshotMutex = nullptr;
     OctoSnapshot shared;
     volatile bool hasData = false;
