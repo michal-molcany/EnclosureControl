@@ -94,11 +94,19 @@ public:
     void printerStatisticUpdate(const PrinterSnapshot &snap);
     void jobUpdate(const PrinterSnapshot &snap);
     void setPreheatButtonsVisibility(bool visible);
-    void setPrintButtonsVisibility(bool visible);
-    void setJobActive(bool active);
+    // Job state from the OctoPrint snapshot: active = printing || paused.
+    // Pause shows only while printing, Resume only while paused, Cancel
+    // whenever a job is up. The two visible buttons fill the bottom row.
+    void setJobState(bool active, bool paused);
     // Only the three job buttons live on the main view. Tool preheats go straight
     // to the poll task from main.cpp; bed targets are set through the bed view.
     void setButtonActions(Action pause, Action stop, Action resume);
+    // Pause/Stop go through a Yes/Cancel confirm dialog; Resume stays immediate.
+    // jobCommand is a JobCommand value (PAUSE_JOB or STOP_JOB).
+    void showJobConfirm(int jobCommand);
+    void hideJobConfirm();
+    void confirmPendingJob();
+    bool isJobConfirmOpen() const { return _pendingJob >= 0; }
     // Main-view preheat buttons: PLA / PETG / ASA / off, each setting nozzle + bed.
     void setToolActions(Action pla, Action petg, Action asa, Action off);
     // The preheat views send through this. It takes the temperature rather than
@@ -136,9 +144,10 @@ private:
     void createPanel(lv_obj_t *parent, lv_obj_t **panel, lv_coord_t x, lv_coord_t y, lv_coord_t width, lv_coord_t height);
     lv_obj_t *createPanelLabel(lv_obj_t *parent, const char *text, lv_coord_t x, lv_coord_t y);
     void setButtonVisibility(lv_obj_t **buttons, size_t count, bool visible);
-void createChamberView();
+    void createChamberView();
     void createPreheatView(PreheatKind kind, const char *title);
     void showPreheatView(PreheatKind kind);
+    void createJobConfirm();
     void refreshPreheatDetail(PreheatKind kind);
     // Grey out and unclick a preheat screen's controls while a print runs.
     void setPreheatControlsEnabled(PreheatKind kind, bool enabled);
@@ -146,6 +155,8 @@ void createChamberView();
     void refreshEnclosureLinkHeader();
     void applyMainJobLayout(bool active);
     void clearJobDisplay();
+    // Show/hide + reflow the Pause/Cancel/Resume row for _jobActive/_jobPaused.
+    void refreshJobButtons();
     void pushEnclosureCommand();
     // Auto-switch Material profile from OctoPrint filament (Material tab only).
     void autoSelectMaterial(const String &filament, bool jobActive);
@@ -179,6 +190,13 @@ void createChamberView();
     lv_obj_t *_progressBar = nullptr;
     lv_obj_t *_preheatButtons[4] = {};
     lv_obj_t *_printButtons[3] = {};
+    lv_obj_t *_confirmOverlay = nullptr;
+    lv_obj_t *_confirmBox = nullptr;
+    lv_obj_t *_confirmLabel = nullptr;
+    lv_obj_t *_confirmSubLabel = nullptr;
+    lv_obj_t *_confirmYesButton = nullptr;
+    lv_obj_t *_confirmCancelButton = nullptr;
+    int _pendingJob = -1;
     View _view = View::Main;
     lv_obj_t *_mainContainer = nullptr;
     lv_obj_t *_chamberContainer = nullptr;
@@ -217,6 +235,7 @@ void createChamberView();
     bool _jobLayoutInitialized = false;
     bool _jobLayoutActive = false;
     bool _jobActive = false;
+    bool _jobPaused = false;
     bool _enclosureCommandDirty = false;
     String _jobFileName;
     String _displayedFileName;

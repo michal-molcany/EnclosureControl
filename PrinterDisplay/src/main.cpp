@@ -102,8 +102,7 @@ void octoPrintUpdate()
         disp.drawWiFiSignal(WiFi.RSSI());
     }
     disp.jobUpdate(snapshot);
-    const bool activeJob = snapshot.printing || snapshot.paused;
-    disp.setJobActive(activeJob);
+    disp.setJobState(snapshot.printing || snapshot.paused, snapshot.paused);
 
     // Enclosure link: feed live louvre/fan telemetry into the chamber view
     // (throttled to 1 Hz; stale data is greyed out by the view itself).

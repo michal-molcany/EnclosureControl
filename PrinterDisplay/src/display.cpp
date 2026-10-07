@@ -206,12 +206,44 @@ namespace
 
     void buttonEvent(lv_event_t *event)
     {
-        if (lv_event_get_code(event) == LV_EVENT_CLICKED)
+        if (lv_event_get_code(event) != LV_EVENT_CLICKED)
+            return;
+        const uintptr_t index = reinterpret_cast<uintptr_t>(lv_event_get_user_data(event));
+        if (index >= 3)
+            return;
+        // Pause (0) and Cancel (1) need a Yes/Cancel confirm; Resume (2) fires
+        // immediately. buttonActions stays the single place that knows how to
+        // send the command - the dialog only delays index 0/1 until Yes.
+        if ((index == 0 || index == 1) && activeDisplay)
         {
-            const uintptr_t index = reinterpret_cast<uintptr_t>(lv_event_get_user_data(event));
-            if (index < 3 && buttonActions[index])
-                buttonActions[index]();
+            activeDisplay->showJobConfirm(index == 0 ? PAUSE_JOB : STOP_JOB);
+            return;
         }
+        if (buttonActions[index])
+            buttonActions[index]();
+    }
+
+    void confirmYesEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->confirmPendingJob();
+    }
+
+    void confirmCancelEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->hideJobConfirm();
+    }
+
+    void confirmOverlayEvent(lv_event_t *event)
+    {
+        // Tap outside the box counts as Cancel. Box children have the box (or
+        // deeper) as target, so only a direct tap on the dim background lands
+        // here with the overlay itself as target.
+        if (lv_event_get_code(event) != LV_EVENT_CLICKED || !activeDisplay)
+            return;
+        if (lv_event_get_target(event) == lv_event_get_current_target(event))
+            activeDisplay->hideJobConfirm();
     }
 
     void toolButtonEvent(lv_event_t *event)
@@ -515,6 +547,9 @@ void Display::splashScreen(String message)
     for (size_t slot = 0; slot < kPreheatCount; ++slot)
         if (_preheat[slot].container)
             lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
+    // A stale Yes must never fire after an OTA splash: dismiss the job confirm
+    // while the splash is up. hideJobConfirm() is null-safe before createLabes().
+    hideJobConfirm();
 
     _splashFrame = (_splashFrame + 1) % 12;
     lv_arc_set_rotation(_splashSpinner, 270 + _splashFrame * 30);
@@ -728,10 +763,13 @@ void Display::createLabes()
         lv_obj_center(label);
     }
 
-    const char *printLabels[] = {"Pause", "Stop", "Resume"};
+    // Pause and Resume share the left slot (only one is ever visible), Cancel
+    // owns the right slot. refreshJobButtons() owns this geometry from here
+    // on; the sizes here only matter until the first job starts.
+    const char *printLabels[] = {"Pause", "Cancel", "Resume"};
     const uint32_t printColors[] = {TFT_ORANGE, TFT_RED, TFT_DARKGREEN};
-    const lv_coord_t printWidths[] = {90, 100, 110};
-    const lv_coord_t printX[] = {5, 100, 205};
+    const lv_coord_t printWidths[] = {150, 155, 150};
+    const lv_coord_t printX[] = {5, 160, 5};
     for (size_t index = 0; index < 3; ++index)
     {
         _printButtons[index] = lv_button_create(_mainContainer);
@@ -741,18 +779,20 @@ void Display::createLabes()
         lv_obj_add_event_cb(_printButtons[index], buttonEvent, LV_EVENT_CLICKED, reinterpret_cast<void *>(index));
         lv_obj_t *label = lv_label_create(_printButtons[index]);
         lv_label_set_text(label, printLabels[index]);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
         lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_center(label);
     }
-    setPrintButtonsVisibility(false);
+    refreshJobButtons();
     setPreheatButtonsVisibility(true);
     createChamberView();
     createPreheatView(PreheatKind::Tool, "Nozzle Preheat");
     createPreheatView(PreheatKind::Bed, "Bed Preheat");
+    createJobConfirm();
     showMainView();
     refreshChamberDetail();
     _isDrawn = true;
-    setJobActive(false);
+    setJobState(false, false);
     Serial.printf("[HEAP] createLabes free=%u min=%u maxblock=%u lvglPool=%u lvglTest=%d\n",
                   ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
                   (unsigned)LV_MEM_SIZE, (int)lv_mem_test());
@@ -1355,6 +1395,130 @@ void Display::setButtonActions(Action pause, Action stop, Action resume)
     buttonActions[2] = resume;
 }
 
+void Display::createJobConfirm()
+{
+    // Built once and reused (show/hide) so Pause/Stop taps never malloc in
+    // the steady state - same heap discipline as the rest of this file.
+    // Child of the screen (not _mainContainer) so a view switch cannot bury
+    // it; created after the view containers so it starts on top.
+    _pendingJob = -1;
+    _confirmOverlay = lv_obj_create(lv_screen_active());
+    lv_obj_set_pos(_confirmOverlay, 0, 0);
+    lv_obj_set_size(_confirmOverlay, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_style_bg_color(_confirmOverlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(_confirmOverlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(_confirmOverlay, 0, 0);
+    lv_obj_set_style_radius(_confirmOverlay, 0, 0);
+    lv_obj_set_style_pad_all(_confirmOverlay, 0, 0);
+    lv_obj_clear_flag(_confirmOverlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(_confirmOverlay, LV_SCROLLBAR_MODE_OFF);
+    // Plain objects are not clickable by default - without this, taps on the
+    // dim background never produce LV_EVENT_CLICKED and outside-tap-to-cancel
+    // would silently not work.
+    lv_obj_add_flag(_confirmOverlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_confirmOverlay, confirmOverlayEvent, LV_EVENT_CLICKED, nullptr);
+
+    _confirmBox = lv_obj_create(_confirmOverlay);
+    lv_obj_set_size(_confirmBox, 260, 140);
+    lv_obj_align(_confirmBox, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(_confirmBox, color565(BACKGROUND_COL), 0);
+    lv_obj_set_style_border_color(_confirmBox, lv_color_hex(0x5A5A5A), 0);
+    lv_obj_set_style_border_width(_confirmBox, 1, 0);
+    lv_obj_set_style_radius(_confirmBox, 3, 0);
+    lv_obj_set_style_pad_all(_confirmBox, 8, 0);
+    lv_obj_clear_flag(_confirmBox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(_confirmBox, LV_SCROLLBAR_MODE_OFF);
+
+    _confirmLabel = lv_label_create(_confirmBox);
+    lv_label_set_text(_confirmLabel, "Pause print?");
+    lv_obj_set_style_text_color(_confirmLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(_confirmLabel, &lv_font_montserrat_20, 0);
+    lv_obj_align(_confirmLabel, LV_ALIGN_TOP_MID, 0, 4);
+
+    _confirmSubLabel = lv_label_create(_confirmBox);
+    lv_label_set_text(_confirmSubLabel, "");
+    styleLabel(_confirmSubLabel);
+    lv_obj_set_width(_confirmSubLabel, 230);
+    lv_label_set_long_mode(_confirmSubLabel, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(_confirmSubLabel, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(_confirmSubLabel, LV_ALIGN_TOP_MID, 0, 32);
+
+    _confirmYesButton = lv_button_create(_confirmBox);
+    lv_obj_set_size(_confirmYesButton, 110, 40);
+    lv_obj_align(_confirmYesButton, LV_ALIGN_BOTTOM_LEFT, 4, -4);
+    styleButton(_confirmYesButton, TFT_DARKGREEN);
+    lv_obj_add_event_cb(_confirmYesButton, confirmYesEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *yesLabel = lv_label_create(_confirmYesButton);
+    lv_label_set_text(yesLabel, "Yes");
+    lv_obj_set_style_text_color(yesLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_remove_flag(yesLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(yesLabel);
+
+    _confirmCancelButton = lv_button_create(_confirmBox);
+    lv_obj_set_size(_confirmCancelButton, 110, 40);
+    lv_obj_align(_confirmCancelButton, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+    styleButton(_confirmCancelButton, TFT_DARKGREY);
+    lv_obj_add_event_cb(_confirmCancelButton, confirmCancelEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *cancelLabel = lv_label_create(_confirmCancelButton);
+    lv_label_set_text(cancelLabel, "Cancel");
+    lv_obj_set_style_text_color(cancelLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_remove_flag(cancelLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(cancelLabel);
+
+    lv_obj_add_flag(_confirmOverlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+void Display::showJobConfirm(int jobCommand)
+{
+    if (!_confirmOverlay)
+        return;
+    if (jobCommand != PAUSE_JOB && jobCommand != STOP_JOB)
+        return;
+    _pendingJob = jobCommand;
+    const bool isPause = jobCommand == PAUSE_JOB;
+    setLabelTextOnce(_confirmLabel, isPause ? "Pause print?" : "Cancel print?");
+    setLabelTextOnce(_confirmSubLabel, isPause ? "The print will pause."
+                                               : "The job will be cancelled. This cannot be undone.");
+    styleButton(_confirmYesButton, isPause ? TFT_ORANGE : TFT_RED);
+    // Retargeting the same overlay keeps one Yes tap == one command even on
+    // rapid double-taps: the second Pause/Stop press just refreshes the text.
+    lv_obj_move_to_index(_confirmOverlay, -1);
+    lv_obj_clear_flag(_confirmOverlay, LV_OBJ_FLAG_HIDDEN);
+    Serial.printf("[JOB] confirm shown cmd=%d\n", jobCommand);
+}
+
+void Display::hideJobConfirm()
+{
+    if (!_confirmOverlay)
+    {
+        _pendingJob = -1;
+        return;
+    }
+    if (_pendingJob < 0 && lv_obj_has_flag(_confirmOverlay, LV_OBJ_FLAG_HIDDEN))
+        return;
+    _pendingJob = -1;
+    if (_confirmOverlay)
+        lv_obj_add_flag(_confirmOverlay, LV_OBJ_FLAG_HIDDEN);
+    Serial.printf("[JOB] confirm dismissed\n");
+}
+
+void Display::confirmPendingJob()
+{
+    const int pending = _pendingJob;
+    if (pending != PAUSE_JOB && pending != STOP_JOB)
+    {
+        hideJobConfirm();
+        return;
+    }
+    const size_t index = (pending == PAUSE_JOB) ? 0 : 1;
+    _pendingJob = -1;
+    if (_confirmOverlay)
+        lv_obj_add_flag(_confirmOverlay, LV_OBJ_FLAG_HIDDEN);
+    Serial.printf("[JOB] confirm yes cmd=%d\n", pending);
+    if (buttonActions[index])
+        buttonActions[index]();
+}
+
 void Display::setToolActions(Action pla, Action petg, Action asa, Action off)
 {
     toolActions[0] = pla;
@@ -1425,10 +1589,10 @@ void Display::applyMainJobLayout(bool active)
         lv_obj_set_width(_fileNameLabel, 159);
         lv_label_set_long_mode(_fileNameLabel, LV_LABEL_LONG_SCROLL_CIRCULAR);
         lv_obj_align(_fileNameLabel, LV_ALIGN_LEFT_MID, 4, 0);
+        // Print-button geometry (which two are visible, how wide) is owned by
+        // refreshJobButtons(), not by the active/idle layout switch.
         for (int index = 0; index < 4; ++index)
             lv_obj_set_pos(_preheatButtons[index], preheatX[index], 180);
-        for (int index = 0; index < 3; ++index)
-            lv_obj_set_pos(_printButtons[index], index == 0 ? 5 : (index == 1 ? 100 : 205), 180);
     }
     else
     {
@@ -1449,15 +1613,17 @@ void Display::applyMainJobLayout(bool active)
         lv_obj_center(_fileNameLabel);
         for (int index = 0; index < 4; ++index)
             lv_obj_set_pos(_preheatButtons[index], preheatX[index], 190);
-        for (int index = 0; index < 3; ++index)
-            lv_obj_set_pos(_printButtons[index], index == 0 ? 5 : (index == 1 ? 100 : 205), 190);
     }
 }
 
-void Display::setJobActive(bool active)
+void Display::setJobState(bool active, bool paused)
 {
-    const bool changed = !_jobLayoutInitialized || _jobLayoutActive != active;
+    // Paused is only meaningful with a job up; without one it would leave a
+    // stale Resume visible after the job ends.
+    const bool pausedNow = active && paused;
+    const bool changed = !_jobLayoutInitialized || _jobLayoutActive != active || _jobPaused != pausedNow;
     _jobActive = active;
+    _jobPaused = pausedNow;
     // Bed targets go inert mid-print regardless of which view is up, so this sits
     // outside the layout guard.
     setPreheatControlsEnabled(PreheatKind::Tool, !active);
@@ -1467,10 +1633,22 @@ void Display::setJobActive(bool active)
         _jobLayoutInitialized = true;
         _jobLayoutActive = active;
         if (!active)
+        {
+            // A Yes tapped after the job ended must not fire: drop any open
+            // Pause/Cancel confirm together with the buttons themselves.
+            hideJobConfirm();
             clearJobDisplay();
+        }
+        else if (pausedNow && _pendingJob == PAUSE_JOB)
+        {
+            // Paused from elsewhere (OctoPrint, another client) while our
+            // Pause confirm was open: the Pause button just hid, so Yes would
+            // be a stale fire. The Cancel confirm stays valid in both states.
+            hideJobConfirm();
+        }
         applyMainJobLayout(active);
         setPreheatButtonsVisibility(!active);
-        setPrintButtonsVisibility(active);
+        refreshJobButtons();
     }
     if (changed || _enclosureCommandDirty)
     {
@@ -1484,9 +1662,26 @@ void Display::setPreheatButtonsVisibility(bool visible)
     setButtonVisibility(_preheatButtons, 4, visible);
 }
 
-void Display::setPrintButtonsVisibility(bool visible)
+void Display::refreshJobButtons()
 {
-    setButtonVisibility(_printButtons, 3, visible);
+    if (!_printButtons[0] || !_printButtons[1] || !_printButtons[2])
+        return;
+    // Pause matters only while printing, Resume only while paused, Cancel
+    // whenever a job is up. Null-safe before createLabes() finishes.
+    const bool printing = _jobActive && !_jobPaused;
+    const bool paused = _jobActive && _jobPaused;
+    lv_obj_set_hidden(_printButtons[0], !printing);
+    lv_obj_set_hidden(_printButtons[1], !_jobActive);
+    lv_obj_set_hidden(_printButtons[2], !paused);
+    if (!_jobActive)
+        return;
+    // The two visible buttons fill the row: 5 + 150 + 5 + 155 + 5 = 320.
+    // Pause and Resume share the left slot; Cancel owns the right one.
+    lv_obj_t *left = paused ? _printButtons[2] : _printButtons[0];
+    lv_obj_set_pos(left, 5, 180);
+    lv_obj_set_size(left, 150, 40);
+    lv_obj_set_pos(_printButtons[1], 160, 180);
+    lv_obj_set_size(_printButtons[1], 155, 40);
 }
 
 void Display::drawWiFiSignal(int32_t rssi)
