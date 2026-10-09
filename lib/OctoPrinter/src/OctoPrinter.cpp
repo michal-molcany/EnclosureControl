@@ -37,6 +37,46 @@ static bool readLineYielding(WiFiClient &client, uint32_t deadlineMs, String &ou
   }
 }
 
+// Stream adapter that blocks (yielding) until data arrives, the deadline
+// passes, or the peer disconnects, so a deserializer never mistakes a TCP
+// gap for end-of-input (Arduino Stream's -1 means "no data right now", which
+// a socket returns constantly mid-transfer).
+class DeadlineStream : public Stream
+{
+public:
+  DeadlineStream(WiFiClient &client, uint32_t deadlineMs)
+      : _client(client), _deadline(deadlineMs)
+  {
+  }
+  int available() override { return _client.available(); }
+  int read() override
+  {
+    while (!_client.available())
+    {
+      if (!_client.connected() || (int32_t)(millis() - _deadline) >= 0)
+        return -1;
+      delay(1);
+    }
+    return _client.read();
+  }
+  int peek() override
+  {
+    while (!_client.available())
+    {
+      if (!_client.connected() || (int32_t)(millis() - _deadline) >= 0)
+        return -1;
+      delay(1);
+    }
+    return _client.peek();
+  }
+  void flush() override {}
+  size_t write(uint8_t) override { return 0; }
+
+private:
+  WiFiClient &_client;
+  uint32_t _deadline;
+};
+
 // Reads the response body the same yielding way: exactly contentLength bytes
 // when announced, otherwise until close or deadline.
 static void readBodyYielding(WiFiClient &client, uint32_t deadlineMs, int contentLength, String &out)
@@ -711,4 +751,199 @@ int OctoPrinter::resumeJob()
 int OctoPrinter::toggleJobPauseState()
 {
   return _poster("/api/job", "{\"command\": \"pause\", \"action\": \"toggle\"}").toInt();
+}
+
+// Percent-encodes a file path for the POST URI, leaving '/' separators and
+// unreserved characters alone.
+static String urlEncodePath(const char *path)
+{
+  String out;
+  out.reserve(strlen(path) + 8);
+  char hex[4];
+  for (const char *p = path; *p; ++p)
+  {
+    const unsigned char c = static_cast<unsigned char>(*p);
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || c == '/')
+      out += static_cast<char>(c);
+    else
+    {
+      snprintf(hex, sizeof(hex), "%%%02X", c);
+      out += hex;
+    }
+  }
+  return out;
+}
+
+// Inserts one entry into the out[0..*found] array kept sorted newest-first.
+// When full, only displaces the oldest entry if the newcomer is newer.
+static void insertFileSorted(OctoFile *out, size_t capacity, size_t &found,
+                             const char *path, const char *name,
+                             uint32_t date, uint32_t size)
+{
+  size_t slot;
+  if (found < capacity)
+  {
+    slot = found++;
+  }
+  else
+  {
+    if (date <= out[found - 1].date)
+      return;
+    slot = found - 1;
+  }
+  strncpy(out[slot].path, path, sizeof(out[slot].path) - 1);
+  out[slot].path[sizeof(out[slot].path) - 1] = '\0';
+  strncpy(out[slot].name, (name && *name) ? name : path, sizeof(out[slot].name) - 1);
+  out[slot].name[sizeof(out[slot].name) - 1] = '\0';
+  out[slot].date = date;
+  out[slot].size = size;
+  while (slot > 0 && out[slot].date > out[slot - 1].date)
+  {
+    OctoFile tmp = out[slot];
+    out[slot] = out[slot - 1];
+    out[slot - 1] = tmp;
+    --slot;
+  }
+}
+
+// Walks one files[] level (top level or a folder's children), recursing into
+// folders and collecting printable machinecode entries.
+static void collectFiles(JsonArray level, OctoFile *out, size_t capacity, size_t &found)
+{
+  for (JsonVariant item : level)
+  {
+    JsonObject obj = item.as<JsonObject>();
+    if (obj.isNull())
+      continue;
+    const char *type = obj["type"] | "";
+    if (strcmp(type, "folder") == 0)
+    {
+      JsonArray children = obj["children"].as<JsonArray>();
+      if (!children.isNull())
+        collectFiles(children, out, capacity, found);
+      continue;
+    }
+    if (strcmp(type, "machinecode") != 0)
+      continue;
+    const char *path = obj["path"] | "";
+    if (!path || !*path)
+      continue;
+    insertFileSorted(out, capacity, found,
+                     path, obj["name"] | "",
+                     obj["date"] | 0, obj["size"] | 0);
+  }
+}
+
+int OctoPrinter::fetchFiles(OctoFile *out, size_t capacity, FetchDiag &diag, uint8_t &parseCode)
+{
+  diag = FETCH_NOFILES;
+  parseCode = 0;
+  if (!out || capacity == 0)
+    return -1;
+
+  // The full recursive listing is ~75 KB for a handful of files
+  // (gcodeAnalysis, thumbnails, refs, statistics per file) - far beyond what
+  // fits in a String plus a full JsonDocument on this heap. So the body is
+  // deserialized straight from the socket through a field filter keeping only
+  // what collectFiles() reads; the document stays around 1-2 KB.
+  //
+  // The [0] element templates every array item (see parseArray). Children
+  // nesting is written out to 4 levels; anything deeper is skipped by the
+  // filter (its "type" never materializes, so collectFiles ignores it).
+  //
+  // Build ONLY through handles to real storage (to<>()/add<>()): resolving an
+  // intermediate proxy into a JsonVariant first (e.g. `level =
+  // filter["files"][0]`) yields a detached null handle whose writes go
+  // nowhere, leaving an empty filter that parses every reply down to {}.
+  JsonDocument filter;
+  JsonVariant level = filter["files"].to<JsonArray>().add<JsonVariant>();
+  for (int depth = 0; depth < 4; ++depth)
+  {
+    level["type"] = true;
+    level["path"] = true;
+    level["name"] = true;
+    level["date"] = true;
+    level["size"] = true;
+    level = level["children"].to<JsonArray>().add<JsonVariant>();
+  }
+  if (filter["files"].isNull())
+  {
+    Serial.println(F("[FILES] filter build failed"));
+    diag = FETCH_PARSE;
+    return -1;
+  }
+
+  _client.setTimeout(OCTOPRINTER_READ_TIMEOUT_S);
+  const uint32_t deadlineMs = millis() + OCTOPRINTER_REQUEST_TIMEOUT_MS;
+  if (!_client.connect(_host, _port, OCTOPRINTER_CONNECT_TIMEOUT_MS))
+  {
+    Serial.println(F("[FILES] connect failed"));
+    diag = FETCH_CONN;
+    return -1;
+  }
+  _client.println("GET /api/files?recursive=true HTTP/1.1");
+  _client.println("Host: " + _hostAddress);
+  _client.println("Cache-Control: no-cache");
+  _client.println("Connection: close");
+  _client.println("X-Api-Key: " + _apiKey);
+  _client.println("");
+
+  String line;
+  bool headersComplete = false;
+  while (readLineYielding(_client, deadlineMs, line))
+  {
+    if (line.length() == 0)
+    {
+      headersComplete = true;
+      break;
+    }
+  }
+  int found = -1;
+  if (headersComplete)
+  {
+    DeadlineStream body(_client, deadlineMs);
+    JsonDocument doc;
+    DeserializationError err =
+        deserializeJson(doc, body, DeserializationOption::Filter(filter));
+    if (err)
+    {
+      parseCode = static_cast<uint8_t>(err.code());
+      diag = FETCH_PARSE;
+      Serial.printf("[FILES] stream parse fail %s heap=%u maxblock=%u\n",
+                    err.c_str(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    }
+    else
+    {
+      JsonArray roots = doc["files"].as<JsonArray>();
+      if (roots.isNull())
+      {
+        diag = FETCH_NOFILES;
+        Serial.println(F("[FILES] no files[]"));
+      }
+      else
+      {
+        size_t n = 0;
+        collectFiles(roots, out, capacity, n);
+        found = static_cast<int>(n);
+        diag = FETCH_OK;
+        Serial.printf("[FILES] ok count=%d heap=%u\n", found, ESP.getFreeHeap());
+      }
+    }
+  }
+  else
+  {
+    diag = FETCH_HDRS;
+    Serial.println(F("[FILES] headers incomplete"));
+  }
+  _client.stop();
+  return found;
+}
+
+int OctoPrinter::selectAndPrint(const char *path)
+{
+  if (!path || !*path)
+    return 0;
+  String response = _poster("/api/files/local/" + urlEncodePath(path),
+                            "{\"command\":\"select\",\"print\":true}");
+  return response.toInt();
 }

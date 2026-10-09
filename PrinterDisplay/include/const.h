@@ -148,7 +148,18 @@ enum JobCommand
 {
     PAUSE_JOB = 1,
     STOP_JOB,
-    RESUME_JOB
+    RESUME_JOB,
+    // File list: REFRESH_FILES re-fetches the newest files into the poller
+    // cache; PRINT_FILE starts the staged path (see pollerRequestFilePrint).
+    REFRESH_FILES = 4,
+    PRINT_FILE = 5
 };
+
+// Newest-first printable files shown by the files view (opened from the idle
+// "No active print" panel). 20 rows fit the scrollable list; sizes bound the
+// static cache (~3.8 KB) and match OctoPrinter::OctoFile.
+#define MAX_PRINT_FILES 20
+#define PRINT_FILE_PATH_LEN 120
+#define PRINT_FILE_NAME_LEN 64
 
 #endif

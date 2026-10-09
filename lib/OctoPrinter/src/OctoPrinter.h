@@ -42,6 +42,19 @@ struct jobTimer
   String formatted;
 };
 
+// One printable file from GET /api/files. Fixed-size so the caller can hold
+// the latest-20 list statically (no per-file malloc on the poll task).
+// path is the OctoPrint file path (folders included, e.g. "subdir/part.gcode")
+// used to build POST /api/files/local/<path>; name is the bare display name;
+// date is the Unix timestamp OctoPrint reports for sorting newest-first.
+struct OctoFile
+{
+  char path[120];
+  char name[64];
+  uint32_t date;
+  uint32_t size;
+};
+
 class OctoPrinter
 {
 public:
@@ -91,6 +104,28 @@ public:
   int pauseJob();
   int resumeJob();
   int toggleJobPauseState();
+
+  // File list + remote print. fetchFiles() GETs /api/files?recursive=true,
+  // keeps only printable machinecode entries, sorts newest-first by the
+  // server timestamp and fills up to capacity entries. Returns the stored
+  // count, or -1 on transport/parse failure. selectAndPrint() POSTs
+  // {"command":"select","print":true} to /api/files/local/<path> and returns
+  // the HTTP status (204 on success, 0 when unreachable).
+  //
+  // diag always reports the outcome (FETCH_OK on success); parseCode carries
+  // the ArduinoJson error code when diag == FETCH_PARSE, so the caller can
+  // re-log failures without keeping strings around.
+  enum FetchDiag : uint8_t
+  {
+    FETCH_OK = 0,
+    FETCH_CONN,
+    FETCH_HDRS,
+    FETCH_PARSE,
+    FETCH_NOFILES,
+    FETCH_NOMEM
+  };
+  int fetchFiles(OctoFile *out, size_t capacity, FetchDiag &diag, uint8_t &parseCode);
+  int selectAndPrint(const char *path);
 
   // temperature control functions
   int preheatTool(int toolTemp);

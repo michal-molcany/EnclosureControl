@@ -85,6 +85,14 @@ void resumePrint()
 {
     pollerSendCommand({PollerCommand::Job, RESUME_JOB});
 }
+void requestFilesRefresh()
+{
+    pollerRequestFilesRefresh();
+}
+void printFile(const char *path)
+{
+    pollerRequestFilePrint(path);
+}
 
 void octoPrintUpdate()
 {
@@ -103,6 +111,7 @@ void octoPrintUpdate()
     }
     disp.jobUpdate(snapshot);
     disp.setJobState(snapshot.printing || snapshot.paused, snapshot.paused);
+    disp.filesUpdate();
 
     // Enclosure link: feed live louvre/fan telemetry into the chamber view
     // (throttled to 1 Hz; stale data is greyed out by the view itself).
@@ -129,6 +138,7 @@ void setup()
     Serial.begin(115200);
     disp.Initialization();
     disp.setButtonActions(pausePrint, stopPrint, resumePrint);
+    disp.setFilesActions(requestFilesRefresh, printFile);
 disp.setToolActions(preheatPLA, preheatPETG, preheatASA, preheatOff);
 disp.setPreheatAction(Display::PreheatKind::Tool, preheatTool);
 disp.setPreheatAction(Display::PreheatKind::Bed, preheatBed);

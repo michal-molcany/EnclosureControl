@@ -120,6 +120,11 @@
 #define LV_USE_PERF_MONITOR 0
 #define LV_USE_PERF_MONITOR_LOG_MODE 0
 #define LV_USE_SNAPSHOT 0
+// OFF: briefly enabled with LV_USE_SYSMON to read pool headroom via
+// lv_mem_monitor() after the files-view pool-exhaustion crash, but the
+// monitor draws its own overlay ("48.6kB (92%)" etc.) on the screen, which
+// does not belong on the user-facing UI. Pool headroom is verified; the
+// files rows stay single clickable labels (one LVGL object per row).
 #define LV_USE_MEM_MONITOR 0
 #define LV_USE_SYSMON 0
 #define LV_USE_PROFILER 0
