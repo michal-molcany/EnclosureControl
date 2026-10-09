@@ -5,6 +5,7 @@
 #include "enclosure_link.h"
 
 #include "icons/icon_bed.h"
+#include "icons/icon_bed_waves.h"
 #include "icons/icon_c3.h"
 #include "icons/icon_chamber.h"
 #include "icons/icon_fan.h"
@@ -697,6 +698,14 @@ void Display::createLabes()
 
     createPanelIcon(_toolPanel, &icon_nozzle);
     createPanelIcon(_bedPanel, &icon_bed);
+    // Waves overlay: same parent and alignment as the body icon, so the two
+    // draw as one. The body keeps its native orange; only the waves take the
+    // temperature color (recolor at full opa replaces the pixel color fully,
+    // alpha is kept - see recolor_only in lv_draw_sw_img.c).
+    _bedWavesIcon = createPanelIcon(_bedPanel, &icon_bed_waves);
+    lv_obj_set_style_image_recolor(_bedWavesIcon, color565(TFT_ORANGE), 0);
+    lv_obj_set_style_image_recolor_opa(_bedWavesIcon, LV_OPA_COVER, 0);
+    createPanelIcon(_chamberPanel, &icon_chamber);
     createPanelIcon(_chamberPanel, &icon_chamber);
     createPanelIcon(_progressPanel, &icon_progress);
     createPanelIcon(_filamentPanel, &icon_filament);
@@ -1716,6 +1725,23 @@ void Display::printerStatisticUpdate(const PrinterSnapshot &snap)
     setLabelTextOnce(_stateLabel, "State: " + snap.state);
     updateTempLabel(_toolLabel, snap.toolActual, snap.toolTarget);
     updateTempLabel(_bedLabel, snap.bedActual, snap.bedTarget);
+
+    // The heat waves above the bed take the temperature color (cold blue,
+    // warm orange, hot red); the bed body underneath stays its native
+    // orange. Recolored only when the band changes - same heap discipline
+    // as the labels above. The orange band runs to 100 so a
+    // 100 C setpoint plus normal overshoot/ripple does not flicker red.
+    if (_bedWavesIcon)
+    {
+        const uint8_t band = snap.bedActual < 50 ? 0 : (snap.bedActual <= 100 ? 1 : 2);
+        if (band != _bedWavesBand)
+        {
+            _bedWavesBand = band;
+            static const uint16_t bandColors[] = {TFT_BLUE, TFT_ORANGE, TFT_RED};
+            lv_obj_set_style_image_recolor(_bedWavesIcon, color565(bandColors[band]), 0);
+            Serial.printf("[BED] waves band=%u temp=%.1f\n", band, snap.bedActual);
+        }
+    }
 
     // Feed both preheat screens from the same snapshot.
     _preheat[static_cast<size_t>(PreheatKind::Tool)].actual = snap.toolActual;

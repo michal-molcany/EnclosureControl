@@ -173,6 +173,8 @@ private:
     lv_obj_t *_filePanel = nullptr;
     lv_obj_t *_toolLabel = nullptr;
     lv_obj_t *_bedLabel = nullptr;
+    lv_obj_t *_bedWavesIcon = nullptr;
+    uint8_t _bedWavesBand = 255;
     lv_obj_t *_chamberLabel = nullptr;
     lv_obj_t *_progressLabel = nullptr;
     lv_obj_t *_layerLabel = nullptr;
