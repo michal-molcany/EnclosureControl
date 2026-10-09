@@ -19,7 +19,8 @@ public:
         Main,
         Chamber,
         Tool,
-        Bed
+        Bed,
+        Files
     };
 
     // Targets that get their own preheat screen, reached by tapping the
@@ -70,6 +71,11 @@ public:
     void showChamberView();
     void showToolView();
     void showBedView();
+    // Printable-files view, reached by tapping the idle "No active print"
+    // panel. Shows the cached list only; use openFilesView() for the tap
+    // entry, which also asks the poll task for a fresh fetch.
+    void showFilesView();
+    void openFilesView();
     // Send a target to OctoPrint. Inert while a print is active.
     void setPreheatTarget(PreheatKind kind, int temp);
     void selectPreheatPreset(PreheatKind kind, int index);
@@ -107,6 +113,20 @@ public:
     void hideJobConfirm();
     void confirmPendingJob();
     bool isJobConfirmOpen() const { return _pendingJob >= 0; }
+    // Newest-first file list from the poller cache (name + server date per
+    // row). Called from the UI loop like jobUpdate(); rebuilds rows only when
+    // the cache version changes.
+    void filesUpdate();
+    // Selects a cached row (0-based): highlights it and reveals the Print
+    // button. -1 clears the selection.
+    void selectFile(int index);
+    // Print confirm for the selected row, reusing the job confirm overlay
+    // ("Print <name>?"). Yes stages the path to the poll task.
+    void showPrintConfirm();
+    // The files view sends through these. Open asks the poll task for a fresh
+    // list; print carries the selected OctoPrint path (folders included).
+    using FilePrintAction = void (*)(const char *path);
+    void setFilesActions(Action open, FilePrintAction print);
     // Main-view preheat buttons: PLA / PETG / ASA / off, each setting nozzle + bed.
     void setToolActions(Action pla, Action petg, Action asa, Action off);
     // The preheat views send through this. It takes the temperature rather than
@@ -146,9 +166,14 @@ private:
     void setButtonVisibility(lv_obj_t **buttons, size_t count, bool visible);
     void createChamberView();
     void createPreheatView(PreheatKind kind, const char *title);
+    void createFilesView();
     void showPreheatView(PreheatKind kind);
     void createJobConfirm();
     void refreshPreheatDetail(PreheatKind kind);
+    // Rebuilds the file rows from _files when the cache version moved, and
+    // owns the status line (Loading / count / empty / error) plus the Print
+    // button visibility. Row buttons are created once and recycled.
+    void refreshFilesDetail();
     // Grey out and unclick a preheat screen's controls while a print runs.
     void setPreheatControlsEnabled(PreheatKind kind, bool enabled);
     void refreshChamberDetail();
@@ -204,6 +229,25 @@ private:
     lv_obj_t *_chamberContainer = nullptr;
     PreheatView _preheat[kPreheatCount];
     PreheatAction _preheatAction[kPreheatCount] = {};
+    // Printable-files view widgets. Rows are a fixed pool of clickable
+    // labels (one LVGL object per row - a button + label per row exhausted
+    // the 60 KB pool and crashed createJobConfirm), created once in
+    // createFilesView() and recycled by refreshFilesDetail(), so opening the
+    // list never mallocs. Row text lives in the labels; the list itself stays
+    // on the poll task side and is pulled entry-by-entry (no multi-KB mirror:
+    // static DRAM is ~800 bytes under the link limit).
+    lv_obj_t *_filesContainer = nullptr;
+    lv_obj_t *_filesList = nullptr;
+    lv_obj_t *_filesStatusLabel = nullptr;
+    lv_obj_t *_filesPrintButton = nullptr;
+    lv_obj_t *_fileRowLabels[MAX_PRINT_FILES] = {};
+    uint8_t _filesCount = 0;
+    uint32_t _filesVersionSeen = 0;
+    bool _filesBusy = false;
+    bool _filesError = false;
+    int _selectedFile = -1;
+    Action _filesOpenAction = nullptr;
+    FilePrintAction _filePrintAction = nullptr;
     lv_obj_t *_chamberCurrentLabel = nullptr;
     lv_obj_t *_chamberSetpointLabel = nullptr;
     lv_obj_t *_louvreLabel = nullptr;

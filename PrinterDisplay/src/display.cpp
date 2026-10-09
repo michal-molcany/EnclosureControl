@@ -339,6 +339,29 @@ namespace
             activeDisplay->showChamberView();
     }
 
+    void filesPanelEvent(lv_event_t *event)
+    {
+        // The file panel doubles as the files entry while idle; activeDisplay
+        // re-checks _jobActive, so taps on a running job's filename are inert.
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->openFilesView();
+    }
+
+    void fileRowEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) != LV_EVENT_CLICKED || !activeDisplay)
+            return;
+        const intptr_t index = reinterpret_cast<intptr_t>(lv_event_get_user_data(event));
+        if (index >= 0 && index < MAX_PRINT_FILES)
+            activeDisplay->selectFile(static_cast<int>(index));
+    }
+
+    void filesPrintEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->showPrintConfirm();
+    }
+
     void backEvent(lv_event_t *event)
     {
         if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
@@ -545,6 +568,8 @@ void Display::splashScreen(String message)
         lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
     if (_chamberContainer)
         lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
+    if (_filesContainer)
+        lv_obj_add_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
     for (size_t slot = 0; slot < kPreheatCount; ++slot)
         if (_preheat[slot].container)
             lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
@@ -581,6 +606,8 @@ void Display::hideSplash()
         showToolView();
     else if (_view == View::Bed)
         showBedView();
+    else if (_view == View::Files)
+        showFilesView();
     else
         showMainView();
 }
@@ -649,6 +676,7 @@ void Display::createLabes()
 
     _mainContainer = createViewContainer(false);
     _chamberContainer = createViewContainer(true);
+    _filesContainer = createViewContainer(true);
     for (size_t slot = 0; slot < kPreheatCount; ++slot)
         _preheat[slot].container = createViewContainer(true);
 
@@ -695,6 +723,10 @@ void Display::createLabes()
     lv_obj_add_event_cb(_bedPanel, bedPanelEvent, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_flag(_toolPanel, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(_toolPanel, toolPanelEvent, LV_EVENT_CLICKED, nullptr);
+    // Idle entry to the printable-files list. The tap handler itself checks
+    // _jobActive, so no add/remove churn is needed on layout switches.
+    lv_obj_add_flag(_filePanel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_filePanel, filesPanelEvent, LV_EVENT_CLICKED, nullptr);
 
     createPanelIcon(_toolPanel, &icon_nozzle);
     createPanelIcon(_bedPanel, &icon_bed);
@@ -797,6 +829,7 @@ void Display::createLabes()
     createChamberView();
     createPreheatView(PreheatKind::Tool, "Nozzle Preheat");
     createPreheatView(PreheatKind::Bed, "Bed Preheat");
+    createFilesView();
     createJobConfirm();
     showMainView();
     refreshChamberDetail();
@@ -1130,6 +1163,8 @@ void Display::showMainView()
         lv_obj_clear_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
     if (_chamberContainer)
         lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
+    if (_filesContainer)
+        lv_obj_add_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
     for (size_t slot = 0; slot < kPreheatCount; ++slot)
         if (_preheat[slot].container)
             lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
@@ -1155,6 +1190,8 @@ void Display::showPreheatView(PreheatKind kind)
     lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
     if (_chamberContainer)
         lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
+    if (_filesContainer)
+        lv_obj_add_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
     for (size_t other = 0; other < kPreheatCount; ++other)
         if (_preheat[other].container)
             lv_obj_add_flag(_preheat[other].container, LV_OBJ_FLAG_HIDDEN);
@@ -1168,16 +1205,261 @@ void Display::showChamberView()
     _view = View::Chamber;
     refreshChamberDetail();
     lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
+    if (_filesContainer)
+        lv_obj_add_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
     Serial.printf("[HEAP] chamber open free=%u min=%u maxblock=%u lvglTest=%d\n",
                   ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
                   (int)lv_mem_test());
 }
 
+// Same shape as the chamber/preheat views: back button, title, then content.
+// Row buttons are a fixed pool created once and recycled by
+// refreshFilesDetail(), so opening the list never mallocs in steady state.
+void Display::createFilesView()
+{
+    lv_obj_t *parent = _filesContainer;
+
+    lv_obj_t *backButton = lv_button_create(parent);
+    lv_obj_set_size(backButton, 100, 36);
+    lv_obj_set_pos(backButton, 5, 5);
+    styleButton(backButton, TFT_DARKGREY);
+    lv_obj_add_event_cb(backButton, backEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *backLabel = lv_label_create(backButton);
+    lv_label_set_text(backLabel, LV_SYMBOL_LEFT " Back");
+    lv_obj_remove_flag(backLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(backLabel);
+
+    lv_obj_t *titleLabel = lv_label_create(parent);
+    lv_label_set_text(titleLabel, "Files");
+    styleLabel(titleLabel);
+    lv_obj_align(titleLabel, LV_ALIGN_TOP_MID, 20, 12);
+
+    _filesStatusLabel = lv_label_create(parent);
+    lv_label_set_text(_filesStatusLabel, "Loading...");
+    styleLabel(_filesStatusLabel);
+    lv_obj_set_width(_filesStatusLabel, 310);
+    lv_label_set_long_mode(_filesStatusLabel, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(_filesStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(_filesStatusLabel, 5, 44);
+
+    // Only this container scrolls; every other view stays fixed (see
+    // createViewContainer). Vertical drag scrolls the rows on touch.
+    _filesList = lv_obj_create(parent);
+    lv_obj_set_pos(_filesList, 0, 64);
+    lv_obj_set_size(_filesList, SCREEN_WIDTH, 130);
+    lv_obj_set_style_bg_color(_filesList, color565(BACKGROUND), 0);
+    lv_obj_set_style_border_width(_filesList, 0, 0);
+    lv_obj_set_style_radius(_filesList, 0, 0);
+    lv_obj_set_style_pad_all(_filesList, 0, 0);
+    lv_obj_add_flag(_filesList, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(_filesList, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(_filesList, LV_SCROLLBAR_MODE_AUTO);
+
+    for (int index = 0; index < MAX_PRINT_FILES; ++index)
+    {
+        // The row IS the label: a button + label per row (40 objects) blew
+        // the 60 KB LVGL pool and crashed the next create in createLabes.
+        // Labels take CLICKED events once flagged clickable, and styleButton
+        // gives them the same row background + selection recolor. NOTE:
+        // labels default to a TRANSPARENT background, so the bg color alone
+        // is invisible - bg_opa COVER is what makes selected/unselected
+        // actually differ on screen. One rolling line per row (name only).
+        lv_obj_t *row = lv_label_create(_filesList);
+        lv_obj_set_size(row, 305, 30);
+        lv_obj_set_pos(row, 5, 4 + index * 34);
+        styleButton(row, TFT_DARKGREY);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_pad_left(row, 8, 0);
+        lv_obj_set_style_pad_right(row, 8, 0);
+        lv_obj_set_style_pad_top(row, 7, 0);
+        lv_obj_set_width(row, 305);
+        lv_label_set_long_mode(row, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_label_set_text(row, "");
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row, fileRowEvent, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(index)));
+        _fileRowLabels[index] = row;
+        lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    _filesPrintButton = lv_button_create(parent);
+    lv_obj_set_size(_filesPrintButton, 310, 34);
+    lv_obj_set_pos(_filesPrintButton, 5, 200);
+    styleButton(_filesPrintButton, TFT_DARKGREEN);
+    lv_obj_add_event_cb(_filesPrintButton, filesPrintEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *printLabel = lv_label_create(_filesPrintButton);
+    lv_label_set_text(printLabel, "Print file");
+    lv_obj_set_style_text_color(printLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_remove_flag(printLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(printLabel);
+    // Always visible; refreshFilesDetail() owns enabled vs. disabled state
+    // (disabled = greyed and not clickable until a row is selected).
+
+    refreshFilesDetail();
+}
+
+void Display::showFilesView()
+{
+    if (!_mainContainer || !_filesContainer)
+        return;
+    _view = View::Files;
+    refreshFilesDetail();
+    lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
+    if (_chamberContainer)
+        lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
+    for (size_t slot = 0; slot < kPreheatCount; ++slot)
+        if (_preheat[slot].container)
+            lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
+}
+
+void Display::openFilesView()
+{
+    // Starting a print mid-job from a second client is rejected by the poll
+    // task too; this keeps the entry itself idle-only, matching the panel
+    // that carries the "No active print" text.
+    if (_jobActive)
+        return;
+    _selectedFile = -1;
+    if (_filesOpenAction)
+        _filesOpenAction();
+    showFilesView();
+}
+
+void Display::setFilesActions(Action open, FilePrintAction print)
+{
+    _filesOpenAction = open;
+    _filePrintAction = print;
+}
+
+void Display::filesUpdate()
+{
+    if (!_filesList)
+        return;
+    uint8_t count = 0;
+    uint32_t version = 0;
+    bool busy = false;
+    bool error = false;
+    if (!pollerFilesMeta(count, version, busy, error))
+        return;
+    const bool versionMoved = version != _filesVersionSeen;
+    const bool flagsMoved = busy != _filesBusy || error != _filesError ||
+                            count != _filesCount;
+    _filesCount = count;
+    _filesVersionSeen = version;
+    _filesBusy = busy;
+    _filesError = error;
+    if (versionMoved)
+    {
+        // The rows the selection pointed at may be gone after a refresh.
+        _selectedFile = -1;
+    }
+    if (_view == View::Files && (versionMoved || flagsMoved))
+    {
+        refreshFilesDetail();
+        if (versionMoved)
+            lv_obj_scroll_to_y(_filesList, 0, LV_ANIM_OFF);
+    }
+}
+
+void Display::refreshFilesDetail()
+{
+    if (!_filesList || !_filesStatusLabel || !_filesPrintButton)
+        return;
+    if (_filesBusy && _filesCount == 0)
+        setLabelTextOnce(_filesStatusLabel, "Loading...");
+    else if (_filesError && _filesCount == 0)
+        setLabelTextOnce(_filesStatusLabel, "Couldn't load files");
+    else if (_filesCount == 0)
+        setLabelTextOnce(_filesStatusLabel, "No files on OctoPrint");
+    else if (_filesError)
+        setLabelTextOnce(_filesStatusLabel, "Couldn't refresh");
+    else
+        setLabelTextOnce(_filesStatusLabel,
+                          String(_filesCount) + (_filesCount == 1 ? " file" : " files") +
+                              " - newest first");
+
+    PrintFile entry;
+    for (int index = 0; index < MAX_PRINT_FILES; ++index)
+    {
+        lv_obj_t *row = _fileRowLabels[index];
+        if (!row)
+            continue;
+        if (index >= _filesCount || !pollerCopyFile(index, entry))
+        {
+            // A failed per-row copy keeps the previous text when the row is
+            // still in range; only out-of-range rows are hidden.
+            if (index >= _filesCount)
+                lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_HIDDEN);
+        // Selected like every other selection in this UI (material presets,
+        // confirm Yes): dark green. Rows are opaque (bg_opa COVER at
+        // creation), so the color actually renders. Only the selected row
+        // rolls its text; the rest truncate (one rolling label at a time).
+        const bool isSelected = index == _selectedFile;
+        styleButton(row, isSelected ? TFT_DARKGREEN : TFT_DARKGREY);
+        lv_label_set_long_mode(_fileRowLabels[index], isSelected
+                                                            ? LV_LABEL_LONG_SCROLL_CIRCULAR
+                                                            : LV_LABEL_LONG_DOT);
+        setLabelTextOnce(_fileRowLabels[index], entry.name);
+    }
+
+    // The button stays visible with no selection, greyed out and inert;
+    // selecting a row enables it. The confirm dialog re-validates anyway.
+    const bool hasSelection = _selectedFile >= 0 && _selectedFile < _filesCount;
+    if (hasSelection)
+    {
+        styleButton(_filesPrintButton, TFT_DARKGREEN);
+        lv_obj_set_style_bg_opa(_filesPrintButton, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_opa(_filesPrintButton, LV_OPA_COVER, 0);
+        lv_obj_add_flag(_filesPrintButton, LV_OBJ_FLAG_CLICKABLE);
+    }
+    else
+    {
+        styleButton(_filesPrintButton, TFT_DARKGREY);
+        lv_obj_set_style_bg_opa(_filesPrintButton, LV_OPA_50, 0);
+        lv_obj_set_style_text_opa(_filesPrintButton, LV_OPA_50, 0);
+        lv_obj_clear_flag(_filesPrintButton, LV_OBJ_FLAG_CLICKABLE);
+    }
+}
+
+void Display::selectFile(int index)
+{
+    if (index < 0 || index >= _filesCount)
+        index = -1;
+    if (index == _selectedFile)
+        return;
+    _selectedFile = index;
+    Serial.printf("[FILES] select %d\n", index);
+    refreshFilesDetail();
+}
+
+void Display::showPrintConfirm()
+{
+    if (!_confirmOverlay || _selectedFile < 0 || _selectedFile >= _filesCount)
+        return;
+    PrintFile entry;
+    if (!pollerCopyFile(_selectedFile, entry))
+        return;
+    _pendingJob = PRINT_FILE;
+    setLabelTextOnce(_confirmLabel, "Print file?");
+    setLabelTextOnce(_confirmSubLabel, entry.name);
+    styleButton(_confirmYesButton, TFT_DARKGREEN);
+    // Same single-fire discipline as Pause/Stop: retarget on top, one Yes ==
+    // one staged print even on rapid double-taps.
+    lv_obj_move_to_index(_confirmOverlay, -1);
+    lv_obj_clear_flag(_confirmOverlay, LV_OBJ_FLAG_HIDDEN);
+    Serial.printf("[FILES] print confirm shown %s\n", entry.path);
+}
+
 void Display::setChamberControl(ChamberControl mode)
 {
     // Legacy 2-state API: Auto maps to the Temperature tab, Manual to Manual.
-    setChamberTab(mode == ChamberControl::Auto ? ChamberTab::Temperature : ChamberTab::Manual);
+        setChamberTab(mode == ChamberControl::Auto ? ChamberTab::Temperature : ChamberTab::Manual);
 }
 
 void Display::setChamberTab(ChamberTab tab)
@@ -1514,6 +1796,24 @@ void Display::hideJobConfirm()
 void Display::confirmPendingJob()
 {
     const int pending = _pendingJob;
+    if (pending == PRINT_FILE)
+    {
+        _pendingJob = -1;
+        if (_confirmOverlay)
+            lv_obj_add_flag(_confirmOverlay, LV_OBJ_FLAG_HIDDEN);
+        // Re-fetch the path: the list may have refreshed between open and
+        // Yes, and the poll task re-validates the selection anyway.
+        PrintFile entry;
+        if (_selectedFile >= 0 && _selectedFile < _filesCount &&
+            pollerCopyFile(_selectedFile, entry) && _filePrintAction)
+        {
+            Serial.printf("[FILES] print confirm yes %s\n", entry.path);
+            _filePrintAction(entry.path);
+        }
+        // Stay on the files view: setJobState() brings the main view back
+        // once the job actually shows up as active.
+        return;
+    }
     if (pending != PAUSE_JOB && pending != STOP_JOB)
     {
         hideJobConfirm();
@@ -1618,7 +1918,7 @@ void Display::applyMainJobLayout(bool active)
         lv_obj_set_hidden(_progressBar, true);
         lv_obj_set_width(_fileNameLabel, 135);
         lv_label_set_long_mode(_fileNameLabel, LV_LABEL_LONG_DOT);
-        setLabelTextOnce(_fileNameLabel, "No active print");
+        setLabelTextOnce(_fileNameLabel, "Select file...");
         lv_obj_center(_fileNameLabel);
         for (int index = 0; index < 4; ++index)
             lv_obj_set_pos(_preheatButtons[index], preheatX[index], 190);
@@ -1658,6 +1958,10 @@ void Display::setJobState(bool active, bool paused)
         applyMainJobLayout(active);
         setPreheatButtonsVisibility(!active);
         refreshJobButtons();
+        // A print started from the files view (or another client) takes over
+        // the screen: the progress UI lives on the main view.
+        if (active && _view == View::Files)
+            showMainView();
     }
     if (changed || _enclosureCommandDirty)
     {
