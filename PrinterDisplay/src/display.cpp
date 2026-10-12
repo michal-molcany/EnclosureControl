@@ -4,6 +4,7 @@
 
 #include "enclosure_link.h"
 
+#include "icons/icon_api.h"
 #include "icons/icon_bed.h"
 #include "icons/icon_bed_waves.h"
 #include "icons/icon_c3.h"
@@ -118,7 +119,22 @@ namespace
 {
     TFT_eSPI displayTft;    SPIClass touchSPI(HSPI);
     XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
-    lv_color_t drawBuffer[320 * 10];
+    // LVGL partial-render buffer, in scanlines. Static DRAM here is extremely
+    // tight (see the sizing note below), so this was reduced from 10 to 6
+    // lines to make room for the HTTP API fallback's link-time footprint.
+    //
+    // Sizing: on the esp32dev target the linker had only 624 bytes of spare
+    // internal DRAM before the enclosure-API client was added, which needs
+    // ~2.2 KB of statics (HTTPClient + ArduinoJson + WiFi). This buffer is
+    // 320 * LINES * sizeof(lv_color_t); at 6 lines it frees ~3.8 KB, which
+    // restores real headroom.
+    //
+    // The trade is flush count, not correctness: LVGL redraws in buffer-sized
+    // chunks, so fewer lines means more, smaller SPI transactions per
+    // full-screen update. The panel has its own GRAM, so nothing is lost in
+    // quality - only a little throughput on redraw-heavy views.
+    static constexpr int kDrawLines = 6;
+    lv_color_t drawBuffer[320 * kDrawLines];
     // Job buttons on the main view (pause/stop/resume), in JobCommand order.
     Display::Action buttonActions[3] = {};
     // Main-view tool preheats: PLA / PETG / ASA / off.
@@ -705,6 +721,20 @@ void Display::createLabes()
     lv_obj_set_style_image_recolor_opa(_encLinkIcon, LV_OPA_COVER, 0);
     _encLinkUp = false;
 
+    // HTTP enclosure-API fallback indicator. Left of the C3 icon, which shares
+    // its row. Hidden unless the API is the live transport; the C3 icon already
+    // reports freshness regardless of transport. Never recolored: its presence
+    // IS the signal, so it is drawn green and shown/hidden rather than greyed
+    // out (see refreshEnclosureLinkHeader).
+    _apiLinkIcon = lv_image_create(_mainContainer);
+    lv_image_set_src(_apiLinkIcon, &icon_api);
+    lv_obj_set_size(_apiLinkIcon, 16, 16);
+    lv_obj_set_pos(_apiLinkIcon, 230, 6);
+    lv_obj_set_style_image_recolor(_apiLinkIcon, color565(TFT_GREEN), 0);
+    lv_obj_set_style_image_recolor_opa(_apiLinkIcon, LV_OPA_COVER, 0);
+    lv_obj_add_flag(_apiLinkIcon, LV_OBJ_FLAG_HIDDEN);
+    _apiLinkUp = false;
+
     lv_obj_t *separator = lv_obj_create(_mainContainer);
     lv_obj_set_pos(separator, 0, 28);
     lv_obj_set_size(separator, SCREEN_WIDTH, 1);
@@ -737,7 +767,6 @@ void Display::createLabes()
     _bedWavesIcon = createPanelIcon(_bedPanel, &icon_bed_waves);
     lv_obj_set_style_image_recolor(_bedWavesIcon, color565(TFT_ORANGE), 0);
     lv_obj_set_style_image_recolor_opa(_bedWavesIcon, LV_OPA_COVER, 0);
-    createPanelIcon(_chamberPanel, &icon_chamber);
     createPanelIcon(_chamberPanel, &icon_chamber);
     createPanelIcon(_progressPanel, &icon_progress);
     createPanelIcon(_filamentPanel, &icon_filament);
@@ -1569,13 +1598,30 @@ void Display::enclosureUpdate(const EnclosureSnapshot &snap)
 
 void Display::refreshEnclosureLinkHeader()
 {
-    if (!_encLinkIcon)
-        return;
-    const bool up = _enclosure.valid && (millis() - _enclosure.rxMs < ENC_LINK_STALE_MS);
-    if (up == _encLinkUp)
-        return;
-    _encLinkUp = up;
-    lv_obj_set_style_image_recolor(_encLinkIcon, color565(up ? TFT_GREEN : 0x808080), 0);
+    const bool fresh = _enclosure.valid && (millis() - _enclosure.rxMs < ENC_LINK_STALE_MS);
+
+    // C3 icon tracks telemetry freshness, whatever the transport.
+    if (_encLinkIcon && fresh != _encLinkUp)
+    {
+        _encLinkUp = fresh;
+        lv_obj_set_style_image_recolor(_encLinkIcon, color565(fresh ? TFT_GREEN : 0x808080), 0);
+    }
+
+    // API icon appears only while the HTTP fallback is the live carrier (fresh
+    // AND the newest telemetry came from the API). Hidden otherwise, so its
+    // presence itself reports that the API connection is established.
+    if (_apiLinkIcon)
+    {
+        const bool apiUp = fresh && _enclosure.fromApi;
+        if (apiUp != _apiLinkUp)
+        {
+            _apiLinkUp = apiUp;
+            if (apiUp)
+                lv_obj_clear_flag(_apiLinkIcon, LV_OBJ_FLAG_HIDDEN);
+            else
+                lv_obj_add_flag(_apiLinkIcon, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 void Display::chamberSetpointDelta(int delta)

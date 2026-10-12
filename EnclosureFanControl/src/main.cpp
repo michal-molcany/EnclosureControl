@@ -4,6 +4,9 @@
 #include <ArduinoOTA.h>
 
 #include "HttpOta.h"
+#include "enclosure_api_server.h"
+#include "enclosure_version.h"
+#include <ESPmDNS.h>
 
 ServoLouver louver = ServoLouver();
 TemperatureRegulation tempRegulation(&louver);
@@ -15,6 +18,33 @@ static secrets sec;
 static OctoSnapshot lastGood;
 static bool haveGood = false;
 static unsigned long lastUiMs = 0;
+
+// Latest chamber reading, mirrored here so the enclosure-API telemetry callback
+// (a free function with no access to loop() locals) reports the same value the
+// OLED and ESP-NOW telemetry use. Refreshed every loop iteration.
+static double g_chamberTemp = 0.0;
+static bool g_chamberValid = false;
+
+// Serves GET /api/enclosure. The CYD requests this only while its ESP-NOW link
+// is stale, so this path never runs once the radios agree on a channel again.
+static EnclosureApi::Telemetry provideEnclosureTelemetry()
+{
+  EnclosureApi::Telemetry t;
+  t.louvrePct = tempRegulation.louvrePercent();
+  t.fanPct = tempRegulation.fanPercent();
+  t.chamberCx10 = g_chamberValid ? (int16_t)(g_chamberTemp * 10.0) : ENC_CHAMBER_INVALID;
+  t.state = tempRegulation.stateCode();
+  t.mode = tempRegulation.controlModeCode();
+  return t;
+}
+
+// Applies a command POSTed to /api/enclosure. applyRemoteCommand() refreshes
+// remoteLinkAlive(), so the "linked" footer and the command-loss fallback behave
+// over the API exactly as they do over ESP-NOW.
+static void applyEnclosureApiCommand(const EnclosureCommand &cmd)
+{
+  tempRegulation.applyRemoteCommand(cmd);
+}
 
 // Suppresses the normal chamber repaint so the OLED shows OTA progress (and
 // lingers on a failure) instead of being overwritten every second.
@@ -118,6 +148,10 @@ void setup()
     delay(50);
   }
   delay(500);
+  // Identify the build and which board it is on. Printed first, before anything
+  // that can block on the network, so a serial capture alone answers "what is
+  // actually running here?" even if boot later stalls.
+  printFirmwareVersion("C3");
   Serial.println("Starting up...");
   Serial.flush();
 
@@ -148,7 +182,7 @@ void setup()
   // networking back; it owns the AP until autoConnect() returns.
   otaBegin();
   HttpOta::begin(OTA_HTTP_PORT, OTA_HTTP_USER, sec.getOTAPassword().c_str(),
-                 SERIAL_DEBUG != 0, otaStatus);
+                 SERIAL_DEBUG != 0, otaStatus, "C3");
 
   // Network lives on the background task from here on; loop only copies
   // snapshots and never blocks on a socket (CYD-style).
@@ -169,6 +203,23 @@ void setup()
   tempRegulation.begin();
 
   espnowLinkBegin(ENC_PEER_MAC);
+
+  // Enclosure API fallback (the CYD polls this only when its ESP-NOW link is
+  // stale). Served on its own port, with the shared token from
+  // include/enclosure_api.h. The mDNS host is already registered by
+  // ArduinoOTA.begin() above, so just advertise the port as an _http._tcp service
+  // for the CYD's mDNS queryHost()/browse.
+  EnclosureApi::begin(ENC_API_PORT, ENC_API_TOKEN, provideEnclosureTelemetry,
+                      applyEnclosureApiCommand);
+  MDNS.addService("http", "tcp", ENC_API_PORT);
+#if SERIAL_DEBUG
+  // The CYD looks this board up by the mDNS name ArduinoOTA.begin() registered
+  // above, which is OTA_ARDUINO_HOSTNAME - the same value as the CYD's
+  // ENC_API_MDNS_NAME, but it lives on the side that owns it.
+  Serial.printf("[API] enclosure api on port %u, mDNS %s.local, auth=%s\n",
+                (unsigned)ENC_API_PORT, OTA_ARDUINO_HOSTNAME,
+                ENC_API_TOKEN[0] ? "token" : "OPEN");
+#endif
 }
 
 void loop()
@@ -183,6 +234,7 @@ void loop()
   // Non-blocking: services the UDP handshake and image chunks while idle.
   ArduinoOTA.handle();
   HttpOta::poll();
+  EnclosureApi::poll();
 
   // Non-blocking copy of the latest poll (20ms mutex try inside).
   // Keep-last-good: regulation/display continue on lastGood when the
@@ -196,6 +248,8 @@ void loop()
   const OctoSnapshot &effective = haveGood ? lastGood : snap;
   const bool valid = haveGood ? octoSnapshotValid(lastGood) : false;
   const double chamberTemp = haveGood ? lastGood.chamberActual : 0.0;
+  g_chamberTemp = chamberTemp;
+  g_chamberValid = valid;
 
   // Single louvre owner: TemperatureRegulation drives fan + servo.
   // (Calling louver.updateForPrinter() here as well would fight it.)
