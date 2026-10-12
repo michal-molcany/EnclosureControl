@@ -17,6 +17,10 @@ struct EnclosureSnapshot
     uint8_t seq = 0;
     unsigned long rxMs = 0;
     bool valid = false;
+    // True when the newest telemetry arrived over the HTTP API fallback rather
+    // than ESP-NOW. Drives the header's API icon; the C3 icon still reflects
+    // freshness regardless of transport.
+    bool fromApi = false;
 };
 
 // Starts the link task. Call AFTER WiFi is connected (ESP-NOW shares the STA
@@ -50,6 +54,8 @@ struct EnclosureLinkStats
     uint32_t hellosRx = 0;  // discovery hellos heard from any peer
     bool peerLearned = false;               // peer came from discovery, not const.h
     uint8_t peerChannelReported = 0;        // channel the peer says it is on
+    bool apiActive = false;                 // HTTP API fallback currently feeding telemetry
+    unsigned long lastApiRxMs = 0;          // last telemetry accepted from the API
 };
 EnclosureLinkStats enclosureLinkStats();
 

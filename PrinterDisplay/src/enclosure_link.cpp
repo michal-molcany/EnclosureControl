@@ -2,8 +2,11 @@
 #include "enclosure_discovery.h"
 #include "enclosure_channel.h"
 #include "const.h"
+#include "enclosure_api_client.h"
 
 #include <WiFi.h>
+#include <IPAddress.h>
+#include <WiFiClient.h>
 #include <esp_now.h>
 
 namespace
@@ -51,6 +54,39 @@ namespace
     uint8_t lastDrop = ENC_DROP_NONE;
     unsigned long lastRxMs = 0;
     unsigned long lastTxMs = 0;
+
+    // ESP-NOW receive timestamp, kept separate from lastRxMs (which the API
+    // fallback also updates). Only this one decides whether ESP-NOW is still the
+    // live transport, so a successful API poll can never be mistaken for ESP-NOW
+    // coming back and prematurely switch the arbiter off.
+    unsigned long lastEspNowRxMs = 0;
+
+    // HTTP API fallback (lib/EnclosureApi). Engages only while ESP-NOW is stale -
+    // the channel/AP split no channel pin can fix - and rides the shared IP
+    // network instead. ESP-NOW remains primary; see the header comment block.
+    IPAddress apiHost;
+    bool apiHostKnown = false;
+    bool apiResolveFailed = false;
+    // False until the first resolve attempt. A separate flag rather than
+    // testing apiResolveMs == 0, because millis() legitimately returns 0 just
+    // after boot and that must not be mistaken for "never tried".
+    bool apiResolveTried = false;
+    unsigned long apiResolveMs = 0;
+    unsigned long apiPollMs = 0;
+    unsigned long apiCmdMs = 0;
+    unsigned long lastApiDiagMs = 0;
+    bool apiActive = false;
+    unsigned long lastApiRxMs = 0;
+    // True while an address is cached but every request against it has failed.
+    // Distinguishes "we have no idea where the C3 is" from "we know exactly
+    // where it is and it is not answering", which need very different retry
+    // cadences - see apiResolveDue().
+    bool apiHostUnreachable = false;
+    // Reused socket for every API request. Held here rather than inside the
+    // client calls so the connection is opened once per poll/heartbeat instead
+    // of once per HTTPClient, and so the type is a plain WiFiClient - see the
+    // TLS note in enclosure_api_client.h.
+    WiFiClient apiSock;
 
     const char *dropName(uint8_t reason)
     {
@@ -257,10 +293,154 @@ namespace
         shared.seq = tele->seq;
         shared.rxMs = millis();
         shared.valid = true;
+        shared.fromApi = false;
         xSemaphoreGive(snapshotMutex);
         lastRxMs = shared.rxMs;
+        lastEspNowRxMs = shared.rxMs;
         ++rxOk;
         hasData = true;
+    }
+
+    // Decides whether it is time to re-resolve the C3's address.
+    //
+    // This gate is the whole reason the fallback is not a network busy-loop.
+    // resolve() costs up to 1.5 s of blocking mDNS query, and both failure paths
+    // below (resolve failed, request failed) invalidate apiHostKnown - which is
+    // also the "resolve now" condition. Testing `!apiHostKnown` alone therefore
+    // retried on every single link tick, i.e. an mDNS query every ~50 ms for as
+    // long as ESP-NOW stayed down: the exact situation the fallback exists for.
+    //
+    // So the retry rate depends on WHY we last lost the host:
+    //   no host at all      -> retry on the normal resolve cadence, since the
+    //                          cause is most likely a C3 that is simply not up
+    //                          yet and will answer as soon as it is.
+    //   host known, refusing-> retry only on the slow unreachable backoff. The
+    //                          address is almost certainly still right (a DHCP
+    //                          move would be a separate, rarer event), so
+    //                          re-resolving quickly just burns mDNS traffic and
+    //                          keeps the task blocked.
+    bool apiResolveDue(unsigned long now)
+    {
+        // Never attempted: resolve at once. Without this the very first attempt
+        // is gated on `now - apiResolveMs`, and apiResolveMs starts at 0, so the
+        // first resolve is deferred a full ENC_API_RESOLVE_MS (30 s) after boot.
+        // That is exactly when the fallback is most needed - it is the window in
+        // which the C3 is still coming up on the network - so the first attempt
+        // must not wait.
+        if (!apiResolveTried)
+            return true;
+        const unsigned long due = apiHostUnreachable ? ENC_API_UNREACHABLE_RETRY_MS
+                                                     : ENC_API_RESOLVE_MS;
+        return (now - apiResolveMs) >= due;
+    }
+
+    // HTTP API fallback. Called only while ESP-NOW telemetry is stale (i.e. the
+    // channel/AP split). Pulls telemetry from the C3 and pushes commands back over
+    // the IP network that both boards share. Feeds the SAME `shared` snapshot the
+    // UI consumes, so the chamber view and both header icons behave identically
+    // whichever transport is live. Best-effort throughout: any failure just drops
+    // back to re-resolving and leaves the last snapshot in place.
+    void serviceApiFallback(unsigned long now, bool cmdFresh)
+    {
+        // (Re)resolve the C3 address initially, on a slow cadence, and after any
+        // request fails (a DHCP lease can move it).
+        if (!apiHostKnown ? apiResolveDue(now) : false)
+        {
+            apiResolveMs = now;
+            apiResolveTried = true;
+            if (EnclosureApi::resolve(apiHost, ENC_API_MDNS_NAME, ENC_API_STATIC_IP))
+            {
+                apiHostUnreachable = false;
+                if (!apiHostKnown)
+                {
+                    apiHostKnown = true;
+                    apiResolveFailed = false;
+                    Serial.print("[ENC-LINK] api: resolved ");
+                    Serial.println(apiHost.toString());
+                }
+            }
+            else
+            {
+                if (!apiResolveFailed)
+                {
+                    apiResolveFailed = true;
+                    Serial.println("[ENC-LINK] api: resolve FAILED (mDNS + static fallback)");
+                }
+                apiHostKnown = false;
+                apiActive = false;
+                return;
+            }
+        }
+
+        // Refresh a known-but-unreachable address on the slow cadence only.
+        if (apiHostKnown && apiHostUnreachable && apiResolveDue(now))
+        {
+            apiResolveMs = now;
+            if (EnclosureApi::resolve(apiHost, ENC_API_MDNS_NAME, ENC_API_STATIC_IP))
+            {
+                apiHostUnreachable = false;
+                Serial.print("[ENC-LINK] api: re-resolved ");
+                Serial.println(apiHost.toString());
+            }
+        }
+
+        if (!apiHostKnown)
+        {
+            apiActive = false;
+            return;
+        }
+
+        // Telemetry, one request per ENC_API_POLL_MS. getTelemetry()/postCommand()
+        // can block up to ~1.2 s; this task is pure housekeeping, so that is fine.
+        if (now - apiPollMs >= ENC_API_POLL_MS)
+        {
+            apiPollMs = now;
+            EnclosureTelemetry t = {};
+            if (EnclosureApi::getTelemetry(apiHost, ENC_API_PORT, ENC_API_TOKEN, apiSock, t))
+            {
+                if (xSemaphoreTake(snapshotMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+                {
+                    shared.louvrePct = t.louvrePct;
+                    shared.fanPct = t.fanPct;
+                    shared.chamberCx10 = t.chamberCx10;
+                    shared.state = t.state;
+                    shared.mode = t.mode;
+                    shared.seq = t.seq;
+                    shared.rxMs = millis();
+                    shared.valid = true;
+                    shared.fromApi = true;
+                    xSemaphoreGive(snapshotMutex);
+                    lastRxMs = shared.rxMs;
+                    hasData = true;
+                    apiActive = true;
+                    apiHostUnreachable = false;
+                    lastApiRxMs = shared.rxMs;
+                }
+            }
+            else
+            {
+                // Address is probably still correct; stop hammering it and let
+                // the slow backoff decide when to re-resolve.
+                apiHostUnreachable = true;
+                apiActive = false;
+            }
+        }
+
+        // Command: push on change OR every heartbeat. The heartbeat matters: the
+        // C3's remoteLinkAlive() lapses after ENC_LINK_LOSS_TIMEOUT_MS without a
+        // command, so a steady POST keeps it treating the CYD as primary and stops
+        // it falling back to its own OctoPrint material.
+        //
+        // cmdFresh honours a UI change immediately, exactly as the ESP-NOW path
+        // does. Without it a manual-mode tap took up to a full heartbeat (2 s) to
+        // reach the C3, which reads as the display ignoring the button - the
+        // fallback must not be slower to react than the transport it replaces.
+        if (hasCmd && (cmdFresh || (now - apiCmdMs >= ENC_CMD_HEARTBEAT_INTERVAL_MS)))
+        {
+            apiCmdMs = now;
+            if (!EnclosureApi::postCommand(apiHost, ENC_API_PORT, ENC_API_TOKEN, apiSock, lastCmd))
+                apiHostUnreachable = true;
+        }
     }
 
     void linkTask(void *)
@@ -324,6 +504,12 @@ namespace
             }
             unsigned long now = millis();
 
+            // ESP-NOW is primary. Only while it has been quiet for a full stale
+            // window (the channel/AP split signature) does the HTTP API fallback
+            // take over. Based on lastEspNowRxMs, NOT lastRxMs, so a good API poll
+            // can never masquerade as ESP-NOW returning.
+            const bool espNowFresh = (now - lastEspNowRxMs < ENC_LINK_STALE_MS);
+
             // Adopt a peer discovered on the air. Done here, not in the
             // callback, because it calls into esp_now peer management.
             if (pendingHello)
@@ -376,7 +562,10 @@ namespace
                 }
             }
 
-            if (peerSet && hasCmd)
+            // ESP-NOW commands only while the radio link is the live transport;
+            // once the API carries the link, sending into a channel split is
+            // futile, so the fallback path owns command duty.
+            if (peerSet && hasCmd && espNowFresh)
             {
                 if (fresh || (now - lastHeartbeatMs >= ENC_CMD_HEARTBEAT_INTERVAL_MS))
                 {
@@ -384,6 +573,11 @@ namespace
                     sendCmd(lastCmd);
                 }
             }
+
+            // HTTP API fallback: only while ESP-NOW telemetry is stale. `fresh`
+            // is the change flag drained above, so a UI change is POSTed at once.
+            if (!espNowFresh)
+                serviceApiFallback(now, fresh);
             if (now - lastResyncMs >= ENC_CHANNEL_RESYNC_MS)
             {
                 lastResyncMs = now;
@@ -422,6 +616,40 @@ namespace
                 Serial.print(" age=");
                 Serial.print(rxOk ? (now - lastRxMs) : 0);
                 Serial.println("ms");
+            }
+            // Separate, slower line only while the fallback is (or should be)
+            // running, so the transport in use is unambiguous on the log.
+            if (!espNowFresh && (now - lastApiDiagMs >= ENC_DIAG_INTERVAL_MS))
+            {
+                lastApiDiagMs = now;
+                Serial.print("[ENC-LINK] api ");
+                Serial.print(apiActive ? "UP" : "down");
+                Serial.print(" host=");
+                Serial.print(apiHostKnown ? apiHost.toString() : String("?"));
+                Serial.print(" age=");
+                // Recompute "now" rather than reusing the loop's captured value: the API
+                // call above blocks for up to ~1.2 s, so `now` predates
+                // lastApiRxMs and the subtraction would wrap to a nonsense
+                // ~4.29e9 ms.
+                Serial.print(apiActive ? (millis() - lastApiRxMs) : 0);
+                Serial.print("ms");
+                // Name the failure instead of printing a bare "down". "down" is
+                // indistinguishable from a dead socket, a rejected token, or a
+                // malformed body - and those three need completely different
+                // fixes. A 401 in particular means only that the token differs
+                // between the two firmware builds.
+                if (!apiActive)
+                {
+                    Serial.print(" why=");
+                    Serial.print(EnclosureApi::failureText(EnclosureApi::lastFailure()));
+                    const int st = EnclosureApi::lastHttpStatus();
+                    if (st)
+                    {
+                        Serial.print(" http=");
+                        Serial.print(st);
+                    }
+                }
+                Serial.println();
             }
             vTaskDelay(pdMS_TO_TICKS(50));
         }
@@ -464,7 +692,9 @@ void enclosureLinkStart(const uint8_t *peerMacIn)
 
     snapshotMutex = xSemaphoreCreateMutex();
     commandQueue = xQueueCreate(8, sizeof(EnclosureCommand));
-    xTaskCreatePinnedToCore(linkTask, "encLink", 8192, nullptr, 1, nullptr, 0);
+    // Larger than a bare ESP-NOW task needs: the HTTP API fallback uses
+    // HTTPClient + ArduinoJson on this same task, which needs headroom beyond 8 KB.
+    xTaskCreatePinnedToCore(linkTask, "encLink", 12288, nullptr, 1, nullptr, 0);
 }
 
 bool enclosureLinkCopy(EnclosureSnapshot &out)
@@ -500,6 +730,8 @@ EnclosureLinkStats enclosureLinkStats()
     s.hellosRx = hellosRx;
     s.peerLearned = learned;
     s.peerChannelReported = peerDiscChannel;
+    s.apiActive = apiActive;
+    s.lastApiRxMs = lastApiRxMs;
     return s;
 }
 

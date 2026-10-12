@@ -107,6 +107,35 @@
 // Telemetry older than this counts as stale (greyed out / "--").
 #define ENC_LINK_STALE_MS 5000
 
+// HTTP API fallback for the enclosure link (lib/EnclosureApi). ESP-NOW is primary
+// and stays that way; this only engages once telemetry has been stale for
+// ENC_LINK_STALE_MS, which is exactly the channel/AP split that kills ESP-NOW
+// (see ENC_WIFI_CHANNEL below). An HTTP request rides the IP network, which both
+// boards share regardless of channel or BSSID, so it bridges the split that no
+// firmware channel pin can. The C3 SERVES this; the CYD only queries it.
+//
+// ENC_API_PORT and ENC_API_TOKEN are shared with the C3 and live in the
+// git-ignored ../../include/enclosure_api.h, so the two cannot drift apart.
+#if defined(__has_include)
+#  if !__has_include("enclosure_api.h")
+#    error "Missing ../include/enclosure_api.h - copy include/enclosure_api.example.h to include/enclosure_api.h (at the repo root) and set the API port + token."
+#  endif
+#endif
+#include "enclosure_api.h"
+
+#define ENC_API_MDNS_NAME "enclosure-fan-control"
+#define ENC_API_STATIC_IP "0.0.0.0" // dotted-quad fallback; 0.0.0.0 = disabled
+#define ENC_API_POLL_MS 1000        // telemetry cadence while the fallback runs
+#define ENC_API_RESOLVE_MS 30000// how often to re-resolve a working C3
+#define ENC_API_UNREACHABLE_RETRY_MS 30000 // re-resolve cadence once a known
+//                                           address starts refusing. Deliberately
+//                                           the same order as ENC_API_RESOLVE_MS:
+//                                           a cached address that is not answering
+//                                           is retried on a slow loop, not per
+//                                           tick, so an unreachable C3 cannot
+//                                           turn the fallback into an mDNS busy
+//                                           loop while ESP-NOW is down.
+
 // Force the Wi-Fi channel after joining. 0 = follow the access point.
 //
 // ESP-NOW only works between peers on the same channel, and "the same SSID" does

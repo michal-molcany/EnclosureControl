@@ -7,6 +7,7 @@
 #include "display.h"
 #include "poller.h"
 #include "enclosure_link.h"
+#include "enclosure_version.h"
 #include "secrets.h"
 
 unsigned long display_lasttime = 0;
@@ -136,6 +137,10 @@ void octoPrintUpdate()
 void setup()
 {
     Serial.begin(115200);
+    // First line out of the port: identifies the build and which board it is on,
+    // so a serial capture alone answers "what is actually running here?".
+    // Printed before anything that can block, so it survives a later hang.
+    printFirmwareVersion("CYD");
     disp.Initialization();
     disp.setButtonActions(pausePrint, stopPrint, resumePrint);
     disp.setFilesActions(requestFilesRefresh, printFile);
@@ -174,7 +179,7 @@ disp.setPreheatAction(Display::PreheatKind::Bed, preheatBed);
     // only outbound traffic is needed (ArduinoOTA is blocked by the host
     // firewall - see the README).
     HttpOta::begin(OTA_HTTP_PORT, OTA_HTTP_USER, sec.getOTAPassword().c_str(),
-                   SERIAL_DEBUG != 0, otaStatus);
+                   SERIAL_DEBUG != 0, otaStatus, "CYD");
     disp.createLabes();
 }
 

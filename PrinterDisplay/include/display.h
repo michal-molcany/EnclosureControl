@@ -211,6 +211,11 @@ private:
     lv_obj_t *_wifiBars[4] = {};
     lv_obj_t *_encLinkIcon = nullptr;
     bool _encLinkUp = false;
+    // Header icon for the HTTP enclosure-API fallback link. Shown only while the
+    // API is the transport carrying C3 telemetry (fromApi + fresh); hidden the
+    // rest of the time. Distinct glyph from the C3 chip so the two read apart.
+    lv_obj_t *_apiLinkIcon = nullptr;
+    bool _apiLinkUp = false;
     lv_obj_t *_splashLabel = nullptr;
     lv_obj_t *_splashSpinner = nullptr;
     uint8_t _splashFrame = 0;

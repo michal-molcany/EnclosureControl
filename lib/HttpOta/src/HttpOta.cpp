@@ -4,6 +4,9 @@
 #include <WebServer.h>
 #include <WiFi.h>
 
+// Firmware version echoed by /status, shared by both boards via lib/EnclosureProto.
+#include <enclosure_version.h>
+
 // All mutable state lives in one struct. It deliberately does NOT use a member
 // named "busy": the public API is HttpOta::busy(), and a file-scope variable of
 // the same name would be shadowed by that function inside namespace HttpOta,
@@ -18,6 +21,9 @@ namespace
         // Copied in begin() so callers can pass a temporary.
         String username = "enclosure";
         String password;
+        // Short board label echoed by /status. Defaults to "?" so a caller that
+        // does not supply one still gets well-formed output.
+        const char *boardRole = "?";
         bool verbose = false;
         HttpOta::StatusFn onStatus = nullptr;
 
@@ -209,12 +215,14 @@ namespace
 } // namespace
 
 void HttpOta::begin(uint16_t port, const char *user, const char *pass,
-                    bool verboseLog, StatusFn sink)
+                    bool verboseLog, StatusFn sink, const char *role)
 {
     st.username = (user && *user) ? user : "enclosure";
     st.password = pass ? pass : "";
     st.verbose = verboseLog;
     st.onStatus = sink;
+    // Points at the caller's string literal, which outlives the process.
+    st.boardRole = (role && *role) ? role : "?";
 
     if (st.server == nullptr)
     {
@@ -248,9 +256,14 @@ void HttpOta::begin(uint16_t port, const char *user, const char *pass,
         {
             if (!authorized())
                 return;
-            char b[112];
+            // Board role and firmware version lead the line, so a single
+            // GET /status answers "which board is this, and what is running on
+            // it?" without needing the serial port - which is the only way to
+            // check a board that is mounted out of reach.
+            char b[192];
             snprintf(b, sizeof(b),
-                     "busy=%u ok=%u starts=%u written=%u total=%u age=%lums err=%s",
+                     "board=%s fw=v%s proto=v%d busy=%u ok=%u starts=%u written=%u total=%u age=%lums err=%s",
+                     st.boardRole, ENC_FW_VERSION_STR, ENC_PROTO_VERSION,
                      st.uploading ? 1u : 0u, st.uploadOk ? 1u : 0u, st.starts,
                      static_cast<unsigned>(st.written),
                      static_cast<unsigned>(st.contentTotal),

@@ -111,6 +111,76 @@ channel at pair time for exactly this reason.
 Once the channels agree, the broadcast discovery handshake pairs the two boards
 on its own, and a wrong `ENC_PEER_MAC` on either side becomes irrelevant.
 
+## HTTP fallback transport
+
+ESP-NOW is and stays the primary transport. It is fast, needs no network, and
+works even when the router is unreachable. But none of the fixes above help when
+the two boards are on **different AP radios** — the measured fault on this
+hardware, where the BSSIDs differed even though the SSID matched. In that case
+the link is simply gone, and no firmware setting recovers it, because a station
+re-associates to whatever radio it is on.
+
+For exactly that case, `lib/EnclosureApi` adds a second transport that rides the
+IP network, which both boards share regardless of channel or BSSID.
+
+### When it engages
+
+The CYD engages the fallback only while ESP-NOW telemetry has been stale for
+`ENC_LINK_STALE_MS` (5 s). Freshness is tracked from the **ESP-NOW** receive
+timestamp specifically, not from the shared snapshot's timestamp — otherwise a
+successful API poll would look like ESP-NOW recovering and would switch the
+arbiter back off on its own data.
+
+When the fallback is live, ESP-NOW command sends stop: firing packets into a
+channel split accomplishes nothing, and the C3 would then be driven by whichever
+transport answered first.
+
+The CYD header shows the API icon alongside the C3 chip icon while this is
+happening, so the transport in use is visible without a serial cable.
+
+### Endpoints
+
+The C3 serves these on `ENC_API_PORT` (8081), deliberately separate from
+`OTA_HTTP_PORT` (8080) so a firmware upload and the API never contend for one
+socket. Both require HTTP Basic auth with `ENC_API_TOKEN` as the password.
+
+```text
+GET  /api/enclosure  ->  {"louvre":0-100,"fan":0-100,"chamber":int16,"state":u8,"mode":u8,"seq":u8}
+POST /api/enclosure  <-  {"mode":u8,"setpoint":0-60,"louvre":0-100,"fan":0-100,"material":u8,"job":0|1}
+```
+
+`chamber` is in 0.1 °C units and uses `ENC_CHAMBER_INVALID` (`INT16_MIN`) when
+unknown, exactly as the struct does. Field names and meanings mirror
+`EnclosureTelemetry` / `EnclosureCommand`; `seq` is a per-request counter on this
+transport, independent of the ESP-NOW one, since the two packet streams are not
+comparable.
+
+The port and token are shared between both firmwares through the git-ignored
+`include/enclosure_api.h` (copy from `enclosure_api.example.h`), so the two
+cannot drift apart the way a duplicated `#define` can.
+
+### Discovery
+
+The CYD finds the C3 by mDNS A-record query on `enclosure-fan-control`, which the
+C3 registers via `ArduinoOTA.begin()`. `ENC_API_STATIC_IP` in the CYD's
+`const.h` is a dotted-quad fallback for networks where mDNS is blocked; it is
+`0.0.0.0` (disabled) by default.
+
+Re-resolution happens on a 30 s cadence (`ENC_API_RESOLVE_MS`), and a cached
+address that starts refusing also backs off to 30 s
+(`ENC_API_UNREACHABLE_RETRY_MS`) rather than retrying per tick. That backoff is
+load-bearing: `resolve()` costs up to 1.5 s of blocking mDNS query, so retrying
+without it turns an unreachable C3 into an mDNS busy-loop for as long as
+ESP-NOW stays down.
+
+### Security posture
+
+The token is a shared secret over plain HTTP. It stops a casual device on the
+LAN from driving the fan and louvre — it is not a defence against anything that
+can already observe the Wi-Fi link. This matches the existing posture of the OTA
+and ESP-NOW paths (see [Security limitations](#security-limitations)); it is a
+consistency improvement, not a change of threat model.
+
 ## Packet format details
 
 Packets are sent as the in-memory shared structs using `sizeof(struct)`. Multi-byte values therefore use the boards' native little-endian layout.
@@ -366,6 +436,7 @@ The current implementation remains suitable only for a trusted local environment
 - ESP-NOW encryption is disabled.
 - Receivers validate packet length, magic, and sender MAC, but the MAC check is spoofable by a device that can transmit on the current channel.
 - Commands can change automatic temperature, manual louvre position, and manual fan output.
+- The HTTP fallback requires a shared token (`ENC_API_TOKEN`) in HTTP Basic auth, sent in the clear. It prevents an unauthenticated device from driving the enclosure, but not one that can observe the network.
 
 Sender-MAC validation closes the "any device on the channel can inject commands" gap and is the minimum recommended by the protocol design. Cryptographic authentication would require a protocol change and shared-key handling on both boards.
 

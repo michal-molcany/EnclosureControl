@@ -130,5 +130,21 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 // Only for that path: lib/HttpOta tracks its own hold internally.
 #define OTA_ERROR_HOLD_MS 10000
 
+// Enclosure API fallback (lib/EnclosureApi). This board SERVES it; the CYD
+// queries it only when ESP-NOW is dead. ESP-NOW frames never leave the radio, so
+// a channel/AP split (band steering, a mesh node) takes the link down completely;
+// an HTTP request rides the IP network instead.
+//
+// The port and shared token are SHARED with the CYD and live in the git-ignored
+// ../../include/enclosure_api.h, so the two firmwares cannot drift apart. The
+// port is deliberately distinct from the OTA server (OTA_HTTP_PORT) so a firmware
+// upload and the API never share a socket.
+#if defined(__has_include)
+#  if !__has_include("enclosure_api.h")
+#    error "Missing ../include/enclosure_api.h - copy include/enclosure_api.example.h to include/enclosure_api.h (at the repo root) and set the API port + token."
+#  endif
+#endif
+#include "enclosure_api.h"
+
 #endif // ENCLOSURE_CONST_H
 

@@ -7,3 +7,7 @@
 # OctoPrint server address, shared by both firmwares. Copy
 # include/octoprint_endpoint.example.h to include/octoprint_endpoint.h.
 include/octoprint_endpoint.h
+
+# Enclosure API port + shared token, shared by both firmwares. Copy
+# include/enclosure_api.example.h to include/enclosure_api.h.
+include/enclosure_api.h
