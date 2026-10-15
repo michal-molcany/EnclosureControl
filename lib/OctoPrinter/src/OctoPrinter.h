@@ -53,6 +53,36 @@ struct OctoFile
   char name[64];
   uint32_t date;
   uint32_t size;
+
+  // Details for the file-info view, taken from the SAME listing entry rather
+  // than a second per-file request. OctoPrint already computes all of this while
+  // producing /api/files, and asking it again per file would add a round trip
+  // and a second parse of a body we have just thrown away.
+  //
+  // Every numeric field is 0 when OctoPrint has no value (typically: the slicer
+  // wrote no analysis into the file). Callers must show that as unknown rather
+  // than as a real zero - a 0 mm filament length is not information.
+  char material[16];          // firstFilament from the slicer metadata
+  double estimatedPrintTime;  // seconds, from gcodeAnalysis
+  double filamentLengthMm;    // mm, total across tools
+  double filamentVolumeCm3;   // cm3
+  float dimX, dimY, dimZ;     // mm, object bounding box
+  double averagePrintTime;    // seconds, 0 when never printed
+  uint16_t printsSuccess;
+  uint16_t printsFailure;
+
+  // Layer height and nozzle diameter, ONLY ever read out of the file name.
+  //
+  // These are the one pair of slicer settings OctoPrint does not expose at all:
+  // /api/files and /api/files/local/<path> both answer with gcodeAnalysis,
+  // dimensions and statistics, and neither carries layer height or nozzle - not
+  // even in the embedded slicer metadata. The name is the only place left, and
+  // it is where most slicers put them anyway (name_0.15mm_ASA_MK3S.gcode).
+  //
+  // Both are therefore HEURISTICS and the UI labels them as such. 0 means the
+  // name had nothing recognisable.
+  float layerHeightMm = 0;
+  float nozzleMm = 0;
 };
 
 class OctoPrinter

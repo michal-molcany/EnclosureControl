@@ -185,9 +185,42 @@ enum JobCommand
 };
 
 // Newest-first printable files shown by the files view (opened from the idle
-// "No active print" panel). 20 rows fit the scrollable list; sizes bound the
-// static cache (~3.8 KB) and match OctoPrinter::OctoFile.
-#define MAX_PRINT_FILES 20
+// no-active-print panel).
+//
+// Two different numbers, deliberately not one:
+//
+//   PRINT_FILES_VISIBLE  rows that FIT on screen. Emergent from the geometry,
+//                        not a cap: a 146 px list at a 48 px pitch is exactly
+//                        three rows. The list is scrollable, so this is only what
+//                        you see before scrolling.
+//   MAX_PRINT_FILES      rows FETCHED, STORED and given a label - the number
+//                        reachable by scrolling. Ten, not four, because the point
+//                        of the view is choosing something to print: having the
+//                        5th newest file one scroll away beats not having it.
+//
+// The count is NOT what makes opening this view expensive - the full recursive
+// listing from OctoPrint is ~75 KB of JSON whatever these say, and that body is
+// what the fetch has to stream and parse. (See the yield-by-byte-count in
+// OctoPrinter::DeadlineStream, which keeps that parse from tripping the task
+// watchdog.)
+//
+// Both are coupled to the row geometry: three 46 px rows at a 48 px pitch is
+// what fills the list on a 320x240 panel while leaving room for the status line
+// and the print button.
+// Timestamps (upload date, print times) are rendered in Europe/Bratislava local
+// time, computed from the timestamp itself - see formatUploadDate() in display.cpp.
+//
+// Done arithmetically rather than with the C library on purpose: this board has no
+// clock. Nothing calls configTime(), there is no TZ and no NTP sync anywhere in the
+// firmware, so mktime()/localtime() would decide whether daylight saving is in
+// effect by comparing against a system clock stuck in 1970 - and would then be
+// wrong for every summer timestamp. Applying the EU rule straight to the value
+// being formatted needs neither a clock nor a network round trip.
+//
+// Slovakia follows the EU rule exactly: CET (UTC+1) in winter, CEST (UTC+2) between
+// the last Sunday in March 01:00 UTC and the last Sunday in October 01:00 UTC.
+#define PRINT_FILES_VISIBLE 3
+#define MAX_PRINT_FILES 10 
 #define PRINT_FILE_PATH_LEN 120
 #define PRINT_FILE_NAME_LEN 64
 

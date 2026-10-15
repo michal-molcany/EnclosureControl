@@ -100,6 +100,21 @@ struct PrintFile
     char name[PRINT_FILE_NAME_LEN];
     uint32_t date = 0;
     uint32_t size = 0;
+    // File-info view. Mirrors OctoPrinter::OctoFile and comes from the same
+    // listing pass - nothing here costs an extra request. Zeros mean OctoPrint
+    // has no value, which the view must show as unknown, not as a real 0.
+    char material[16] = {};
+    double estimatedPrintTime = 0;   // seconds
+    double filamentLengthMm = 0;     // mm
+    double filamentVolumeCm3 = 0;    // cm3
+    float dimX = 0, dimY = 0, dimZ = 0; // mm
+    double averagePrintTime = 0;     // seconds, 0 when never printed
+    uint16_t printsSuccess = 0;
+    uint16_t printsFailure = 0;
+    // GUESSED from the file name, never from OctoPrint - it does not expose
+    // either value. 0 = the name had nothing recognisable. The UI must say so.
+    float layerHeightMm = 0;
+    float nozzleMm = 0;
 };
 
 // Cache metadata without copying the list. Returns false if the mutex was
