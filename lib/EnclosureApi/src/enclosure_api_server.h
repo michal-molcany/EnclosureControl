@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <enclosure_proto.h>
+#include <enclosure_pid.h>
 
 // HTTP JSON API served by the EnclosureFanControl C3, so the PrinterDisplay CYD
 // can exchange enclosure telemetry and commands when ESP-NOW is unavailable.
@@ -56,6 +57,11 @@ namespace EnclosureApi
         // are independent, so sharing the value would make the CYD's loss
         // detection report phantom gaps (or phantom health) on either one.
         uint8_t seq = 0;
+        // The OctoPrint address the C3 is polling, so the CYD can follow it over
+        // this transport too when ESP-NOW is unavailable. All-zero means "no
+        // override"; see EnclosureTelemetry::octoIp.
+        uint8_t octoIp[4] = {0, 0, 0, 0};
+        uint16_t octoPort = 0;
     };
 
     using TelemetryProvider = Telemetry (*)();
@@ -64,10 +70,37 @@ namespace EnclosureApi
     // handler owns validation; the server has only checked the JSON shape.
     using CommandHandler = void (*)(const EnclosureCommand &cmd);
 
+    // Runtime PID gains, read and written over /api/pid.
+    //
+    // The setter OWNS VALIDATION and returns false to reject; the server turns
+    // that into a 400 and leaves the running gains untouched. The setter exists
+    // at all so this library stays free of any dependency on
+    // TemperatureRegulation, which lives in the C3 project, not here.
+    //
+    // Both are optional and default to nullptr. With neither supplied the /api/pid
+    // routes are simply not registered, so a board that has not been flashed
+    // with the gains feature still serves the rest of the API unchanged.
+    using PidProvider = PidGains (*)();
+    using PidSetter = bool (*)(const PidGains &g);
+
+    // Persistence hooks for the gains. This library has no NVS of its own, so
+    // the programme that owns the storage supplies these; null means the
+    // /api/pid/save and /api/pid/defaults routes answer 501 instead of
+    // pretending to have saved.
+    using PidPersist = void (*)();
+
     // Starts its own WebServer on `port`. Call once after Wi-Fi is up.
     // `token` is the shared secret required on every request; pass "" to disable.
+    //
+    // The four PID parameters all default to nullptr, so a board that does not
+    // wire them up keeps the previous two-argument behaviour and serves the
+    // /api/pid routes as 501.
     void begin(uint16_t port, const char *token, TelemetryProvider telemetry,
-               CommandHandler onCommand);
+               CommandHandler onCommand,
+               PidProvider pidProvider = nullptr,
+               PidSetter pidSetter = nullptr,
+               PidPersist persist = nullptr,
+               PidPersist toDefaults = nullptr);
 
     // Handles one pending request. Call from loop(); returns immediately.
     void poll();

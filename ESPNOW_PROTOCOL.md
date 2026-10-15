@@ -249,7 +249,7 @@ The setpoint remains in the packet but is ignored while the mode is MANUAL.
 ## C3 → CYD: `EnclosureTelemetry`
 
 **Direction:** EnclosureFanControl C3 to PrinterDisplay CYD  
-**Size:** 10 bytes  
+**Size:** 16 bytes (was 10; see *Protocol revision 2* below)  
 **Sent:** approximately every `ENC_TELEMETRY_INTERVAL_MS` (1 second)
 
 ### Byte layout
@@ -264,6 +264,44 @@ The setpoint remains in the packet but is ignored while the mode is MANUAL.
 | 6 | 2 | `chamberCx10` | Chamber temperature in 0.1°C units, little-endian |
 | 8 | 1 | `state` | C3 material-regulation state |
 | 9 | 1 | `mode` | Current CYD-selected control mode received by C3 |
+| 10 | 4 | `octoIp` | OctoPrint address the C3 is polling, 4 octets |
+| 14 | 2 | `octoPort` | OctoPrint port the C3 is polling |
+
+### OctoPrint address propagation
+
+`octoIp` / `octoPort` carry the address **the C3 itself is polling**, so the CYD
+uses the same server instead of holding a second, independently-editable copy.
+The C3 owns the value (its web UI is where it is set); the CYD follows it and
+stores it in NVS.
+
+Design points worth knowing before changing this:
+
+- **It rides every frame, not just on change.** There is no ack and no C3→CYD
+  back channel, so repeating until the far end has it is the entire reliability
+  story. A CYD that boots late, or was powered off while the address changed,
+  converges within one frame — about a second — with no state kept on either
+  board.
+- **All-zero `octoIp` means "the C3 has no runtime override."** The CYD must
+  then fall back to its own compiled-in `OCTOPRINT_IP` and clear its stored
+  value. That sentinel is what makes "Reset to firmware default" on the C3 reset
+  *both* boards instead of leaving them disagreeing.
+- **The CYD stores it, the C3 does not ask for it back.** Telemetry is one-way,
+  so the C3 can report "the CYD is being told" but never "the CYD has it".
+- **Both directions of transport carry it.** The HTTP fallback's `/api/enclosure`
+  includes `octoIp`/`octoPort` for exactly this reason: otherwise a change made
+  on the web UI would not reach the CYD during an ESP-NOW outage — which is
+  precisely when the CYD most needs to know.
+
+### Protocol revision 2
+
+`ENC_PROTO_VERSION` is now 2. Revision 2 grew `EnclosureTelemetry` from 10 to 16
+bytes by adding `octoIp` + `octoPort`.
+
+Both boards validate the packet length against their own `sizeof()`, so a C3 and
+a CYD on mismatched builds **drop every frame** — the link goes quiet until both
+are flashed, with no error beyond the drop counters. Reflash both when updating.
+This is the only reason a change like this is safe: it fails loudly (a dead link)
+rather than silently (a field read from the wrong offset).
 
 `chamberCx10` encodes actual temperature as:
 

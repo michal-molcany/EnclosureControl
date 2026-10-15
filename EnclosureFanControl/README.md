@@ -24,6 +24,66 @@ CYD <-> C3 packet layout, timing and fallback rules are in
 - WiFi captive portal via WiFiManager for first-time network setup
 - **OTA firmware updates over WiFi** (HTTP on port 8080, plus ArduinoOTA), with
   progress shown on the OLED
+- **Web UI on port 8082** — live status, PID tuning and manual fan/louvre control
+  from any browser on the network
+
+## Web UI
+
+Open **`http://enclosure-fan-control.local:8082/`** from any browser on the same
+network. Log in as user **`cyd`** with `ENC_API_TOKEN` as the password — the same
+secret the enclosure API on 8081 uses. The username must be exactly `cyd`:
+`WebServer` compares the whole `user:password` credential, so any other username
+is rejected even with the right token.
+
+The page shows what the board is doing (chamber temperature, state, louvre and
+fan, material, setpoint, whether the CYD is linked), and lets you:
+
+- read and change the PID gains, then **Save** them to NVS or restore the
+  compiled-in defaults. The header shows whether the running gains still match
+  what is stored, so an unsaved tuning cannot quietly disappear on reboot;
+- take manual control of the fan and louvre.
+
+Two things worth knowing before using it:
+
+- **Its own port is deliberate.** 8081 is the CYD's fallback transport and
+  `WebServer` serves one client at a time, so a browser page sharing that server
+  could delay a CYD request. A second server cannot.
+- **Manual control only holds while the CYD is unlinked.** The CYD re-sends its
+  own mode every 2 s and wins. The page shows live link state rather than letting
+  the override vanish quietly. A web command is also applied as *local*, so it
+  never makes the OLED claim the display is connected.
+
+Ports on this board: 80 WiFiManager portal, 8080 OTA, 8081 enclosure API, 8082 web
+UI. See [`../lib/EnclosureUi/README.md`](../lib/EnclosureUi/README.md).
+
+## Changing the OctoPrint address
+
+The **OctoPrint address** card in the web UI, or:
+
+```bash
+C3=http://<c3-host>:8082
+AUTH=cyd:$ENC_API_TOKEN
+JSON='Content-Type: application/json'   # required on POSTs with a body
+
+curl -u "$AUTH" $C3/api/status                      # current address + whether it is overridden
+curl -u "$AUTH" -H "$JSON" -X POST -d '{"ip":"192.168.1.88","port":80}' $C3/api/octoprint
+curl -u "$AUTH" -X POST $C3/api/octoprint/defaults  # back to include/octoprint_endpoint.h
+```
+
+- **Checked before it is saved.** The board GETs `/api/version` on the candidate
+  address and stores nothing unless it answers. This is not fussiness: unreachable
+  OctoPrint data is treated as invalid, which trips the cooling fail-safe — so a
+  typo would silently stop cooling rather than fail loudly at the keyboard.
+- **Stored in NVS**, so it survives a power cycle and can be replaced whenever you
+  like. `api/status` reports `octoOverridden` so it is always clear whether the
+  board is on the saved address or the compiled-in `OCTOPRINT_IP`.
+- **Pushed to the CYD**, which stores it in its own NVS and repoints its poller.
+  Telemetry carries the address every second, so a CYD that was off during the
+  change catches up within a second. Clearing the override here clears it there
+  too. Both boards must be flashed together — see
+  [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 2*.
+- An IPv4 address only, not a hostname: the OctoPrint client connects to an
+  `IPAddress`, so a name would need DNS resolution added first.
 
 ## This board is updated over the air
 

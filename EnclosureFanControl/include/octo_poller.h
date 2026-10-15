@@ -41,4 +41,17 @@ bool octoPollerCopy(OctoSnapshot &out);
 bool octoPollerHasData();
 void octoPollerRequestCancel();
 
+// Repoints the poll task at a different OctoPrint server.
+//
+// Non-blocking and safe to call from any task: it only records the value. The
+// OctoPrinter instance is owned by the poll task and is mid-request most of the
+// time, so mutating its host underneath that would be a data race. The task
+// applies a pending change at the top of its own loop, which also means a
+// repoint can never land in the middle of a request.
+//
+// Last write wins: the value is a single slot, not a queue, because there is
+// only ever one correct answer and queueing a backlog of intermediate addresses
+// would just poll each of them in turn.
+void octoPollerSetEndpoint(IPAddress host, uint16_t port);
+
 #endif // OCTO_POLLER_H

@@ -15,6 +15,25 @@ namespace
     volatile bool hasData = false;
     volatile bool cancelRequested = false;
 
+    // Pending endpoint change, published by octoPollerSetEndpoint() from the
+    // main/web-UI task and consumed by pollTask(). `pending` is the guard: the
+    // value is a multi-byte struct, so the task must not read it while the
+    // writer is midway through storing it. Set last, cleared first.
+    IPAddress pendingHost;
+    uint16_t pendingPort = OCTOPRINT_PORT;
+    volatile bool pending = false;
+
+    void applyPendingEndpoint()
+    {
+        if (!pending)
+            return;
+        // Clear before reading the value: a change published while we are here
+        // sets the flag again and is picked up on the next pass, which is the
+        // behaviour we want - no update is ever lost, and none is applied twice.
+        pending = false;
+        api.setEndpoint(pendingHost, pendingPort);
+    }
+
     void publishSnapshot()
     {
         OctoSnapshot copy;
@@ -46,6 +65,7 @@ namespace
 #endif
         for (;;)
         {
+            applyPendingEndpoint();
             if (WiFi.status() == WL_CONNECTED)
             {
                 if (cancelRequested)
@@ -89,4 +109,14 @@ bool octoPollerHasData()
 void octoPollerRequestCancel()
 {
     cancelRequested = true;
+}
+
+void octoPollerSetEndpoint(IPAddress host, uint16_t port)
+{
+    // Store the value, then raise the flag. pollTask() clears the flag before
+    // reading, so a change made mid-apply is not lost - it simply lands on the
+    // following pass.
+    pendingHost = host;
+    pendingPort = port;
+    pending = true;
 }

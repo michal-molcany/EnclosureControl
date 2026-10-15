@@ -3,6 +3,7 @@
 #include "enclosure_channel.h"
 #include "const.h"
 #include "enclosure_api_client.h"
+#include "poller.h"
 
 #include <WiFi.h>
 #include <IPAddress.h>
@@ -270,6 +271,18 @@ namespace
             noteDrop(ENC_DROP_MAGIC);
             return;
         }
+
+        // The OctoPrint address the C3 is using, taken from every frame.
+        //
+        // Applied OUTSIDE the snapshot mutex and before the sender/peer checks:
+        // it is the one field whose delivery matters more than the telemetry
+        // around it, it costs one comparison, and pollerSetEndpoint() only
+        // publishes a value - it cannot block or fail. An all-zero address means
+        // "the C3 has no override", which makes this board fall back to its own
+        // compiled-in default.
+        pollerSetEndpoint(IPAddress(tele->octoIp[0], tele->octoIp[1],
+                                    tele->octoIp[2], tele->octoIp[3]),
+                          tele->octoPort);
         // Only enforced once paired: an all-zero peer MAC is receive-only
         // bootstrap mode, where any sender is by definition acceptable.
         if (peerSet && !macEquals(mac, activeMac))
@@ -398,6 +411,12 @@ namespace
             EnclosureTelemetry t = {};
             if (EnclosureApi::getTelemetry(apiHost, ENC_API_PORT, ENC_API_TOKEN, apiSock, t))
             {
+                // Same endpoint hand-off as the ESP-NOW path, so a change made on
+                // the web UI still reaches this board while the radio link is
+                // down and the HTTP fallback is carrying telemetry.
+                pollerSetEndpoint(IPAddress(t.octoIp[0], t.octoIp[1], t.octoIp[2],
+                                            t.octoIp[3]),
+                                  t.octoPort);
                 if (xSemaphoreTake(snapshotMutex, pdMS_TO_TICKS(5)) == pdTRUE)
                 {
                     shared.louvrePct = t.louvrePct;

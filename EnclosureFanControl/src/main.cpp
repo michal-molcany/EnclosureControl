@@ -5,8 +5,11 @@
 
 #include "HttpOta.h"
 #include "enclosure_api_server.h"
+#include "enclosure_ui.h"
 #include "enclosure_version.h"
+#include "octo_endpoint.h"
 #include <ESPmDNS.h>
+#include <Preferences.h>
 
 ServoLouver louver = ServoLouver();
 TemperatureRegulation tempRegulation(&louver);
@@ -35,6 +38,14 @@ static EnclosureApi::Telemetry provideEnclosureTelemetry()
   t.chamberCx10 = g_chamberValid ? (int16_t)(g_chamberTemp * 10.0) : ENC_CHAMBER_INVALID;
   t.state = tempRegulation.stateCode();
   t.mode = tempRegulation.controlModeCode();
+  // Carried over this transport too, so the CYD still learns a new OctoPrint
+  // address while it is falling back to HTTP because ESP-NOW is unusable.
+  const IPAddress octo = octoEndpointIp();
+  t.octoIp[0] = octo[0];
+  t.octoIp[1] = octo[1];
+  t.octoIp[2] = octo[2];
+  t.octoIp[3] = octo[3];
+  t.octoPort = octoEndpointPort();
   return t;
 }
 
@@ -44,6 +55,193 @@ static EnclosureApi::Telemetry provideEnclosureTelemetry()
 static void applyEnclosureApiCommand(const EnclosureCommand &cmd)
 {
   tempRegulation.applyRemoteCommand(cmd);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime PID gains: NVS persistence + the /api/pid callbacks.
+//
+// The C3 is the single source of truth for the gains. The OctoPrint plugin
+// reads them over HTTP and writes them back; it never keeps its own copy as the
+// authority. That way a tuning cannot exist in two places and disagree - the
+// exact failure the shared headers exist to prevent elsewhere in this repo.
+// ---------------------------------------------------------------------------
+
+static Preferences pidPrefs;
+static const char *PID_NS = "enclosure";
+
+// Guards the gain set as a unit. An absent (or older) version means "no stored
+// tuning", so a blank or half-written NVS falls back to the compiled-in defaults
+// rather than leaving the regulator on a partial tuning.
+static const char *PID_KEY_VER = "pidver";
+static const uint8_t PID_VERSION = 1;
+
+static void pidReport(const char *what)
+{
+  const PidGains g = tempRegulation.gains();
+  Serial.printf("[PID] %s kp=%.3f ki=%.3f kd=%.3f\n", what,
+                (double)g.kp, (double)g.ki, (double)g.kd);
+}
+
+static void pidWrite()
+{
+  const PidGains g = tempRegulation.gains();
+  if (!pidPrefs.begin(PID_NS, false))
+  {
+    Serial.println("[PID] NVS open for WRITE failed - gains NOT saved (still live in RAM)");
+    return;
+  }
+  // Values are written before the version stamp, so a power cut mid-save leaves
+  // the OLD version stamp in place and the partial set is ignored on next boot.
+  pidPrefs.putFloat("kp", g.kp);
+  pidPrefs.putFloat("ki", g.ki);
+  pidPrefs.putFloat("kd", g.kd);
+  pidPrefs.putUChar(PID_KEY_VER, PID_VERSION);
+  pidPrefs.end();
+  Serial.println("[PID] gains saved to NVS");
+}
+
+static void pidLoadAtBoot()
+{
+  PidGains g = pidDefaultGains();
+  if (pidPrefs.begin(PID_NS, true))
+  {
+    if (pidPrefs.getUChar(PID_KEY_VER, 0) == PID_VERSION)
+    {
+      PidGains stored = {
+          pidPrefs.getFloat("kp", g.kp),
+          pidPrefs.getFloat("ki", g.ki),
+          pidPrefs.getFloat("kd", g.kd)};
+      // Clamp rather than reject: a stored value outside the accepted range is
+      // recoverable, and falling back to the defaults would silently discard a
+      // tuning the user believes is active.
+      pidClampGains(stored);
+      g = stored;
+      pidReport("restored from NVS");
+    }
+    else
+    {
+      pidReport("no stored tuning, using defaults");
+    }
+    pidPrefs.end();
+  }
+  else
+  {
+    pidReport("NVS unavailable, using defaults");
+  }
+  // setGains() re-validates, so this is the last line of defence.
+  tempRegulation.setGains(g);
+}
+
+static void pidRestoreDefaults()
+{
+  tempRegulation.setGains(pidDefaultGains());
+  pidReport("restored defaults");
+  pidWrite();
+}
+
+static PidGains provideEnclosurePid()
+{
+  return tempRegulation.gains();
+}
+
+static bool applyEnclosurePid(const PidGains &g)
+{
+  return tempRegulation.setGains(g);
+}
+
+// True when the NVS copy of the gains still matches the running ones - i.e.
+// nothing applied through the web UI is one reboot away from being silently lost.
+//
+// Read-only Preferences open per call, on a request that happens at most every
+// 2 s: NVS wear is not the concern here (three float reads write nothing), and a
+// cached copy could disagree with a `save` that happened through curl.
+static bool pidGainsAreSaved()
+{
+  if (!pidPrefs.begin(PID_NS, true))
+    return true; // no storage to disagree with
+  const bool matches = pidPrefs.getUChar(PID_KEY_VER, 0) == PID_VERSION &&
+                       pidPrefs.getFloat("kp", -1) == tempRegulation.gains().kp &&
+                       pidPrefs.getFloat("ki", -1) == tempRegulation.gains().ki &&
+                       pidPrefs.getFloat("kd", -1) == tempRegulation.gains().kd;
+  pidPrefs.end();
+  return matches;
+}
+
+// ---------------------------------------------------------------------------
+// Web UI status provider.
+//
+// Reads the same values the OLED and the ESP-NOW telemetry use, mirrored as
+// globals by loop() because this is a free function with no access to loop()
+// locals. A browser is a second observer, never a second authority: everything
+// here is read-only, and every write goes through the same callbacks the
+// enclosure API uses.
+// ---------------------------------------------------------------------------
+
+static EnclosureUi::Status provideEnclosureUiStatus()
+{
+  EnclosureUi::Status s;
+  s.chamberCx10 = g_chamberValid ? (int16_t)(g_chamberTemp * 10.0) : ENC_CHAMBER_INVALID;
+  s.state = tempRegulation.stateCode();
+  s.mode = tempRegulation.controlModeCode();
+  s.louvrePct = tempRegulation.louvrePercent();
+  s.fanPct = tempRegulation.fanPercent();
+  s.fanActive = tempRegulation.isFanActive();
+  s.manualLouvrePct = tempRegulation.manualLouvrePercent();
+  s.manualFanPct = tempRegulation.manualFanPercent();
+  s.jobActive = tempRegulation.jobIsActive();
+  s.material = tempRegulation.activeMaterial();
+  s.setpointC = (int8_t)tempRegulation.activeSetpoint();
+  s.emergencyActive = tempRegulation.isEmergencyActive();
+  s.remotePeer = espnowLinkHasPeer();
+  s.remoteLinkAlive = tempRegulation.remoteLinkAlive();
+  s.gainsSaved = pidGainsAreSaved();
+  s.octoIp = octoEndpointIp();
+  s.octoPort = octoEndpointPort();
+  s.octoOverridden = octoEndpointOverridden();
+  // Reported as "the CYD is being told", never as "the CYD has it": telemetry
+  // is one-way, so this board cannot know what the far end stored.
+  s.octoSentToCyd = espnowLinkHasPeer();
+  return s;
+}
+
+// A manual command from the browser. Deliberately applyLocalCommand(), not
+// applyRemoteCommand(): a browser click is not proof that the CYD is alive, and
+// stamping the link liveness from here would make the OLED claim a connection
+// that does not exist.
+static void applyEnclosureUiManual(const EnclosureCommand &cmd)
+{
+  tempRegulation.applyLocalCommand(cmd);
+}
+
+// ---------------------------------------------------------------------------
+// OctoPrint endpoint, from the web UI.
+//
+// The C3 owns this address; the CYD is told. Setting it goes through a PROBE
+// first: a wrong address makes this board see invalid OctoPrint data, which
+// trips the cooling fail-safe and silently stops cooling the enclosure. Refusing
+// a bad address at the point of entry is much cheaper than discovering it from a
+// cold chamber later.
+// ---------------------------------------------------------------------------
+
+// How long a candidate address gets to answer. Long enough for a loaded Pi
+// running OctoPrint on an SD card, short enough that a mistyped address is
+// reported immediately rather than appearing to hang.
+static const unsigned long OCTO_PROBE_TIMEOUT_MS = 2500;
+
+static bool applyEnclosureUiEndpoint(IPAddress ip, uint16_t port, String &reason)
+{
+  reason = "";
+  if (!octoEndpointProbe(ip, port, OCTO_PROBE_TIMEOUT_MS, reason))
+    return false;
+  octoEndpointSet(ip, port);
+  return true;
+}
+
+// Restore the compiled-in include/octoprint_endpoint.h value. No probe: the
+// point of this button is to get back to a state that is known to have worked.
+static void resetEnclosureUiEndpoint()
+{
+  octoEndpointClear();
 }
 
 // Suppresses the normal chamber repaint so the OLED shows OTA progress (and
@@ -186,7 +384,13 @@ void setup()
 
   // Network lives on the background task from here on; loop only copies
   // snapshots and never blocks on a socket (CYD-style).
+  //
+  // The OctoPrint address is loaded BEFORE the poll task starts, so the very
+  // first poll already goes to the right server instead of failing once against
+  // the compiled-in default.
+  octoEndpointBegin();
   octoPollerStart();
+  octoEndpointAttachPoller();
   display.showMessage("OctoPrint", "connecting");
   const uint32_t bootStart = millis();
   while (!octoPollerHasData() && (millis() - bootStart < 20000))
@@ -202,6 +406,11 @@ void setup()
 
   tempRegulation.begin();
 
+  // Stored gains must be in force BEFORE the first regulation cycle, not after:
+  // begin() leaves the PID on the compiled-in defaults, so loading later would
+  // let a boot with no valid OctoPrint data run briefly on the wrong tuning.
+  pidLoadAtBoot();
+
   espnowLinkBegin(ENC_PEER_MAC);
 
   // Enclosure API fallback (the CYD polls this only when its ESP-NOW link is
@@ -210,7 +419,8 @@ void setup()
   // ArduinoOTA.begin() above, so just advertise the port as an _http._tcp service
   // for the CYD's mDNS queryHost()/browse.
   EnclosureApi::begin(ENC_API_PORT, ENC_API_TOKEN, provideEnclosureTelemetry,
-                      applyEnclosureApiCommand);
+                      applyEnclosureApiCommand, provideEnclosurePid,
+                      applyEnclosurePid, pidWrite, pidRestoreDefaults);
   MDNS.addService("http", "tcp", ENC_API_PORT);
 #if SERIAL_DEBUG
   // The CYD looks this board up by the mDNS name ArduinoOTA.begin() registered
@@ -219,6 +429,31 @@ void setup()
   Serial.printf("[API] enclosure api on port %u, mDNS %s.local, auth=%s\n",
                 (unsigned)ENC_API_PORT, OTA_ARDUINO_HOSTNAME,
                 ENC_API_TOKEN[0] ? "token" : "OPEN");
+#endif
+
+  // Web UI (lib/EnclosureUi) on its own port - see the note on ENC_UI_PORT in
+  // const.h for why it is not a path on the API's server. Same token, so the
+  // browser prompts once and the page never handles the secret itself.
+  EnclosureUi::Config ui;
+  ui.port = ENC_UI_PORT;
+  ui.token = ENC_API_TOKEN;
+  ui.fwVersion = ENC_FW_VERSION_STR;
+  ui.status = provideEnclosureUiStatus;
+  ui.pid = provideEnclosurePid;
+  ui.setPid = applyEnclosurePid;
+  ui.savePid = pidWrite;
+  ui.restoreDefaultPid = pidRestoreDefaults;
+  ui.manual = applyEnclosureUiManual;
+  ui.setEndpoint = applyEnclosureUiEndpoint;
+  ui.clearEndpoint = resetEnclosureUiEndpoint;
+  EnclosureUi::begin(ui);
+  // Deliberately NO MDNS.addService() here. The host name is already registered
+  // by ArduinoOTA.begin(), which is all a browser needs to resolve
+  // http://<host>.local:8082/, and ESPmDNS keys services by name: a second
+  // _http._tcp service would replace the 8081 one the CYD's discovery relies on.
+#if SERIAL_DEBUG
+  Serial.printf("[UI] web ui on port %u, open http://%s.local:%u/ (user: cyd, password: the API token)\n",
+                (unsigned)ENC_UI_PORT, OTA_ARDUINO_HOSTNAME, (unsigned)ENC_UI_PORT);
 #endif
 }
 
@@ -235,6 +470,9 @@ void loop()
   ArduinoOTA.handle();
   HttpOta::poll();
   EnclosureApi::poll();
+  // Separate server on its own port, so the browser page cannot delay the CYD's
+  // API calls above. Still non-blocking: one handled request per iteration.
+  EnclosureUi::poll();
 
   // Non-blocking copy of the latest poll (20ms mutex try inside).
   // Keep-last-good: regulation/display continue on lastGood when the

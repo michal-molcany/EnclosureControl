@@ -2,6 +2,7 @@
 
 #include <WiFi.h>
 #include <OctoPrinter.h>
+#include <Preferences.h>
 
 #include "const.h"
 #include "secrets.h"
@@ -10,6 +11,118 @@ namespace
 {
     secrets sec;
     OctoPrinter api(sec.getOctoprintApiKey(), OCTOPRINT_IP, OCTOPRINT_PORT);
+
+    // ---------------------------------------------------------------------
+    // OctoPrint address, as told to us by the C3.
+    //
+    // The C3 owns this value (it is the board with the web UI); this board only
+    // follows it. It is persisted because this board can be power-cycled while
+    // the C3 is off, and a reverted address would look like "OctoPrint is down"
+    // until the link came back - which is exactly the failure that is hardest to
+    // diagnose from the display alone.
+    //
+    // Separate NVS namespace from anything else on this board. Namespace names
+    // are capped at 15 characters.
+    // ---------------------------------------------------------------------
+    const char *OCTO_NS = "octoend";
+    const char *OCTO_KEY_IP = "ip";
+    const char *OCTO_KEY_PORT = "port";
+
+    Preferences octoPrefs;
+    IPAddress currentHost;
+    uint16_t currentPort = OCTOPRINT_PORT;
+    bool endpointOverridden = false;
+
+    // Pending change published by pollerSetEndpoint() from the link task and
+    // consumed by pollTask(). Guard flag set last / cleared first, so the task
+    // never reads a half-written struct.
+    IPAddress pendingHost;
+    uint16_t pendingPort = OCTOPRINT_PORT;
+    volatile bool pending = false;
+
+    void storeEndpoint(IPAddress ip, uint16_t port)
+    {
+        if (octoPrefs.begin(OCTO_NS, false))
+        {
+            octoPrefs.putUInt(OCTO_KEY_IP, (uint32_t)ip);
+            octoPrefs.putUShort(OCTO_KEY_PORT, port);
+            octoPrefs.end();
+        }
+    }
+
+    void clearEndpoint()
+    {
+        if (octoPrefs.begin(OCTO_NS, false))
+        {
+            octoPrefs.clear();
+            octoPrefs.end();
+        }
+    }
+
+    // Reads the stored override before the poll task starts. A missing or
+    // unreadable pair simply means "no override", which is the compiled-in
+    // default - never a reason to refuse to boot.
+    void loadEndpoint()
+    {
+        currentHost.fromString(OCTOPRINT_IP);
+        currentPort = OCTOPRINT_PORT;
+        endpointOverridden = false;
+        if (octoPrefs.begin(OCTO_NS, true))
+        {
+            const uint32_t raw = octoPrefs.getUInt(OCTO_KEY_IP, 0);
+            const uint16_t port = octoPrefs.getUShort(OCTO_KEY_PORT, 0);
+            octoPrefs.end();
+            if (raw != 0 && port != 0)
+            {
+                currentHost = IPAddress(raw);
+                currentPort = port;
+                endpointOverridden = true;
+                Serial.print(F("[POLL] endpoint "));
+                Serial.print(currentHost);
+                Serial.print(':');
+                Serial.println(currentPort);
+            }
+        }
+    }
+
+    // Runs on the poll task, at the top of its loop. Applies and persists in
+    // one place so the stored value can never disagree with the value in force.
+    void applyPendingEndpoint()
+    {
+        if (!pending)
+            return;
+        pending = false;
+
+        const IPAddress ip = pendingHost;
+        const uint16_t port = pendingPort;
+        const bool isZero = ((uint32_t)ip == 0) || port == 0;
+
+        if (isZero)
+        {
+            // The C3 has no override: follow it back to our compiled default, so
+            // a "reset" on the C3 resets both boards.
+            endpointOverridden = false;
+            currentHost.fromString(OCTOPRINT_IP);
+            currentPort = OCTOPRINT_PORT;
+            clearEndpoint();
+            api.setEndpoint(currentHost, currentPort);
+            Serial.println(F("[POLL] endpoint override cleared by C3"));
+            return;
+        }
+
+        if (ip == currentHost && port == currentPort && endpointOverridden)
+            return;
+
+        endpointOverridden = true;
+        currentHost = ip;
+        currentPort = port;
+        storeEndpoint(ip, port);
+        api.setEndpoint(ip, port);
+        Serial.print(F("[POLL] endpoint from C3 "));
+        Serial.print(ip);
+        Serial.print(':');
+        Serial.println(port);
+    }
     SemaphoreHandle_t snapshotMutex = nullptr;
     QueueHandle_t commandQueue = nullptr;
     PrinterSnapshot shared;
@@ -197,9 +310,11 @@ namespace
 
     void pollTask(void *)
     {
+        loadEndpoint();
         api.begin();
         for (;;)
         {
+            applyPendingEndpoint();
 PollerCommand cmd = {};
         while (xQueueReceive(commandQueue, &cmd, 0) == pdTRUE)
                 executeCommand(cmd);
@@ -267,6 +382,20 @@ bool pollerCopySnapshot(PrinterSnapshot &out)
 bool pollerHasData()
 {
     return hasData;
+}
+
+void pollerSetEndpoint(IPAddress host, uint16_t port)
+{
+    // Value first, flag last: pollTask() clears the flag before reading, so a
+    // change arriving mid-apply is picked up on the next pass rather than lost.
+    pendingHost = host;
+    pendingPort = port;
+    pending = true;
+}
+
+bool pollerEndpointOverridden()
+{
+    return endpointOverridden;
 }
 
 void pollerSendCommand(const PollerCommand &cmd)
