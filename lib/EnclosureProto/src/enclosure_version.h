@@ -31,7 +31,12 @@
 
 // Protocol revision, bumped only when the structs in enclosure_proto.h or the
 // JSON keys in lib/EnclosureApi change in a backward-incompatible way.
-#define ENC_PROTO_VERSION 1
+// Bumped to 2 when EnclosureTelemetry grew the OctoPrint endpoint fields
+// (octoIp + octoPort), taking it from 10 to 16 bytes. Both boards check the
+// packet LENGTH against their own sizeof(), so a C3 and a CYD on mismatched
+// builds drop every frame rather than misreading it - the link goes quiet until
+// both are flashed. Reflash both when this moves.
+#define ENC_PROTO_VERSION 2
 
 // Stringify the numbers above so the printed line cannot drift from them.
 #define ENC_STR2(x) #x

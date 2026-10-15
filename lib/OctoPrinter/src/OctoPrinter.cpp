@@ -123,6 +123,27 @@ void OctoPrinter::begin()
   }
 }
 
+void OctoPrinter::setEndpoint(IPAddress host, int port)
+{
+  if ((uint32_t)host == (uint32_t)_host && port == _port)
+    return;
+
+  // A socket open against the old server would keep streaming its response into
+  // the old host's parser while the next request targets the new one. Dropping
+  // it here means a repoint mid-transfer costs one failed poll, not a corrupt
+  // snapshot.
+  _client.stop();
+  _host = host;
+  _hostAddress = host.toString();
+  _port = port;
+  // The cached version strings came from the server we are leaving.
+  _doOnce = false;
+  Serial.print(F("[OctoPrinter] endpoint -> "));
+  Serial.print(_hostAddress);
+  Serial.print(':');
+  Serial.println(port);
+}
+
 void OctoPrinter::update()
 {
   _parseConnection(_requester("/api/connection"));

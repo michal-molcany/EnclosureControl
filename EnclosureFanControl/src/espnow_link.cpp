@@ -1,6 +1,7 @@
 #include "espnow_link.h"
 #include "enclosure_discovery.h"
 #include "enclosure_channel.h"
+#include "octo_endpoint.h"
 #include "temperature_regulation.h"
 #include "const.h"
 
@@ -488,6 +489,16 @@ void espnowLinkPoll(TemperatureRegulation &reg, double chamberTemp, bool chamber
         tele.chamberCx10 = chamberValid ? (int16_t)(chamberTemp * 10.0) : ENC_CHAMBER_INVALID;
         tele.state = reg.stateCode();
         tele.mode = reg.controlModeCode();
+        // The address we are polling, so the CYD can use the same one. Sent
+        // every frame; the CYD stores it and repoints its own poller. All-zero
+        // means "no override here", which tells the CYD to fall back to its own
+        // compiled-in default.
+        const IPAddress octo = octoEndpointIp();
+        tele.octoIp[0] = octo[0];
+        tele.octoIp[1] = octo[1];
+        tele.octoIp[2] = octo[2];
+        tele.octoIp[3] = octo[3];
+        tele.octoPort = octoEndpointPort();
         const esp_err_t err = esp_now_send(activeMac, (const uint8_t *)&tele, sizeof(tele));
         if (err != ESP_OK)
         {

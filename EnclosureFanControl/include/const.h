@@ -79,16 +79,36 @@
 // until set. Both firmwares log their own MAC at boot - copy them over.
 static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 
-// PID Parameters for Chamber Temperature Control (cooling: error = current - setpoint)
-#define PID_KP 1.5
-#define PID_KI 0.1
-#define PID_KD 0.5
-#define PID_SETPOINT TEMP_STANDARD_TARGET
+// PID parameters for chamber temperature control
+// (cooling: error = current - setpoint).
+//
+// The gains themselves live in lib/EnclosureProto/src/enclosure_pid.h and are
+// tunable at runtime over the enclosure API; the values below are only the
+// compiled-in defaults that seed a blank NVS.
+//
+// There is deliberately no PID_SETPOINT here. One used to sit here next to the
+// gains and did nothing: applyActiveSetpoint() overwrote the setpoint on every
+// regulation cycle with the material target or the CYD's remote setpoint, so the
+// constant was live for a few milliseconds after boot and never again. The
+// setpoint is chosen per print (materialTarget / remoteSetpoint) and lives
+// nowhere it can be edited by accident.
 #define PID_UPDATE_INTERVAL 1000 // 1 second
 
 // OctoPrint background poll interval (FreeRTOS task, CYD-style). Loop only
 // copies the latest snapshot and never blocks on the network.
 #define OCTO_POLL_INTERVAL_MS 5000 // 5 seconds
+
+// Longest gap between two PID samples the controller will integrate across,
+// in seconds. A gap longer than this means the readings behind it were stale
+// rather than a real time step - the poll task stalled, or the board was busy -
+// and integrating a stale error across it would wind the integral on
+// information that was never true. Skipping leaves the regulator holding its
+// last demand, which is the honest response.
+//
+// Sized at 3x OCTO_POLL_INTERVAL_MS: tolerant of the two or three missed polls
+// a congested Wi-Fi link produces routinely, but bounded, so a long stall cannot
+// dump a minute of imaginary error into the integrator in one step.
+#define PID_MAX_TIMESTEP_S 15.0f
 
 // Force the Wi-Fi channel after joining. 0 = follow the access point.
 //
@@ -145,6 +165,22 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 #  endif
 #endif
 #include "enclosure_api.h"
+
+// Web UI (lib/EnclosureUi): status, PID tuning, manual control from a browser.
+//
+// Its OWN port, deliberately, not a path on the enclosure API's server. WebServer
+// is synchronous - one client at a time, served inline from poll() - and the
+// enclosure API is the CYD's fallback transport, which it queries on a deadline.
+// A browser page sharing that server would sit in front of the CYD for the length
+// of a page load plus every poll interval. A second server cannot do that.
+//
+// Also distinct from the OTA server (OTA_HTTP_PORT), so opening the page on a
+// phone cannot interfere with a firmware upload, and from WiFiManager's captive
+// portal on 80.
+//
+// The port is NOT in the shared ../../include/enclosure_api.h: only this board
+// serves it, and the CYD never has to agree about anything.
+#define ENC_UI_PORT 8082
 
 #endif // ENCLOSURE_CONST_H
 

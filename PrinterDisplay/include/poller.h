@@ -41,6 +41,27 @@ bool pollerCopySnapshot(PrinterSnapshot &out);
 // True once at least one poll cycle has published data.
 bool pollerHasData();
 
+// Repoints the poll task at a different OctoPrint server, and stores it in NVS
+// so it survives a power cycle.
+//
+// The CYD does not choose this address - the C3 owns it and sends it down the
+// link (see EnclosureTelemetry::octoIp). It is stored rather than merely
+// applied for one obvious reason: this board can be rebooted or power-cycled
+// while the C3 is unreachable, and it must come back on the same server rather
+// than reverting to whatever its firmware header says.
+//
+// Safe to call from any task, non-blocking: like the C3's octoPollerSetEndpoint
+// it only publishes a value, because the OctoPrinter instance belongs to the
+// poll task and is mid-request most of the time. An all-zero IP means "the C3
+// has no override" - clear the stored one and fall back to the compiled-in
+// OCTOPRINT_IP, which is what keeps the two boards agreeing about "no
+// override" instead of drifting.
+void pollerSetEndpoint(IPAddress host, uint16_t port);
+
+// True when this board is running on an address the C3 sent rather than its own
+// compiled-in default. Shown in the serial log and available to the UI.
+bool pollerEndpointOverridden();
+
 // One command for the poll task to execute off the UI task.
 //
 // Carries a target and a payload rather than a flat code enum, because a

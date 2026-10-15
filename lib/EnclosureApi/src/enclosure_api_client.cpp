@@ -152,6 +152,19 @@ namespace EnclosureApi
         out.state = doc["state"] | (uint8_t)ENC_STATE_IDLE;
         out.mode = doc["mode"] | (uint8_t)ENC_MODE_AUTO;
         out.seq = doc["seq"] | (uint8_t)0;
+        // OctoPrint endpoint, same keys the ESP-NOW telemetry carries. Absent on
+        // an older C3 build, which leaves the all-zero "no override" sentinel
+        // intact rather than inventing an address.
+        const String ipText = doc["octoIp"] | "";
+        IPAddress ip;
+        if (ipText.length() && ip.fromString(ipText))
+        {
+            out.octoIp[0] = ip[0];
+            out.octoIp[1] = ip[1];
+            out.octoIp[2] = ip[2];
+            out.octoIp[3] = ip[3];
+        }
+        out.octoPort = (uint16_t)(doc["octoPort"] | 0);
         return true;
     }
 

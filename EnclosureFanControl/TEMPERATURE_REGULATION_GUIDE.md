@@ -262,13 +262,62 @@ Edit `include/const.h`:
 
 ### Tuning PID Controller
 
-If cooling is too slow or too aggressive, adjust PID gains:
+The gains are adjustable at runtime. The C3 owns them and keeps them in NVS, so a
+tuning survives a reboot and there is never a second copy that can disagree with
+the board. Defaults (and the accepted ranges) live in
+`lib/EnclosureProto/src/enclosure_pid.h`:
 
 ```cpp
-#define PID_KP 1.5    // Increase for faster response
-#define PID_KI 0.1    // Increase to eliminate steady-state error
-#define PID_KD 0.5    // Increase to reduce overshoot
+#define PID_KP_DEFAULT 6.0f  // Increase for faster response
+#define PID_KI_DEFAULT 0.1f  // Increase to eliminate steady-state error
+#define PID_KD_DEFAULT 0.0f  // Increase to reduce overshoot (see the header)
 ```
+
+Those are the values a blank NVS is seeded with - editing them only affects a
+board whose stored tuning has been cleared.
+
+#### The web UI (easiest)
+
+Open **`http://enclosure-fan-control.local:8082/`** from any browser on the network.
+Log in with **any username** and `ENC_API_TOKEN` as the password. The page shows
+the live gains, the chamber temperature, and whether what is running still
+matches what is in NVS - so it is obvious when a tuning is one reboot away from
+being lost. See `lib/EnclosureUi/README.md`.
+
+#### Over HTTP
+
+Both the page and the API use HTTP Basic auth with `ENC_API_TOKEN` as the
+password (username ignored). The routes below live on **both** ports: 8081 is the
+enclosure API, 8082 the UI's own server.
+
+```bash
+C3="http://<c3-host>:8081"
+AUTH="cyd:$ENC_API_TOKEN"
+JSON='Content-Type: application/json'   # required - see the note below
+
+curl -u "$AUTH" $C3/api/pid                                     # current gains
+curl -u "$AUTH" -H "$JSON" -X POST -d '{"kp":6.0,"ki":0.1,"kd":0.0}' $C3/api/pid
+curl -u "$AUTH" -X POST $C3/api/pid/save                       # persist to NVS
+curl -u "$AUTH" -X POST $C3/api/pid/defaults                   # compiled-in defaults + save
+```
+
+`POST /api/pid` applies the gains immediately in RAM but does **not** persist
+them - a reboot without a `save` returns to whatever is stored. A value outside
+the range in `enclosure_pid.h` is rejected with a 400 and the running gains are
+left untouched, so a typo cannot wedge the regulator mid-print.
+
+> **The `Content-Type: application/json` header is not optional on a `POST` that
+> carries a body.** `curl -d` alone sends `application/x-www-form-urlencoded`,
+> which makes `WebServer` parse the body as form fields; a JSON string has no
+> `=` in it, so the body is discarded before the handler ever sees it and the
+> request fails with `bad json`. The two bodyless `POST`s above need no header.
+> The web UI always sets it.
+
+Tuning advice: the controller drives the louvre over the lower half of its output
+span and the fan over the upper half, so size `kp` against a realistic chamber
+excursion (0-15 C), not the full span. `kd` defaults to 0 because the controller
+samples on a zero-order hold from a 5 s OctoPrint poll, where a derivative term
+amplifies sensor noise rather than adding damping.
 
 ### Changing Fan Pin
 
@@ -306,7 +355,7 @@ If cooling is too slow or too aggressive, adjust PID gains:
 - Verify chamber temperature sensor is working (OctoPrint reports data)
 - Check physical fan connections and airflow
 - Monitor PID output values in serial output
-- Adjust PID gains if needed
+- Adjust PID gains if needed - see [Tuning PID Controller](#tuning-pid-controller)
 
 ### Louvre Not Opening
 

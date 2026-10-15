@@ -62,6 +62,20 @@ public:
   void update();
   void begin();
 
+  // Repoints this instance at a different OctoPrint.
+  //
+  // Clears _doOnce so the next begin() re-runs /api/version against the new
+  // host: the cached server/API version strings belong to the OLD server and
+  // would otherwise be reported as the new one's.
+  //
+  // NOT THREAD SAFE. Every other method here touches _client and the parsed
+  // state without locking, because the library's contract is that its owner
+  // calls it from one task only. Both pollers own their instance on a dedicated
+  // task, so a caller changing the address at runtime must publish the new
+  // value and let that task apply it - see octoPollerSetEndpoint /
+  // pollerSetEndpoint, which exist for exactly that reason.
+  void setEndpoint(IPAddress host, int port);
+
   /*
     These functions are used to check on the printer's status flags.
     All they do is return the state of the boolean flag.

@@ -105,6 +105,25 @@ which meant they agreed only by hand and could drift apart silently.
 
 Both projects fail the build with a readable message if this file is missing.
 
+### Changing it without reflashing
+
+This value is now only the **fallback**. The address actually in force is set from
+the C3's web UI (`http://enclosure-fan-control.local:8082/`, OctoPrint address
+card) or over HTTP, and this board follows it: the C3 carries the address it is
+polling in every telemetry frame, this board stores it in its own NVS, and its
+poll task repoints itself. It is stored rather than merely applied so this board
+still comes up on the right server after a power cycle while the C3 is
+unreachable.
+
+Two consequences:
+
+- **The C3 owns it.** There is no way to set the address from this board, and a
+  value cleared on the C3 clears it here too — the all-zero `octoIp` in telemetry
+  means "I have no override", not "address zero".
+- **Both boards must be flashed together.** Telemetry grew from 10 to 16 bytes;
+  a mismatched pair drops every frame. See
+  [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 2*.
+
 > WARNING: Rotate your WiFi password and OctoPrint API key if they were ever committed.
 
 ## Usage

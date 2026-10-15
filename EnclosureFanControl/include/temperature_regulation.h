@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <enclosure_proto.h>
+#include <enclosure_pid.h>
 #include "octo_poller.h"
 
 // Forward declaration
@@ -11,7 +12,9 @@ class ServoLouver;
 class PIDController
 {
 private:
-    float kp, ki, kd;
+    // Named `applied` rather than `gains` because the accessor below wants that
+    // name; a member and a method cannot share one in a class scope.
+    PidGains applied;
     float setpoint;
     float lastError;
     float integral;
@@ -20,9 +23,20 @@ private:
 public:
     PIDController(float _kp, float _ki, float _kd, float _setpoint);
     // Cooling PID: output grows when currentValue rises above setpoint.
-    float calculate(float currentValue);
+    // Returns false when no sample was taken - the interval since the last call
+    // was zero, or too long to integrate across - and leaves `out` untouched.
+    // Callers must HOLD their previous value in that case: treating a skipped
+    // sample as a demand of zero would slam the louvre shut every time a poll
+    // was late.
+    bool calculate(float currentValue, float &out);
     void setSetpoint(float newSetpoint);
     int getSetpoint() const { return (int)setpoint; }
+    // Runtime gain update. Returns false and changes NOTHING when the values are
+    // out of range or non-finite - a rejected tuning must leave the regulator
+    // exactly as it was, mid-print. Deliberately does not reset(): reset() also
+    // zeroes lastError, which causes a derivative kick on the next sample.
+    bool setGains(const PidGains &g);
+    const PidGains &gains() const { return applied; }
     void reset();
 };
 
@@ -43,6 +57,12 @@ private:
     bool louvreOpen;
     unsigned long lastUpdate;
     unsigned long invalidSince;
+    // Loop-rate bookkeeping. update() itself runs at PID_UPDATE_INTERVAL (1 Hz)
+    // because the state machine and the emergency check want that resolution,
+    // but the PID only gets to run when a NEW chamber reading has actually
+    // arrived - see the loop-rate note in updateAutomatic().
+    float lastDemand = 0.0f;
+    unsigned long lastChamberUpdatedMs = 0;
     bool jobWasActive = false;
     uint8_t lastMaterial = ENC_MATERIAL_UNKNOWN;
     bool emergencyActive = false;
@@ -70,8 +90,12 @@ private:
         COOLING_PASSIVE
     } currentState = IDLE;
 
-    float coolingDemand(float chamberTemp);
-    void updateAutomatic(double chamberTemp);
+    bool coolingDemand(float chamberTemp, float &out);
+    // Shared body of applyRemoteCommand()/applyLocalCommand(). `fromRemote` is
+    // the only difference between them: it decides whether this counts as proof
+    // that the CYD is alive.
+    void applyCommand(const EnclosureCommand &cmd, bool fromRemote);
+    void updateAutomatic(double chamberTemp, unsigned long sampleMs);
     void updateManual();
     bool updateEmergency(double chamberTemp);
     void applyActiveSetpoint(uint8_t material);
@@ -114,8 +138,25 @@ public:
     // Control functions
     void stopFan();
 
+    // Runtime PID gains. Returns false (leaving the regulator untouched) when
+    // the values are out of range or non-finite. Takes effect on the next
+    // chamber reading, not immediately - the PID only samples when new data
+    // arrives.
+    bool setGains(const PidGains &g);
+    PidGains gains() const { return pidController.gains(); }
+
     // Remote control (ESP-NOW commands from PrinterDisplay)
     void applyRemoteCommand(const EnclosureCommand &cmd);
+
+    // A command from the board's OWN web UI (lib/EnclosureUi POST /api/manual).
+    //
+    // Applies exactly what applyRemoteCommand() applies - mode, and the manual
+    // louvre/fan percentages - but deliberately does NOT stamp the remote-link
+    // liveness. Routing a browser click through applyRemoteCommand() would make
+    // the OLED claim the display is connected while it is not, and would
+    // suppress the command-link-loss fallback that exists to catch a real
+    // disconnection. The two sources must not be able to impersonate each other.
+    void applyLocalCommand(const EnclosureCommand &cmd);
 
     // Status functions
     bool isFanActive() const;
@@ -127,6 +168,21 @@ public:
     uint8_t louvrePercent() const; // 0-100
     bool remoteLinkAlive() const;
     bool jobIsActive() const { return jobWasActive; }
+
+    // Read-only extras for the web UI (lib/EnclosureUi), which renders what the
+    // regulator is actually doing rather than what was last requested.
+    uint8_t activeMaterial() const { return lastMaterial; }   // ENC_MATERIAL_*
+    // Setpoint currently in force, whole C. Negative until one has been applied,
+    // which the page shows as unavailable instead of as a temperature.
+    int activeSetpoint() const { return lastAppliedSetpoint; }
+    // Named isEmergencyActive() rather than emergencyActive(): a member and a
+    // method cannot share one name in a class scope, and the member is the
+    // flag this reports.
+    bool isEmergencyActive() const { return emergencyActive; }
+    // What the manual mode is holding, so the page can show the committed values
+    // rather than its own unsent slider positions.
+    uint8_t manualLouvrePercent() const { return manualLouvrePct; }
+    uint8_t manualFanPercent() const { return manualFanPct; }
 };
 
 #endif

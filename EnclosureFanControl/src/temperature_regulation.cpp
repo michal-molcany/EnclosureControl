@@ -46,19 +46,26 @@ static bool materialHasToken(const String &material, const char *token)
 }
 
 PIDController::PIDController(float kpValue, float kiValue, float kdValue, float target)
-    : kp(kpValue), ki(kiValue), kd(kdValue), setpoint(target),
+    : applied{kpValue, kiValue, kdValue}, setpoint(target),
       lastError(0), integral(0), lastTime(millis())
 {
 }
 
-float PIDController::calculate(float currentValue)
+bool PIDController::calculate(float currentValue, float &out)
 {
     const unsigned long currentTime = millis();
     const float timeStep = (currentTime - lastTime) / 1000.0f;
     lastTime = currentTime;
 
     if (timeStep <= 0)
-        return 0;
+        return false;
+
+    // A long gap means the readings behind us were stale rather than a real
+    // time step, and integrating a stale error across it would wind the
+    // integral on information that was never true. Skipping is the honest
+    // response: lastTime is already re-based, so the next call carries on.
+    if (timeStep > PID_MAX_TIMESTEP_S)
+        return false;
 
     const float error = currentValue - setpoint;
     if (error > 0)
@@ -66,13 +73,27 @@ float PIDController::calculate(float currentValue)
     else
         integral *= 0.9f;
 
-    integral = constrain(integral, 0.0f, 200.0f);
+    // Clamp the I term's CONTRIBUTION, not the integral. Clamping the integral
+    // would make the maximum windup depend on ki, which is now tunable - so
+    // turning ki up would silently move the bound. See PID_I_TERM_MAX.
+    const float iTerm = constrain(applied.ki * integral, 0.0f, PID_I_TERM_MAX);
 
     const float derivative = (error - lastError) / timeStep;
     lastError = error;
 
-    const float output = kp * error + ki * integral + kd * derivative;
-    return constrain(output, 0.0f, 200.0f);
+    const float output = applied.kp * error + iTerm + applied.kd * derivative;
+    if (!isfinite(output))
+        return false;
+    out = constrain(output, 0.0f, 200.0f);
+    return true;
+}
+
+bool PIDController::setGains(const PidGains &g)
+{
+    if (!pidGainsValid(g))
+        return false;
+    applied = g;
+    return true;
 }
 
 void PIDController::setSetpoint(float newSetpoint)
@@ -88,7 +109,8 @@ void PIDController::reset()
 }
 
 TemperatureRegulation::TemperatureRegulation(ServoLouver *servoLouver)
-    : louver(servoLouver), pidController(PID_KP, PID_KI, PID_KD, PID_SETPOINT),
+    : louver(servoLouver),
+      pidController(PID_KP_DEFAULT, PID_KI_DEFAULT, PID_KD_DEFAULT, TEMP_STANDARD_TARGET),
       fanActive(false), lastFanSpeed(0), louvreOpen(false), lastUpdate(0),
       invalidSince(0)
 {
@@ -106,6 +128,11 @@ void TemperatureRegulation::begin()
     fanStartedMs = 0;
     lastLouvrePct = 0;
     lastUpdate = millis();
+    lastDemand = 0.0f;
+    // Force the first snapshot to count as new. 0 cannot be a real updatedMs
+    // (the poll task stamps it before publishing), and starting here would
+    // otherwise make the first regulation cycle a no-op.
+    lastChamberUpdatedMs = 0;
     pidController.reset();
 #if SERIAL_DEBUG
     Serial.println("TemperatureRegulation initialized");
@@ -249,7 +276,7 @@ void TemperatureRegulation::update(const OctoSnapshot &snap)
         return;
     }
 
-    updateAutomatic(effective.chamberActual);
+    updateAutomatic(effective.chamberActual, effective.updatedMs);
 }
 
 bool TemperatureRegulation::updateEmergency(double chamberTemp)
@@ -282,11 +309,41 @@ bool TemperatureRegulation::updateEmergency(double chamberTemp)
     return true;
 }
 
-void TemperatureRegulation::updateAutomatic(double chamberTemp)
+void TemperatureRegulation::updateAutomatic(double chamberTemp, unsigned long sampleMs)
 {
     applyActiveSetpoint(lastMaterial);
 
-    float demand = coolingDemand((float)chamberTemp);
+    // LOOP RATE vs DATA RATE
+    // ----------------------
+    // This function runs at PID_UPDATE_INTERVAL (1 Hz), but chamberActual only
+    // changes when the OctoPrint poll task publishes a new snapshot - every
+    // OCTO_POLL_INTERVAL_MS (5 s). Running the integrator on all five ticks
+    // meant four of them re-integrated an unchanged reading, which made the
+    // controller behave like a 0.2 Hz loop wearing the costume of a 1 Hz one:
+    // the dead time was really ~5-6 s while Ti was tuned against a 1 s step.
+    //
+    // So the PID is gated on NEW DATA (the snapshot's own updatedMs) and holds
+    // its last demand in between. Zero-order hold is the correct treatment for
+    // a sampled input - re-deriving a command from an identical reading cannot
+    // produce a different answer, and setLouvrePercent/setFanPercent would drop
+    // it as unchanged anyway.
+    //
+    // The 1 Hz gate above is deliberately KEPT for everything else in update():
+    // the emergency check and the state machine are threshold tests on the
+    // latest known value, and they want 1 Hz resolution regardless of how often
+    // the temperature itself was measured.
+    if (sampleMs != lastChamberUpdatedMs)
+    {
+        lastChamberUpdatedMs = sampleMs;
+        float fresh = 0.0f;
+        // A skipped sample (dt zero, or a stall too long to integrate across)
+        // must leave lastDemand alone. Treating it as zero would slam the
+        // louvre shut every time a poll ran late.
+        if (coolingDemand((float)chamberTemp, fresh))
+            lastDemand = fresh;
+    }
+
+    float demand = lastDemand;
     if (louvreOnly(lastMaterial))
         demand = constrain(demand, 0.0f, 100.0f);
 
@@ -299,15 +356,28 @@ void TemperatureRegulation::updateAutomatic(double chamberTemp)
     setFanPercent(fanPercent);
 }
 
+bool TemperatureRegulation::setGains(const PidGains &g)
+{
+    if (!pidController.setGains(g))
+    {
+        Serial.printf("[PID] REJECTED kp=%.3f ki=%.3f kd=%.3f (out of range or not finite)\n",
+                      (double)g.kp, (double)g.ki, (double)g.kd);
+        return false;
+    }
+    Serial.printf("[PID] applied kp=%.3f ki=%.3f kd=%.3f\n",
+                  (double)gains().kp, (double)gains().ki, (double)gains().kd);
+    return true;
+}
+
 void TemperatureRegulation::updateManual()
 {
     setLouvrePercent(manualLouvrePct);
     setFanPercent(manualFanPct);
 }
 
-float TemperatureRegulation::coolingDemand(float chamberTemp)
+bool TemperatureRegulation::coolingDemand(float chamberTemp, float &out)
 {
-    return pidController.calculate(chamberTemp);
+    return pidController.calculate(chamberTemp, out);
 }
 
 void TemperatureRegulation::applyActiveSetpoint(uint8_t material)
@@ -334,14 +404,33 @@ void TemperatureRegulation::applyActiveSetpoint(uint8_t material)
 
 void TemperatureRegulation::applyRemoteCommand(const EnclosureCommand &cmd)
 {
+    // fromRemote is what separates "the CYD is talking to us" from "a browser
+    // asked nicely". Only the former may refresh lastRemoteRxMs, which is what
+    // remoteLinkAlive() and the command-loss fallback read.
+    applyCommand(cmd, true);
+}
+
+void TemperatureRegulation::applyLocalCommand(const EnclosureCommand &cmd)
+{
+    applyCommand(cmd, false);
+}
+
+void TemperatureRegulation::applyCommand(const EnclosureCommand &cmd, bool fromRemote)
+{
     if (cmd.magic != ENC_PROTO_MAGIC)
         return;
 
-    lastRemoteRxMs = millis();
-    hasRemoteRx = true;
+    if (fromRemote)
+    {
+        lastRemoteRxMs = millis();
+        hasRemoteRx = true;
+    }
     remoteJobActive = cmd.jobActive != 0;
 #if SERIAL_DEBUG
-    Serial.printf("[REMOTE] mode=%u setpoint=%u material=%u job=%u louvre=%u fan=%u\n",
+    // The tag names the SOURCE, because a web-UI command and a CYD command are
+    // not interchangeable: only the CYD one refreshes the link liveness.
+    Serial.printf("%s mode=%u setpoint=%u material=%u job=%u louvre=%u fan=%u\n",
+                  fromRemote ? "[REMOTE]" : "[WEBUI]",
                   static_cast<unsigned>(cmd.mode),
                   static_cast<unsigned>(cmd.setpoint),
                   static_cast<unsigned>(cmd.material),
