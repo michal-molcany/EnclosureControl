@@ -57,7 +57,9 @@ public:
         return -1;
       delay(1);
     }
-    return _client.read();
+    const int c = _client.read();
+    maybeYield();
+    return c;
   }
   int peek() override
   {
@@ -73,8 +75,37 @@ public:
   size_t write(uint8_t) override { return 0; }
 
 private:
+  // YIELD BY BYTE COUNT, not only while the socket is idle.
+  //
+  // Waiting for data is only half the problem. Once the Wi-Fi RX buffer holds
+  // data, the deserializer calls read() back-to-back and the loop above never
+  // runs - so nothing yields, the idle task never gets scheduled, and the task
+  // watchdog aborts the chip mid-parse:
+  //
+  //   [POLL] files refresh start
+  //   E (78556) task_wdt: Aborting.
+  //
+  // which reaches the user as the display rebooting when they open the file list.
+  // GET /api/files?recursive=true is ~75 KB of JSON and the parse alone is long
+  // enough to blow the 5 s budget.
+  //
+  // Every 1 KB rather than every character: a delay(1) per character would
+  // dominate the transfer, while a kilobyte is milliseconds of work even on a
+  // poor link - comfortably inside the watchdog window.
+  void maybeYield()
+  {
+    if (++_sinceYield >= kYieldEveryBytes)
+    {
+      _sinceYield = 0;
+      delay(1);
+    }
+  }
+
+  static const uint32_t kYieldEveryBytes = 1024;
+
   WiFiClient &_client;
   uint32_t _deadline;
+  uint32_t _sinceYield = 0;
 };
 
 // Reads the response body the same yielding way: exactly contentLength bytes
@@ -795,11 +826,127 @@ static String urlEncodePath(const char *path)
   return out;
 }
 
+// Heuristic hints read out of a file name.
+//
+// WHY THIS EXISTS: layer height and nozzle diameter are the two slicer settings
+// OctoPrint does not expose anywhere. Checked against the live server: neither
+// /api/files nor /api/files/local/<path> carries them, not even in the embedded
+// slicer metadata. The name is all that is left, and it is where PrusaSlicer,
+// Orca and Cura all put them by default.
+//
+// WHAT IT IS NOT: authoritative. It is a guess from a naming convention, so the
+// UI marks these two values as coming from the name. A file called
+// spare-part.gcode yields nothing, and 0 here means not-found, not a real zero.
+
+static bool isNameBoundary(char c)
+{
+  return !(isalnum((unsigned char)c) || c == '_' || c == '.');
+}
+
+// Materials worth recognising. Ordered so the longer names are tried before the
+// shorter ones they start with; PC is last and matches only as a whole token.
+static const char *const kMaterialOrder[] = {"NYLON", "HIPS", "WOOD", "FLEX", "PETG",
+                                             "POLY",  "PVA",  "TPU",  "ABS",  "ASA",
+                                             "PLA",   "PC",   nullptr};
+
+static bool findMaterial(const char *name, char *out, size_t outSize)
+{
+  for (int i = 0; kMaterialOrder[i]; ++i)
+  {
+    const size_t len = strlen(kMaterialOrder[i]);
+    for (const char *p = name; *p; ++p)
+    {
+      if (strncasecmp(p, kMaterialOrder[i], len) != 0)
+        continue;
+      const bool leftOk = (p == name) || isNameBoundary(p[-1]);
+      if (!leftOk || !isNameBoundary(p[len]))
+        continue;
+      strncpy(out, kMaterialOrder[i], outSize - 1);
+      out[outSize - 1] = '\0';
+      return true;
+    }
+  }
+  return false;
+}
+
+// Collects every <number>mm in the name. Both a dot and a comma are accepted as
+// the decimal separator, because European slicer locales write 0,15mm.
+static int scanMmValues(const char *name, float *out, int maxOut)
+{
+  int found = 0;
+  for (const char *p = name; *p && found < maxOut; ++p)
+  {
+    if (!isdigit((unsigned char)*p))
+      continue;
+    char *end = nullptr;
+    float value = strtof(p, &end);
+    if (end == p || value <= 0)
+      continue;
+    if (*end == ',' || *end == '.')
+    {
+      // A locale decimal comma: re-parse with that separator honoured.
+      value = strtof(p, &end);
+      if (end == p || value <= 0)
+        continue;
+    }
+    if (strncasecmp(end, "mm", 2) != 0)
+      continue;
+    if (end - p > 8)
+      continue; // too many digits to be a dimension we care about
+    out[found++] = value;
+    p = end + 1; // resume past the digits, before the unit
+  }
+  return found;
+}
+
+static void parseNameHints(const char *name, OctoFile &entry)
+{
+  if (entry.material[0] == '\0')
+    findMaterial(name, entry.material, sizeof(entry.material));
+
+  float mm[8];
+  const int count = scanMmValues(name, mm, 8);
+  if (count == 0)
+    return;
+
+  // Distinguish the two by size, not by keyword. Layer heights run about
+  // 0.05-0.35 and nozzles about 0.2-0.8, so the ranges overlap and a keyword
+  // alone is not reliable. With two or more values the ordering is unambiguous:
+  // smallest is the layer, largest the nozzle.
+  if (count >= 2)
+  {
+    float lo = mm[0], hi = mm[0];
+    for (int i = 1; i < count; ++i)
+    {
+      if (mm[i] < lo)
+        lo = mm[i];
+      if (mm[i] > hi)
+        hi = mm[i];
+    }
+    if (lo > 0.001f && lo < hi)
+    {
+      entry.layerHeightMm = lo;
+      entry.nozzleMm = hi;
+    }
+    else
+    {
+      entry.layerHeightMm = mm[0];
+    }
+    return;
+  }
+
+  // A single value: 0.4 on its own is far more often a nozzle, and 0.15 on its
+  // own is obviously a layer height.
+  if (mm[0] < 0.36f)
+    entry.layerHeightMm = mm[0];
+  else
+    entry.nozzleMm = mm[0];
+}
+
 // Inserts one entry into the out[0..*found] array kept sorted newest-first.
 // When full, only displaces the oldest entry if the newcomer is newer.
 static void insertFileSorted(OctoFile *out, size_t capacity, size_t &found,
-                             const char *path, const char *name,
-                             uint32_t date, uint32_t size)
+                             const OctoFile &entry)
 {
   size_t slot;
   if (found < capacity)
@@ -808,16 +955,11 @@ static void insertFileSorted(OctoFile *out, size_t capacity, size_t &found,
   }
   else
   {
-    if (date <= out[found - 1].date)
+    if (entry.date <= out[found - 1].date)
       return;
     slot = found - 1;
   }
-  strncpy(out[slot].path, path, sizeof(out[slot].path) - 1);
-  out[slot].path[sizeof(out[slot].path) - 1] = '\0';
-  strncpy(out[slot].name, (name && *name) ? name : path, sizeof(out[slot].name) - 1);
-  out[slot].name[sizeof(out[slot].name) - 1] = '\0';
-  out[slot].date = date;
-  out[slot].size = size;
+  out[slot] = entry;
   while (slot > 0 && out[slot].date > out[slot - 1].date)
   {
     OctoFile tmp = out[slot];
@@ -849,9 +991,69 @@ static void collectFiles(JsonArray level, OctoFile *out, size_t capacity, size_t
     const char *path = obj["path"] | "";
     if (!path || !*path)
       continue;
-    insertFileSorted(out, capacity, found,
-                     path, obj["name"] | "",
-                     obj["date"] | 0, obj["size"] | 0);
+
+    OctoFile entry = {};
+    strncpy(entry.path, path, sizeof(entry.path) - 1);
+    const char *name = obj["name"] | "";
+    strncpy(entry.name, (name && *name) ? name : path, sizeof(entry.name) - 1);
+    entry.date = obj["date"] | 0;
+    entry.size = obj["size"] | 0;
+
+    // Details, all already present in this listing entry. Each is guarded
+    // because a file sliced by something other than PrusaSlicer/Orca has no
+    // analysis block at all, and one absent field must not lose the rest.
+    JsonObject analysis = obj["gcodeAnalysis"].as<JsonObject>();
+    if (!analysis.isNull())
+    {
+      entry.estimatedPrintTime = analysis["estimatedPrintTime"] | 0.0;
+      const char *mat = analysis["firstFilament"] | "";
+      if (mat && *mat)
+        strncpy(entry.material, mat, sizeof(entry.material) - 1);
+
+      JsonObject dims = analysis["dimensions"].as<JsonObject>();
+      if (!dims.isNull())
+      {
+        entry.dimX = dims["X"] | 0.0f;
+        entry.dimY = dims["Y"] | 0.0f;
+        entry.dimZ = dims["Z"] | 0.0f;
+      }
+
+      // filament is keyed per tool; the enclosure is single-extruder and the
+      // display has room for one total, so tools are summed rather than tool0
+      // being picked - a two-tool file would otherwise under-report by half.
+      JsonObject fil = analysis["filament"].as<JsonObject>();
+      if (!fil.isNull())
+      {
+        for (JsonPair kv : fil)
+        {
+          JsonObject tool = kv.value().as<JsonObject>();
+          if (tool.isNull())
+            continue;
+          entry.filamentLengthMm += tool["length"] | 0.0;
+          entry.filamentVolumeCm3 += tool["volume"] | 0.0;
+        }
+      }
+    }
+
+    JsonObject stats = obj["statistics"].as<JsonObject>();
+    if (!stats.isNull())
+    {
+      JsonObject avg = stats["averagePrintTime"].as<JsonObject>();
+      if (!avg.isNull())
+        entry.averagePrintTime = avg["_default"] | 0.0;
+    }
+    JsonObject prints = obj["prints"].as<JsonObject>();
+    if (!prints.isNull())
+    {
+      entry.printsSuccess = prints["success"] | 0;
+      entry.printsFailure = prints["failure"] | 0;
+    }
+
+    // Name-derived hints LAST, and only as a fallback: the slicer metadata above
+    // is real data, this is a guess from a naming convention.
+    parseNameHints(entry.name, entry);
+
+    insertFileSorted(out, capacity, found, entry);
   }
 }
 
@@ -885,6 +1087,36 @@ int OctoPrinter::fetchFiles(OctoFile *out, size_t capacity, FetchDiag &diag, uin
     level["name"] = true;
     level["date"] = true;
     level["size"] = true;
+
+    // Details for the info view, kept in the SAME listing pass - no second
+    // per-file request. Every nested object is built through a handle to real
+    // storage (see the warning above): assigning an intermediate proxy to a
+    // JsonVariant first yields a detached handle whose writes go nowhere, and a
+    // filter that silently holds nothing parses the whole reply down to {}.
+    //
+    // Only tool0 is templated even though the collector sums every tool. The
+    // filter has to name keys to keep them, and OctoPrint's tool count is not
+    // known until after the parse - so a second tool's numbers simply do not
+    // survive the filter. One enclosure has one extruder, so this is not a real
+    // loss; the summing in collectFiles is what makes it correct if it ever is.
+    JsonObject analysis = level["gcodeAnalysis"].to<JsonObject>();
+    analysis["estimatedPrintTime"] = true;
+    analysis["firstFilament"] = true;
+    JsonObject dims = analysis["dimensions"].to<JsonObject>();
+    dims["X"] = true;
+    dims["Y"] = true;
+    dims["Z"] = true;
+    JsonObject filament = analysis["filament"].to<JsonObject>();
+    JsonObject tool0 = filament["tool0"].to<JsonObject>();
+    tool0["length"] = true;
+    tool0["volume"] = true;
+    JsonObject statistics = level["statistics"].to<JsonObject>();
+    JsonObject average = statistics["averagePrintTime"].to<JsonObject>();
+    average["_default"] = true;
+    JsonObject prints = level["prints"].to<JsonObject>();
+    prints["success"] = true;
+    prints["failure"] = true;
+
     level = level["children"].to<JsonArray>().add<JsonVariant>();
   }
   if (filter["files"].isNull())

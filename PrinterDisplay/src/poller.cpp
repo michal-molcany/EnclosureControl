@@ -77,12 +77,49 @@ namespace
                 currentHost = IPAddress(raw);
                 currentPort = port;
                 endpointOverridden = true;
+                // MUST reach the client, not just the bookkeeping. The instance
+                // is constructed at static-init time with the compiled-in
+                // OCTOPRINT_IP, so recording the stored value without applying it
+                // leaves this board polling the compiled default forever - which
+                // is exactly what happened: it booted, printed the stored
+                // address, then failed every connection to an address nobody
+                // had asked it to use.
+                //
+                // Harmless when it equals the compiled default: setEndpoint()
+                // returns early if nothing changed.
+                api.setEndpoint(currentHost, currentPort);
                 Serial.print(F("[POLL] endpoint "));
                 Serial.print(currentHost);
                 Serial.print(':');
                 Serial.println(currentPort);
             }
         }
+    }
+
+    // Is this a usable OctoPrint address at all?
+    //
+    // Everything arriving in a telemetry packet is UNTRUSTED. ESP-NOW has no
+    // authentication, and in receive-only bootstrap mode (all-zero peer MAC) this
+    // board accepts packets from any sender on the channel - so a corrupt frame,
+    // a neighbouring board, or anyone with a radio can put four arbitrary bytes
+    // in here.
+    //
+    // Persisting garbage is not cosmetic: it survives every reboot, so one bad
+    // frame would point this board permanently at an address that does not
+    // exist, and the symptom (no printer data) is identical to OctoPrint being
+    // down. Validate before storing, and store nothing on failure.
+    bool plausibleEndpoint(IPAddress ip, uint16_t port)
+    {
+        if (port == 0)
+            return false;
+        const uint8_t first = ip[0];
+        if (first == 255 && ip[1] == 255 && ip[2] == 255 && ip[3] == 255)
+            return false; // broadcast
+        if (first >= 224)
+            return false; // multicast (224/4) and reserved space
+        if (first == 127)
+            return false; // loopback: this board reaches OctoPrint over the LAN
+        return true;
     }
 
     // Runs on the poll task, at the top of its loop. Applies and persists in
@@ -110,14 +147,29 @@ namespace
             return;
         }
 
-        if (ip == currentHost && port == currentPort && endpointOverridden)
+        // Last gate before anything is written to flash or handed to the poller.
+        if (!plausibleEndpoint(ip, port))
+        {
+            Serial.print(F("[POLL] endpoint REJECTED "));
+            Serial.print(ip);
+            Serial.print(':');
+            Serial.println(port);
             return;
+        }
+
+        // Re-assert even when the value is unchanged. setEndpoint() returns
+        // immediately when the client already points here, so this costs
+        // nothing - and it makes the client and the bookkeeping self-heal
+        // rather than depending on the two having been updated together.
+        api.setEndpoint(ip, port);
+
+        if (endpointOverridden && ip == currentHost && port == currentPort)
+            return; // unchanged: no NVS write, no log spam every single frame
 
         endpointOverridden = true;
         currentHost = ip;
         currentPort = port;
         storeEndpoint(ip, port);
-        api.setEndpoint(ip, port);
         Serial.print(F("[POLL] endpoint from C3 "));
         Serial.print(ip);
         Serial.print(':');
@@ -198,9 +250,14 @@ namespace
                 filesDiagAt = millis();
                 if (!sharedFiles)
                     break;
-                // Transient heap, not static and not poll-task stack (20
-                // entries are ~3.8 KB against an 8 KB task stack, and static
-                // would overflow the DRAM segment - see above).
+                // Transient heap, not static and not poll-task stack (the
+                // entries are ~576 B, against an 8 KB task stack; static would
+                // overflow the DRAM segment - see above).
+                //
+                // Note the cost here is NOT proportional to MAX_PRINT_FILES:
+                // fetchFiles streams and parses OctoPrint's whole recursive
+                // listing (~75 KB) either way. This allocation is just the
+                // destination.
                 OctoFile *scratch =
                     static_cast<OctoFile *>(malloc(sizeof(OctoFile) * MAX_PRINT_FILES));
                 if (!scratch)
@@ -237,6 +294,21 @@ namespace
                             sharedFiles->files[i].name[PRINT_FILE_NAME_LEN - 1] = '\0';
                             sharedFiles->files[i].date = scratch[i].date;
                             sharedFiles->files[i].size = scratch[i].size;
+                            // Info-view fields, copied from the same listing
+                            // entry - there is no second fetch for these.
+                            memcpy(sharedFiles->files[i].material, scratch[i].material,
+                                   sizeof(sharedFiles->files[i].material));
+                            sharedFiles->files[i].estimatedPrintTime = scratch[i].estimatedPrintTime;
+                            sharedFiles->files[i].filamentLengthMm = scratch[i].filamentLengthMm;
+                            sharedFiles->files[i].filamentVolumeCm3 = scratch[i].filamentVolumeCm3;
+                            sharedFiles->files[i].dimX = scratch[i].dimX;
+                            sharedFiles->files[i].dimY = scratch[i].dimY;
+                            sharedFiles->files[i].dimZ = scratch[i].dimZ;
+                            sharedFiles->files[i].averagePrintTime = scratch[i].averagePrintTime;
+                            sharedFiles->files[i].printsSuccess = scratch[i].printsSuccess;
+                            sharedFiles->files[i].printsFailure = scratch[i].printsFailure;
+                            sharedFiles->files[i].layerHeightMm = scratch[i].layerHeightMm;
+                            sharedFiles->files[i].nozzleMm = scratch[i].nozzleMm;
                         }
                         sharedFiles->error = false;
                         sharedFiles->version = ++filesVersion;

@@ -20,7 +20,8 @@ public:
         Chamber,
         Tool,
         Bed,
-        Files
+        Files,
+        FileInfo
     };
 
     // Targets that get their own preheat screen, reached by tapping the
@@ -75,6 +76,14 @@ public:
     // panel. Shows the cached list only; use openFilesView() for the tap
     // entry, which also asks the poll task for a fresh fetch.
     void showFilesView();
+    // Shows the selected file's details (material, print time, size, upload date,
+    // dimensions, filament, print history). Reads the same listing the rows were
+    // built from, so it is immediate and costs no request.
+    void showFileInfo();
+    // A touch anywhere on the details panel. Returns to the list, but ONLY while
+    // the panel is showing - see the note on the implementation, which explains
+    // why that guard is load-bearing rather than tidy.
+    void filesPanelTouched();
     void openFilesView();
     // Send a target to OctoPrint. Inert while a print is active.
     void setPreheatTarget(PreheatKind kind, int temp);
@@ -245,6 +254,11 @@ private:
     lv_obj_t *_filesList = nullptr;
     lv_obj_t *_filesStatusLabel = nullptr;
     lv_obj_t *_filesPrintButton = nullptr;
+    lv_obj_t *_filesInfoButton = nullptr;
+    // File details as a real two-column table. The name sits on its own line
+    // above it, because it is what the table is about and squeezing a long
+    // filename into a cell makes both columns unreadable.
+    lv_obj_t *_filesInfoTable = nullptr;
     lv_obj_t *_fileRowLabels[MAX_PRINT_FILES] = {};
     uint8_t _filesCount = 0;
     uint32_t _filesVersionSeen = 0;

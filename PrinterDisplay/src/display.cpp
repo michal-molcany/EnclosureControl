@@ -378,7 +378,173 @@ namespace
             activeDisplay->showPrintConfirm();
     }
 
-    void backEvent(lv_event_t *event)
+    void filesInfoEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->showFileInfo();
+    }
+
+    // A touch anywhere on the details panel returns to the list. There is nothing
+// interactive in the panel - it is a table of values - so the whole screen is
+// the back target.
+//
+// Gated on _view inside the handler rather than by attaching and detaching the
+// callback, because LVGL bubbles events from the object that was touched up
+// through its parents: an unconditional handler here would also fire for a tap
+// on a file row and bounce the user out of the list they were choosing from.
+void filesPanelTouchEvent(lv_event_t *event)
+{
+    (void)event;
+    if (activeDisplay)
+        activeDisplay->filesPanelTouched();
+}
+
+    // ---- formatting for the file-info view -------------------------------
+    //
+    // A 0 coming from OctoPrint means it does not know (no analysis in the file,
+    // or never printed) rather than a real zero. Rendering that as "print time
+    // 0s" or "filament 0 mm" would be stating a fact we do not have, so each
+    // helper returns a fallback instead.
+
+    String formatDuration(double seconds)
+    {
+        if (seconds < 1)
+            return "unknown";
+        const long total = (long)(seconds + 0.5);
+        const long h = total / 3600;
+        const long m = (total % 3600) / 60;
+        const long s = total % 60;
+        char buf[32];
+        if (h > 0)
+            snprintf(buf, sizeof(buf), "%ldh %02ldm", h, m);
+        else if (m > 0)
+            snprintf(buf, sizeof(buf), "%ldm %02lds", m, s);
+        else
+            snprintf(buf, sizeof(buf), "%lds", s);
+        return String(buf);
+    }
+
+    String formatBytes(uint32_t bytes)
+    {
+        if (bytes == 0)
+            return "unknown";
+        char buf[24];
+        if (bytes >= 1048576UL)
+            snprintf(buf, sizeof(buf), "%.1f MB", bytes / 1048576.0);
+        else if (bytes >= 1024)
+            snprintf(buf, sizeof(buf), "%.0f kB", bytes / 1024.0);
+        else
+            snprintf(buf, sizeof(buf), "%lu B", (unsigned long)bytes);
+        return String(buf);
+    }
+
+    // The two lines a file row shows: the name, then the details most useful when
+// choosing what to print - material, how long it takes, how big it is.
+//
+// Hyphens rather than a middle dot as the separator: the enabled font subset
+// carries ASCII + degree + bullet only, and a missing glyph would render as a
+// blank box on the one row with the least room to explain itself. Unknown values
+// are left out rather than printed as zeros.
+String fileRowText(const PrintFile &entry)
+{
+    String detail = entry.material[0] ? String(entry.material) : String("material ?");
+    if (entry.estimatedPrintTime > 1)
+        detail += " - " + formatDuration(entry.estimatedPrintTime);
+    if (entry.size > 0)
+        detail += " - " + formatBytes(entry.size);
+    return entry.name + String("\n") + detail;
+}
+
+// Days since the epoch for a civil date (Howard Hinnant), the inverse of the
+// civil-from-days used in formatUploadDate() below.
+static int64_t daysFromCivil(int64_t y, unsigned m, unsigned d)
+{
+    y -= (m <= 2) ? 1 : 0;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153 * (m + ((m > 2) ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (int64_t)doe - 719468;
+}
+
+// Day-of-month of the last Sunday of a 31-day month. March and October are both
+// 31 days, which is why this takes no last-day argument - and why it is only
+// correct for the two months the EU rule actually uses.
+static unsigned lastSundayOf31DayMonth(int64_t year, unsigned month)
+{
+    const unsigned lastDay = 31;
+    const int64_t days = daysFromCivil(year, month, lastDay);
+    // Epoch day 0 was a Thursday, so index 3 is Sunday.
+    const unsigned weekday = (unsigned)((days % 7 + 7) % 7);
+    return lastDay - ((weekday + 7 - 3) % 7);
+}
+
+// Was this timestamp inside European summer time? The EU rule, applied to the
+// timestamp being formatted rather than to a system clock: this board has no
+// clock, and one stuck in 1970 would call every summer timestamp winter time.
+static bool isEuSummerTime(uint32_t unixSeconds)
+{
+    const int64_t days = (int64_t)(unixSeconds / 86400UL);
+    int64_t z = days + 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = (unsigned)(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t y = (int64_t)yoe + era * 400;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    const unsigned month = mp < 10 ? mp + 3 : mp - 9;
+    const int64_t year = y + (month <= 2 ? 1 : 0);
+
+    // 01:00 UTC on the last Sunday of March, to 01:00 UTC on the last Sunday of
+    // October.
+    const uint32_t startUtc =
+        (uint32_t)(daysFromCivil(year, 3, lastSundayOf31DayMonth(year, 3)) * 86400 + 3600);
+    const uint32_t endUtc =
+        (uint32_t)(daysFromCivil(year, 10, lastSundayOf31DayMonth(year, 10)) * 86400 + 3600);
+    return unixSeconds >= startUtc && unixSeconds < endUtc;
+}
+
+// Date/time in Europe/Bratislava local time, Slovak format (D.M.YYYY, 24-hour).
+//
+// CET (UTC+1) in winter, CEST (UTC+2) in summer, with the EU daylight saving
+// rule applied to the value itself - see const.h for why this is hand-rolled
+// rather than done with localtime().
+//
+// The zone is printed next to the value on purpose: an unqualified time here
+// would be an hour wrong for half the year, and a wrong timestamp that looks
+// right is worse than one that admits what it is.
+//
+// No diacritics: the font subset is ASCII + degree + bullet, so "máj" or
+// "štvrtok" would render as missing glyphs. Hence numeric rather than spelled
+// out with Slovak month names.
+String formatUploadDate(uint32_t unixSeconds)
+{
+    if (unixSeconds == 0)
+        return "unknown";
+
+    const bool summer = isEuSummerTime(unixSeconds);
+    const int64_t stamp = (int64_t)unixSeconds + (summer ? 7200 : 3600);
+    const uint32_t secs = (uint32_t)(stamp % 86400);
+    const uint32_t days = (uint32_t)(stamp / 86400);
+
+    int64_t z = (int64_t)days + 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = (unsigned)(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t y = (int64_t)yoe + era * 400;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    const unsigned d = doy - (153 * mp + 2) / 5 + 1;
+    const unsigned m = mp < 10 ? mp + 3 : mp - 9;
+    const int64_t year = y + (m <= 2 ? 1 : 0);
+
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%02u.%02u.%04d  %02u:%02u %s", d, m, (int)year,
+             secs / 3600, (secs % 3600) / 60, summer ? "CEST" : "CET");
+    return String(buf);
+}
+
+void backEvent(lv_event_t *event)
     {
         if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
             activeDisplay->showMainView();
@@ -1245,12 +1411,21 @@ void Display::showChamberView()
 // Same shape as the chamber/preheat views: back button, title, then content.
 // Row buttons are a fixed pool created once and recycled by
 // refreshFilesDetail(), so opening the list never mallocs in steady state.
+// Rows in the file-info table: the file name, then one row per fact. NO header
+// row - the name IS the first row, which is what the screen is about.
+static const int kFileInfoRows = 10;
+
+// Lines of text drawn in each file row: the file name, then a compact detail
+// line (material, print time, size). Two is what fits the 46 px row at font 14
+// with the padding the centring calculation assumes.
+static const int kFileRowTextLines = 2;
+
 void Display::createFilesView()
 {
     lv_obj_t *parent = _filesContainer;
 
     lv_obj_t *backButton = lv_button_create(parent);
-    lv_obj_set_size(backButton, 100, 36);
+    lv_obj_set_size(backButton, 100, 32);
     lv_obj_set_pos(backButton, 5, 5);
     styleButton(backButton, TFT_DARKGREY);
     lv_obj_add_event_cb(backButton, backEvent, LV_EVENT_CLICKED, nullptr);
@@ -1270,13 +1445,29 @@ void Display::createFilesView()
     lv_obj_set_width(_filesStatusLabel, 310);
     lv_label_set_long_mode(_filesStatusLabel, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(_filesStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(_filesStatusLabel, 5, 44);
+    lv_obj_set_pos(_filesStatusLabel, 5, 39);
 
     // Only this container scrolls; every other view stays fixed (see
     // createViewContainer). Vertical drag scrolls the rows on touch.
+    // Four rows fit by geometry, not by a setting: 4 rows x 36 px pitch must fit the
+// 144 px box below. Asserted so a future change to the pitch or the box fails the
+// build instead of quietly sliding the last visible row under the print button.
+static_assert(PRINT_FILES_VISIBLE * 48 <= 146,
+              "files list box must fit PRINT_FILES_VISIBLE rows at the row pitch below");
+
+// 146 px is exactly what three 46 px rows need at a 48 px pitch: the last one
+    // starts at 2 + 2*48 = 98 and ends at 144.
+    //
+    // Dropping from four visible rows to three is what makes them feel properly
+    // large: 46 px of row for a 24 px line box is room to breathe, and a tap
+    // target you cannot miss. Cramming four in gave 34 px, which read as cramped
+    // on a touch panel this size.
+    //
+    // The box holds three; MAX_PRINT_FILES (ten) rows are created below and run
+    // past its bottom edge, which is what makes the list scroll.
     _filesList = lv_obj_create(parent);
-    lv_obj_set_pos(_filesList, 0, 64);
-    lv_obj_set_size(_filesList, SCREEN_WIDTH, 130);
+lv_obj_set_pos(_filesList, 0, 56);
+    lv_obj_set_size(_filesList, SCREEN_WIDTH, 146);
     lv_obj_set_style_bg_color(_filesList, color565(BACKGROUND), 0);
     lv_obj_set_style_border_width(_filesList, 0, 0);
     lv_obj_set_style_radius(_filesList, 0, 0);
@@ -1284,6 +1475,16 @@ void Display::createFilesView()
     lv_obj_add_flag(_filesList, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(_filesList, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(_filesList, LV_SCROLLBAR_MODE_AUTO);
+
+    // Centred from the FONT's real line height rather than a hand-picked pad_top.
+// A guessed number was wrong here: it did not centre the text, and it would have
+// to be redone by hand whenever the font or the row height changed. Asking the
+// font makes the padding follow both.
+const lv_coord_t lineHeight = lv_font_get_line_height(&lv_font_montserrat_14);
+    // Two lines per row (name, then a detail line), so the block is twice the
+    // line height and the padding is what centres THAT, not a single line.
+    // kFileRowTextLines exists so the two can never disagree.
+    const lv_coord_t rowPadTop = (46 - kFileRowTextLines * lineHeight) / 2;
 
     for (int index = 0; index < MAX_PRINT_FILES; ++index)
     {
@@ -1295,14 +1496,24 @@ void Display::createFilesView()
         // is invisible - bg_opa COVER is what makes selected/unselected
         // actually differ on screen. One rolling line per row (name only).
         lv_obj_t *row = lv_label_create(_filesList);
-        lv_obj_set_size(row, 305, 30);
-        lv_obj_set_pos(row, 5, 4 + index * 34);
+        // montserrat_14, deliberately NOT the 20 px font the rest of the panels use.
+        // Width is the constraint here, not height: the row is 305 px wide and a
+        // gcode filename is long, so at 20 px only a dozen or so characters fit
+        // before the circular-scroll takes over and the name is unreadable until
+        // you wait for it to slide. At 14 px roughly 1.7x more of the name is on
+        // screen at once, which is the whole point of showing a file list.
+        //
+        // The row stays 46 px tall, so the smaller text costs nothing in touch
+        // target - it is centred in the row with ~14 px above it.
+        lv_obj_set_style_text_font(row, &lv_font_montserrat_14, 0);
+        lv_obj_set_size(row, 305, 46);
+        lv_obj_set_pos(row, 5, 2 + index * 48);
         styleButton(row, TFT_DARKGREY);
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
         lv_obj_set_style_text_color(row, lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_style_pad_left(row, 8, 0);
         lv_obj_set_style_pad_right(row, 8, 0);
-        lv_obj_set_style_pad_top(row, 7, 0);
+        lv_obj_set_style_pad_top(row, rowPadTop, 0);
         lv_obj_set_width(row, 305);
         lv_label_set_long_mode(row, LV_LABEL_LONG_SCROLL_CIRCULAR);
         lv_label_set_text(row, "");
@@ -1314,8 +1525,8 @@ void Display::createFilesView()
     }
 
     _filesPrintButton = lv_button_create(parent);
-    lv_obj_set_size(_filesPrintButton, 310, 34);
-    lv_obj_set_pos(_filesPrintButton, 5, 200);
+lv_obj_set_size(_filesPrintButton, 150, 32);
+    lv_obj_set_pos(_filesPrintButton, 165, 204);
     styleButton(_filesPrintButton, TFT_DARKGREEN);
     lv_obj_add_event_cb(_filesPrintButton, filesPrintEvent, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *printLabel = lv_label_create(_filesPrintButton);
@@ -1326,7 +1537,94 @@ void Display::createFilesView()
     // Always visible; refreshFilesDetail() owns enabled vs. disabled state
     // (disabled = greyed and not clickable until a row is selected).
 
+    // Info sits BESIDE Print rather than replacing it: both act on the selected
+    // row, and making the details a round trip away from the start button would
+    // mean going back to print afterwards. Same enable/disable rule.
+    _filesInfoButton = lv_button_create(parent);
+    lv_obj_set_size(_filesInfoButton, 150, 32);
+    lv_obj_set_pos(_filesInfoButton, 5, 204);
+    styleButton(_filesInfoButton, TFT_BLUE);
+    lv_obj_add_event_cb(_filesInfoButton, filesInfoEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *infoLabel = lv_label_create(_filesInfoButton);
+    lv_label_set_text(infoLabel, "File info");
+    lv_obj_set_style_text_color(infoLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_remove_flag(infoLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(infoLabel);
+
+    // The details panel replaces the list in place, rather than being its own
+    // view with its own container - one name label and one table is all it needs,
+    // and every LVGL object counts against the 60 KB pool.
+    //
+    // NO back button: a touch anywhere returns to the list instead (see
+    // filesPanelTouchEvent). A corner button would compete with the table for
+    // the same panel and, on a 320-wide screen, eat a column of values.
+    lv_obj_add_event_cb(parent, filesPanelTouchEvent, LV_EVENT_PRESSED, nullptr);
+
+
+    // A real two-column table rather than a wall of text: the whole point of
+    // looking something up is being able to scan the values, which a block of
+    // prose cannot do. LVGL 9 exposes only LV_PART_MAIN and LV_PART_ITEMS, so
+    // per-column styling is done by reaching the cell objects directly (they are
+    // the table's children, in row-major order).
+    _filesInfoTable = lv_table_create(parent);
+    lv_table_set_column_count(_filesInfoTable, 2);
+    lv_table_set_row_count(_filesInfoTable, kFileInfoRows);
+    lv_table_set_column_width(_filesInfoTable, 0, 118);
+    lv_table_set_column_width(_filesInfoTable, 1, 187);
+    // The table IS the screen. With the back button gone there is nothing else
+    // on the panel, so it runs from just inside the top edge to just inside the
+    // bottom, and 10 rows fit without scrolling.
+    lv_obj_set_pos(_filesInfoTable, 5, 5);
+    lv_obj_set_size(_filesInfoTable, 310, 230);
+    lv_obj_set_style_bg_color(_filesInfoTable, color565(BACKGROUND), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(_filesInfoTable, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(_filesInfoTable, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(_filesInfoTable, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(_filesInfoTable, 0, LV_PART_MAIN);
+    lv_obj_set_style_text_font(_filesInfoTable, &lv_font_montserrat_14, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(_filesInfoTable, lv_color_hex(0xFFFFFF), LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(_filesInfoTable, color565(BACKGROUND_COL), LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(_filesInfoTable, LV_OPA_COVER, LV_PART_ITEMS);
+    lv_obj_set_style_pad_left(_filesInfoTable, 4, LV_PART_ITEMS);
+    lv_obj_set_style_pad_right(_filesInfoTable, 4, LV_PART_ITEMS);
+    lv_obj_set_style_pad_top(_filesInfoTable, 2, LV_PART_ITEMS);
+    lv_obj_set_style_pad_bottom(_filesInfoTable, 2, LV_PART_ITEMS);
+    // Grid rules around every cell. v9 has no outline_side setter (the generated
+    // per-side setters are gone), so this outlines all four sides - which is
+    // what a table wants anyway.
+    lv_obj_set_style_outline_width(_filesInfoTable, 1, LV_PART_ITEMS);
+    lv_obj_set_style_outline_color(_filesInfoTable, color565(TFT_DARKGREY), LV_PART_ITEMS);
+    lv_obj_set_style_outline_pad(_filesInfoTable, -1, LV_PART_ITEMS);
+    for (int r = 0; r < kFileInfoRows; ++r)
+    {
+        lv_obj_t *fieldCell = lv_obj_get_child(_filesInfoTable, r * 2);
+        if (fieldCell)
+        {
+            // Dim field names, bright values: the eye lands on the right half.
+            lv_obj_set_style_text_color(fieldCell, lv_color_hex(0x8B97A8), 0);
+        }
+    }
+    // Also attached to the TABLE itself, not just the container. LVGL bubbles an
+    // unhandled press up through the parents, but a scrollable object consumes
+    // presses for its own drag handling, so relying on bubbling alone would mean
+    // a tap ON the table - the largest part of the screen - did nothing.
+    lv_obj_add_event_cb(_filesInfoTable, filesPanelTouchEvent, LV_EVENT_PRESSED, nullptr);
+
+    // Hidden until a row is selected and File info is tapped.
+    lv_obj_add_flag(_filesInfoTable, LV_OBJ_FLAG_HIDDEN);
+
     refreshFilesDetail();
+}
+
+void Display::filesPanelTouched()
+{
+    // Only meaningful while the details panel is up. LVGL bubbles events from the
+    // touched object up through its parents, so this handler also sees taps on
+    // the list and its rows - without this guard, choosing a file would bounce
+    // straight back out of the list.
+    if (_view != View::FileInfo)
+        return;
+    showFilesView();
 }
 
 void Display::showFilesView()
@@ -1342,6 +1640,152 @@ void Display::showFilesView()
         if (_preheat[slot].container)
             lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
+    // Coming back from the details panel: put the list and its buttons back and
+    // hide the panel. Done here rather than in showFileInfo() so there is exactly
+    // one place that decides what the list view looks like.
+    if (_filesInfoTable)
+        lv_obj_add_flag(_filesInfoTable, LV_OBJ_FLAG_HIDDEN);
+    if (_filesList)
+        lv_obj_clear_flag(_filesList, LV_OBJ_FLAG_HIDDEN);
+    if (_filesStatusLabel)
+        lv_obj_clear_flag(_filesStatusLabel, LV_OBJ_FLAG_HIDDEN);
+    if (_filesPrintButton)
+        lv_obj_clear_flag(_filesPrintButton, LV_OBJ_FLAG_HIDDEN);
+    if (_filesInfoButton)
+        lv_obj_clear_flag(_filesInfoButton, LV_OBJ_FLAG_HIDDEN);
+    // The list's own back button shares the top-left corner the panel's does.
+    for (int i = 0; i < 2; ++i)
+    {
+        lv_obj_t *b = lv_obj_get_child(_filesContainer, i);
+        if (b)
+            lv_obj_clear_flag(b, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void Display::showFileInfo()
+{
+    if (!_filesInfoTable || _selectedFile < 0 || _selectedFile >= _filesCount)
+        return;
+
+    PrintFile entry;
+    if (!pollerCopyFile(_selectedFile, entry))
+        return;
+
+    // Everything here came out of the listing already fetched, so this is
+    // instant: no request, no waiting state, nothing to fail.
+    char buf[64];
+    String value;
+
+    // Layer height and nozzle are GUESSED from the file name - OctoPrint exposes
+    // neither, anywhere. Labelled as such in the value rather than presented as
+    // slicer truth.
+    // Row 0 is the file name, not a header row: it is the thing every row
+    // below it is describing.
+    lv_table_set_cell_value(_filesInfoTable, 0, 0, "File name");
+    lv_table_set_cell_value(_filesInfoTable, 0, 1, entry.name);
+
+    if (entry.layerHeightMm > 0.001f)
+    {
+        snprintf(buf, sizeof(buf), "%.2f mm  (from name)", entry.layerHeightMm);
+        value = buf;
+    }
+    else
+    {
+        value = "unknown";
+    }
+    lv_table_set_cell_value(_filesInfoTable, 1, 0, "Layer height");
+    lv_table_set_cell_value(_filesInfoTable, 1, 1, value.c_str());
+
+    if (entry.nozzleMm > 0.001f)
+    {
+        snprintf(buf, sizeof(buf), "%.2f mm  (from name)", entry.nozzleMm);
+        value = buf;
+    }
+    else
+    {
+        value = "unknown";
+    }
+    lv_table_set_cell_value(_filesInfoTable, 2, 0, "Nozzle");
+    lv_table_set_cell_value(_filesInfoTable, 2, 1, value.c_str());
+
+    lv_table_set_cell_value(_filesInfoTable, 3, 0, "Material");
+    lv_table_set_cell_value(_filesInfoTable, 3, 1,
+                            entry.material[0] ? entry.material : "unknown");
+
+    value = formatDuration(entry.estimatedPrintTime);
+    if (entry.averagePrintTime >= 1)
+        value += String("  (avg ") + formatDuration(entry.averagePrintTime) + ")";
+    lv_table_set_cell_value(_filesInfoTable, 4, 0, "Print time");
+    lv_table_set_cell_value(_filesInfoTable, 4, 1, value.c_str());
+
+    if (entry.filamentLengthMm > 0)
+    {
+        snprintf(buf, sizeof(buf), "%.0f mm  (%.2f cm3)",
+                 entry.filamentLengthMm, entry.filamentVolumeCm3);
+        value = buf;
+    }
+    else
+    {
+        value = "unknown";
+    }
+    lv_table_set_cell_value(_filesInfoTable, 5, 0, "Filament");
+    lv_table_set_cell_value(_filesInfoTable, 5, 1, value.c_str());
+
+    if (entry.dimX > 0 && entry.dimY > 0 && entry.dimZ > 0)
+    {
+        snprintf(buf, sizeof(buf), "%.0f x %.0f x %.0f mm", entry.dimX, entry.dimY, entry.dimZ);
+        value = buf;
+    }
+    else
+    {
+        value = "unknown";
+    }
+    lv_table_set_cell_value(_filesInfoTable, 6, 0, "Model size");
+    lv_table_set_cell_value(_filesInfoTable, 6, 1, value.c_str());
+
+    lv_table_set_cell_value(_filesInfoTable, 7, 0, "File size");
+    lv_table_set_cell_value(_filesInfoTable, 7, 1, formatBytes(entry.size).c_str());
+
+    lv_table_set_cell_value(_filesInfoTable, 8, 0, "Uploaded");
+    lv_table_set_cell_value(_filesInfoTable, 8, 1, formatUploadDate(entry.date).c_str());
+
+    if (entry.printsSuccess == 0 && entry.printsFailure == 0)
+    {
+        value = "never";
+    }
+    else
+    {
+        snprintf(buf, sizeof(buf), "%u ok", (unsigned)entry.printsSuccess);
+        value = buf;
+        if (entry.printsFailure)
+        {
+            value += ", ";
+            snprintf(buf, sizeof(buf), "%u failed", (unsigned)entry.printsFailure);
+            value += buf;
+        }
+    }
+    lv_table_set_cell_value(_filesInfoTable, 9, 0, "Printed");
+    lv_table_set_cell_value(_filesInfoTable, 9, 1, value.c_str());
+
+
+    // Swap the list out for the panel.
+    _view = View::FileInfo;
+    if (_filesList)
+        lv_obj_add_flag(_filesList, LV_OBJ_FLAG_HIDDEN);
+    if (_filesStatusLabel)
+        lv_obj_add_flag(_filesStatusLabel, LV_OBJ_FLAG_HIDDEN);
+    if (_filesPrintButton)
+        lv_obj_add_flag(_filesPrintButton, LV_OBJ_FLAG_HIDDEN);
+    if (_filesInfoButton)
+        lv_obj_add_flag(_filesInfoButton, LV_OBJ_FLAG_HIDDEN);
+    // Hide the list's own back button (child 0) now that the panel has its own.
+    lv_obj_t *listBack = lv_obj_get_child(_filesContainer, 0);
+    if (listBack)
+        lv_obj_add_flag(listBack, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(_filesInfoTable, LV_OBJ_FLAG_HIDDEN);
+    Serial.printf("[FILES] info shown for index=%d layer=%.2f nozzle=%.2f material=%s\n",
+                  _selectedFile, entry.layerHeightMm, entry.nozzleMm,
+                  entry.material[0] ? entry.material : "-");
 }
 
 void Display::openFilesView()
@@ -1434,7 +1878,7 @@ void Display::refreshFilesDetail()
         lv_label_set_long_mode(_fileRowLabels[index], isSelected
                                                             ? LV_LABEL_LONG_SCROLL_CIRCULAR
                                                             : LV_LABEL_LONG_DOT);
-        setLabelTextOnce(_fileRowLabels[index], entry.name);
+        setLabelTextOnce(_fileRowLabels[index], fileRowText(entry));
     }
 
     // The button stays visible with no selection, greyed out and inert;
@@ -1453,6 +1897,27 @@ void Display::refreshFilesDetail()
         lv_obj_set_style_bg_opa(_filesPrintButton, LV_OPA_50, 0);
         lv_obj_set_style_text_opa(_filesPrintButton, LV_OPA_50, 0);
         lv_obj_clear_flag(_filesPrintButton, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    // Same rule for File info: both act on the selected row, so one greys out
+    // with the other. Written as its own block rather than a loop because the
+    // two have different colours.
+    if (_filesInfoButton)
+    {
+        if (hasSelection)
+        {
+            styleButton(_filesInfoButton, TFT_BLUE);
+            lv_obj_set_style_bg_opa(_filesInfoButton, LV_OPA_COVER, 0);
+            lv_obj_set_style_text_opa(_filesInfoButton, LV_OPA_COVER, 0);
+            lv_obj_add_flag(_filesInfoButton, LV_OBJ_FLAG_CLICKABLE);
+        }
+        else
+        {
+            styleButton(_filesInfoButton, TFT_DARKGREY);
+            lv_obj_set_style_bg_opa(_filesInfoButton, LV_OPA_50, 0);
+            lv_obj_set_style_text_opa(_filesInfoButton, LV_OPA_50, 0);
+            lv_obj_clear_flag(_filesInfoButton, LV_OBJ_FLAG_CLICKABLE);
+        }
     }
 }
 
