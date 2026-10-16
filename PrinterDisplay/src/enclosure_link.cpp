@@ -151,14 +151,46 @@ namespace
         }
     }
 
-    // Registers a unicast peer at a channel. Used both for the compiled-in
-    // address and for one learned from a discovery hello.
+    // The ESP-NOW link key, copied out of the shared header once.
+    const uint8_t ltk[ESP_NOW_KEY_LEN] = ENC_ESP_NOW_LTK;
+
+    // ESP-NOW's key is AES-128-CCM and the driver rejects any other length. This
+    // build predates the lmk_len field (ESP-IDF v5), so the length is fixed by
+    // the struct rather than carried per-peer.
+    //
+    // A second array with a DEDUCED size is what makes the check meaningful: if
+    // the key header carries the wrong number of bytes, `ltk` would simply be
+    // zero-padded to fit and nothing would complain, producing a key that works
+    // only by accident. Asserting on the deduced size catches that at build time
+    // instead of as a link that will not come up.
+    static constexpr uint8_t ltkDeduced[] = ENC_ESP_NOW_LTK;
+    static_assert(sizeof(ltkDeduced) == ESP_NOW_KEY_LEN,
+                  "ENC_ESP_NOW_LTK must contain exactly ESP_NOW_KEY_LEN bytes");
+
+    // Registers a unicast peer at a channel, ENCRYPTED.
+    //
+    // Used both for the compiled-in address and for one learned from a discovery
+    // hello.
+    //
+    // Encryption is not optional decoration here: telemetry carries the OctoPrint
+    // API key, and ESP-NOW frames never leave the radio, so an unencrypted link
+    // puts a live printer credential on the air for anything in range to read.
+    // WPA2 does not help - these frames are not carried by the access point at
+    // all.
+    //
+    // It also makes peer hijacking much less useful: an attacker who answers a
+    // discovery hello and takes the peer slot receives ciphertext they have no
+    // key for, instead of the key itself.
+    //
+    // It does NOT authenticate what we RECEIVE - see the note in
+    // include/espnow_key.h.
     bool addOrUpdatePeer(const uint8_t *mac, int channel)
     {
         esp_now_peer_info_t peer = {};
         memcpy(peer.peer_addr, mac, 6);
         peer.channel = (uint8_t)channel;
-        peer.encrypt = false;
+        peer.encrypt = true;
+        memcpy(peer.lmk, ltk, sizeof(ltk));
         if (esp_now_is_peer_exist(mac))
         {
             if (esp_now_mod_peer(&peer) != ESP_OK)
@@ -176,6 +208,15 @@ namespace
 
     // The broadcast peer is what makes discovery possible. Channel 0 means
     // "whatever the STA is on", so it needs no resync.
+    //
+    // DELIBERATELY NOT ENCRYPTED. ESP-NOW encryption is per-unicast-peer and
+    // does not work against a broadcast destination, so an encrypted broadcast
+    // peer would simply stop the hellos going out.
+    //
+    // The cost is that peer discovery stays unauthenticated: anyone can answer a
+    // hello and take the peer slot. What that buys an attacker changes, though -
+    // they are added as an ENCRYPTED peer, so everything we send to them is
+    // ciphertext they hold no key for.
     void addBroadcastPeer()
     {
         if (esp_now_is_peer_exist(broadcastMac))
@@ -283,6 +324,15 @@ namespace
         pollerSetEndpoint(IPAddress(tele->octoIp[0], tele->octoIp[1],
                                     tele->octoIp[2], tele->octoIp[3]),
                           tele->octoPort);
+        // The API key, same call the HTTP fallback makes (see
+        // serviceApiFallback) so both transports hand the key over through one
+        // path and cannot drift in how they interpret a frame.
+        //
+        // Applied before the peer/sender checks for the same reason as the
+        // address above: it only publishes a value, it cannot block or fail,
+        // and refusing it because the sender was not the paired peer would mean
+        // a legitimate configuration never arrives while in bootstrap mode.
+        pollerSetApiKey(tele->octoKey, tele->octoKeyFlags);
         // Only enforced once paired: an all-zero peer MAC is receive-only
         // bootstrap mode, where any sender is by definition acceptable.
         if (peerSet && !macEquals(mac, activeMac))
@@ -417,6 +467,7 @@ namespace
                 pollerSetEndpoint(IPAddress(t.octoIp[0], t.octoIp[1], t.octoIp[2],
                                             t.octoIp[3]),
                                   t.octoPort);
+                pollerSetApiKey(t.octoKey, t.octoKeyFlags);
                 if (xSemaphoreTake(snapshotMutex, pdMS_TO_TICKS(5)) == pdTRUE)
                 {
                     shared.louvrePct = t.louvrePct;
@@ -708,6 +759,23 @@ void enclosureLinkStart(const uint8_t *peerMacIn)
         printMacLn(peerMac);
     else
         Serial.println("<none>");
+
+    // Encryption state, on its own line and NOT behind SERIAL_DEBUG.
+    //
+    // This is the first thing to check when the link does not come up, because a
+    // mismatched LTK on the two boards produces a link that is dead for exactly
+    // the same reason as a channel split, a wrong peer MAC, or an absent peer -
+    // and nothing anywhere reports an error. Both boards print this; if the two
+    // lines disagree about anything, the key is the problem.
+    //
+    // The key itself is never printed. Only whether one is configured.
+    Serial.print(F("[ENC-LINK] espnow encryption ON (16-byte LTK, peer.encrypt=true)"));
+#if ENC_WIFI_CHANNEL != 0
+    Serial.print(" | channel pin ");
+#else
+    Serial.print(" | no channel pin");
+#endif
+    Serial.println();
 
     snapshotMutex = xSemaphoreCreateMutex();
     commandQueue = xQueueCreate(8, sizeof(EnclosureCommand));

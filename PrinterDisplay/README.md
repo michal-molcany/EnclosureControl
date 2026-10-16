@@ -74,6 +74,46 @@ String secrets::getOTAPassword()
 
 `include/secrets.h` is git-ignored. Only `include/secrets.h.example` is tracked.
 
+**The OctoPrint API key is a fallback, not the only source.** The C3 owns this
+setting and pushes it down the link, so the key actually in force is, in order of
+precedence: whatever the C3 most recently sent → the value stored in this board's
+NVS `octokey` namespace → `getOctoprintApiKey()` above. Setting it once in the
+C3's web UI therefore replaces the copy compiled into this firmware, and
+`[POLL] api key from C3 (32 chars)` appears on serial when it arrives.
+
+So a placeholder in `secrets.h` is fine as long as the C3 is reachable and has
+been configured. The compiled-in value only takes over when the C3 says it has no
+override, or when the two boards have never spoken.
+
+> The key is encrypted in flight — see the ESP-NOW link key below — but it is
+> stored in plaintext in this board's NVS. A flash dump of this board still
+> yields a working printer credential.
+
+### The ESP-NOW link key (LTK)
+
+A third git-ignored header at the repo root, **shared with the C3 and required by
+both builds**:
+
+```text
+copy include\espnow_key.example.h include\espnow_key.h
+```
+
+Both boards set `peer.encrypt = true` with the 16-byte key from it, so telemetry
+— including the OctoPrint API key — is encrypted on the radio rather than
+broadcast in the clear. ESP-NOW frames never pass through the access point, so
+WPA2 never protected them.
+
+**If the two boards hold different keys the link is simply dead**, with no error
+anywhere: each encrypts to the key it has and the other cannot read it. That is
+indistinguishable from a channel split or a missing peer, which is why both boards
+print `espnow encryption ON` at boot outside `SERIAL_DEBUG`. Check that first when
+the link will not come up. Changing the key requires reflashing both boards.
+
+Generate the value once with
+`python -c "import secrets;print(secrets.token_bytes(16).hex())"` — see
+[`../include/espnow_key.example.h`](../include/espnow_key.example.h) for the full
+caveats, including what link encryption does *not* protect against.
+
 A **fresh clone needs two copies**, not one:
 
 ```text
@@ -120,9 +160,11 @@ Two consequences:
 - **The C3 owns it.** There is no way to set the address from this board, and a
   value cleared on the C3 clears it here too — the all-zero `octoIp` in telemetry
   means "I have no override", not "address zero".
-- **Both boards must be flashed together.** Telemetry grew from 10 to 16 bytes;
-  a mismatched pair drops every frame. See
-  [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 2*.
+- **Both boards must be flashed together.** Telemetry grew from 10 to 16 bytes in
+  revision 2, and from 16 to 82 in revision 3; a mismatched pair drops every frame.
+  It is not fatal — this board falls back to the HTTP API and keeps working, it
+  just does not receive the endpoint or key hand-off until both are flashed. See
+  [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 3*.
 
 > WARNING: Rotate your WiFi password and OctoPrint API key if they were ever committed.
 

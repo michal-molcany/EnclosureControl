@@ -15,6 +15,11 @@
 //   POST /api/pid/save     -> persists the running gains to NVS
 //   POST /api/pid/defaults -> restores the compiled-in defaults and persists them
 //   POST /api/manual       <- {"mode":0|1,"louvre":0-100,"fan":0-100}
+//   POST /api/octoprint     <- {"ip":"...","port":80[,"key":"..."]}
+//                            Address and API key together, PROBED together: they
+//                            cannot be set independently. "key" is optional and
+//                            means "keep the key in force".
+//   POST /api/octoprint/defaults -> drops BOTH stored overrides at once
 //
 // Every response - including the ones to a write - is the same document
 // /api/status returns. The page re-renders from it, so a write can never leave
@@ -65,6 +70,12 @@ namespace
     EnclosureUi::EndpointSetter applyEndpoint = nullptr;
     EnclosureUi::EndpointReset clearEndpointFn = nullptr;
 
+    // The stored key is a credential, so it is never echoed: /api/status reports
+    // only whether one is in force and where it came from. This bound exists so
+    // that decision cannot be undone by accident later - there is no code path
+    // in this file that puts a key into a response.
+    static_assert(ENC_OCTO_KEY_MAX <= 128, "key buffer bound");
+
     // Same rule as lib/EnclosureApi and lib/HttpOta: an empty token disables the
     // check entirely.
     //
@@ -72,7 +83,7 @@ namespace
     // WebServer::authenticate() base64-encodes "<username>:<password>" and
     // compares that WHOLE header against the one the client sent, so the
     // username is part of the credential and must match exactly. Log in as
-    // user "cyd", password = the token.
+    // user "Enclosure", password = the token.
     //
     // requestAuthentication() sends the 401 with a WWW-Authenticate header, and
     // that header is what makes the browser prompt.
@@ -80,7 +91,7 @@ namespace
     {
         if (!token || token[0] == '\0')
             return true;
-        if (server->authenticate("cyd", token))
+        if (server->authenticate("Enclosure", token))
             return true;
         server->requestAuthentication();
         return false;
@@ -144,6 +155,8 @@ namespace
         doc["octoPort"] = s.octoPort;
         doc["octoOverridden"] = s.octoOverridden;
         doc["octoSentToCyd"] = s.octoSentToCyd;
+        doc["octoKeySet"] = s.octoKeySet;
+        doc["octoKeyOverridden"] = s.octoKeyOverridden;
 
         writePidBlock(doc, providePid ? providePid() : pidDefaultGains());
 
@@ -285,11 +298,21 @@ namespace
         sendStatus();
     }
 
-    // POST /api/octoprint - {"ip":"192.168.1.88","port":80}
+    // POST /api/octoprint - {"ip":"192.168.1.88","port":80,"key":"..."}
     //
-    // The address is validated HERE before the programme sees it, so an
-    // obviously impossible value is refused without spending a probe on it, and
-    // so the caller gets a precise reason rather than a generic failure.
+    // Address and optional API key in ONE request, and that is load-bearing
+    // rather than convenient. They have to be applied together because moving to
+    // a different server means a new address AND a new key: probing the new
+    // address with the old key gets 401, and probing the old address with the
+    // new key fails too, so either one set on its own can never be applied first
+    // and the pair could only be fixed by a serial flash.
+    //
+    // An absent or empty "key" means "keep the key already in force", which
+    // leaves a plain address change as a one-step operation.
+    //
+    // Both values are validated HERE before the programme sees them, so an
+    // obviously impossible one is refused without spending a probe on it, and so
+    // the caller gets a precise reason rather than a generic failure.
     void receiveEndpoint()
     {
         if (!applyEndpoint)
@@ -337,12 +360,47 @@ namespace
             return;
         }
 
+        // The API key, if one was supplied. An absent or empty value is not an error -
+        // it means "keep the key in force" - but a supplied one is validated hard.
+        //
+        // The CR/LF rejection is not pedantry. The key is interpolated raw into
+        // an "X-Api-Key:" header line by the probe; an embedded CR or LF ends
+        // that line early and turns the rest of the value into headers of its
+        // own, sent to the user's OctoPrint server. That is request splitting,
+        // reachable by anyone who can reach this page.
+        JsonVariantConst keyValue = doc["key"];
+        const String key = keyValue.is<const char *>() ? String(keyValue.as<const char *>()) : String();
+        if (key.length() > ENC_OCTO_KEY_MAX - 1)
+        {
+            server->send(400, "text/plain",
+                         "key is too long (" + String(key.length()) + " chars, max " +
+                             String(ENC_OCTO_KEY_MAX - 1) + ")");
+            return;
+        }
+        for (size_t i = 0; i < key.length(); ++i)
+        {
+            const unsigned char c = (unsigned char)key[i];
+            // Printable ASCII only: rejects CR, LF, NUL, DEL and every other
+            // control byte, so the value cannot break out of the header line it
+            // is interpolated into. Spaces are excluded too - no legitimate
+            // OctoPrint key contains one.
+            if (c < 0x20 || c > 0x7E || c == ' ')
+            {
+                server->send(400, "text/plain",
+                             "key must be printable ASCII with no spaces or control "
+                             "characters");
+                return;
+            }
+        }
+
         String reason;
-        if (!applyEndpoint(ip, (uint16_t)port, reason))
+        // Null when the field was left blank, so the programme can tell "no new
+        // key" from "the empty key" and probe with the one already in force.
+        if (!applyEndpoint(ip, (uint16_t)port, key.length() ? key.c_str() : nullptr, reason))
         {
             // 502: the board is fine, the thing it was asked to talk to is not.
             server->send(502, "text/plain",
-                         reason.length() ? reason : "the address did not answer");
+                         reason.length() ? reason : "that address and key did not answer");
             return;
         }
         sendStatus();

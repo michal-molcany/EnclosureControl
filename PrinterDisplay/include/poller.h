@@ -62,6 +62,33 @@ void pollerSetEndpoint(IPAddress host, uint16_t port);
 // compiled-in default. Shown in the serial log and available to the UI.
 bool pollerEndpointOverridden();
 
+// Adopts an OctoPrint API key sent by the C3 (EnclosureTelemetry::octoKey), and
+// stores it in NVS so it survives a power cycle.
+//
+// `flags` is the ENC_KEYFLAG_* state from the same frame. This is the ONLY entry
+// point, for both transports: the ESP-NOW receiver and the HTTP fallback both
+// call it, so the two cannot drift apart in how they interpret a key.
+//
+//   ENC_KEYFLAG_PRESENT -> use `key`
+//   ENC_KEYFLAG_CLEAR   -> drop our stored key, return to the compiled-in one
+//   0 (or anything else) -> do nothing; keep what we have
+//
+// 0 is not "clear". The C3 deliberately omits the key from most frames, so
+// treating an absent key as a reset would flip this board back to its own
+// compiled-in key once per second.
+//
+// Everything arriving here is UNTRUSTED - see plausibleEndpoint() - so the key is
+// validated before it is stored or handed to the client. A corrupt or hostile
+// value must not reach the X-Api-Key header, and must not survive a reboot.
+//
+// Safe to call from any task, non-blocking: it only publishes, because the
+// OctoPrinter instance belongs to the poll task.
+void pollerSetApiKey(const char *key, uint8_t flags);
+
+// True when this board is running on a key the C3 sent rather than its own
+// compiled-in default.
+bool pollerApiKeyOverridden();
+
 // One command for the poll task to execute off the UI task.
 //
 // Carries a target and a payload rather than a flat code enum, because a

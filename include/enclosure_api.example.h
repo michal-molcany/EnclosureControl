@@ -21,9 +21,15 @@
 // scheme lib/HttpOta already uses); the CYD sends it. Leave empty to disable
 // auth, which is only reasonable on a trusted LAN.
 //
-// This is a shared-secret over plain HTTP, so it stops a casual LAN device from
-// driving the fan and louvre - it is not a defence against someone who can
-// already sniff the Wi-Fi link.
-#define ENC_API_TOKEN "change-me"
+// Generate a long random value rather than typing one. This is a bearer token
+// sent in the clear on every request, and under WPA2-PSK every client on your
+// access point can decrypt other clients' traffic, so anything on the LAN can
+// capture it by passive sniffing - the length is what makes that impractical:
+//
+//   python -c "import secrets;print(secrets.token_hex(32))"
+//
+// It guards the enclosure API (8081) AND the browser page (8082), so one leaked
+// value covers both. Changing it requires reflashing both boards.
+#define ENC_API_TOKEN "replace-with-64-random-hex-characters"
 
 #endif // ENCLOSURE_API_H

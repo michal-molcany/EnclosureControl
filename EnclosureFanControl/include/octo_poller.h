@@ -54,4 +54,15 @@ void octoPollerRequestCancel();
 // would just poll each of them in turn.
 void octoPollerSetEndpoint(IPAddress host, uint16_t port);
 
+// Repoints the poll task at a different OctoPrint API key.
+//
+// Same contract and same reason as octoPollerSetEndpoint(): the OctoPrinter
+// instance belongs to the poll task and is mid-request most of the time, so the
+// value is only recorded here and applied by that task at the top of its own
+// loop. Safe to call from any task, never blocks.
+//
+// `key` is copied into a fixed buffer, so the caller may pass a pointer into a
+// String that changes immediately afterwards.
+void octoPollerSetApiKey(const char *key);
+
 #endif // OCTO_POLLER_H

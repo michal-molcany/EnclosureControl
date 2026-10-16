@@ -85,6 +85,17 @@ namespace
         doc["octoIp"] = String(t.octoIp[0]) + "." + String(t.octoIp[1]) + "." +
                         String(t.octoIp[2]) + "." + String(t.octoIp[3]);
         doc["octoPort"] = t.octoPort;
+        // The key and its flags, same names as the ESP-NOW fields' meaning. Only
+        // emitted when there is something to say: an unconditional key field
+        // would put the credential in every response body, including any that a
+        // browser or a log might end up holding, for no benefit - flags == 0
+        // already means "keep what you have".
+        if (t.octoKeyFlags & (ENC_KEYFLAG_PRESENT | ENC_KEYFLAG_CLEAR))
+        {
+            doc["octoKeyFlags"] = t.octoKeyFlags;
+            if (t.octoKeyFlags & ENC_KEYFLAG_PRESENT)
+                doc["octoKey"] = String(t.octoKey);
+        }
         String body;
         serializeJson(doc, body);
         server->send(200, "application/json", body);

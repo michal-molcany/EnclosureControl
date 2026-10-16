@@ -11,3 +11,7 @@ include/octoprint_endpoint.h
 # Enclosure API port + shared token, shared by both firmwares. Copy
 # include/enclosure_api.example.h to include/enclosure_api.h.
 include/enclosure_api.h
+
+# ESP-NOW link key (LTK), shared by both firmwares. Copy
+# include/espnow_key.example.h to include/espnow_key.h.
+include/espnow_key.h

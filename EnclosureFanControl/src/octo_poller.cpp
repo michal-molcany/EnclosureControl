@@ -2,8 +2,10 @@
 
 #include <WiFi.h>
 #include <OctoPrinter.h>
+#include <string.h>
 
 #include "const.h"
+#include "enclosure_proto.h" // ENC_OCTO_KEY_MAX
 #include "secrets.h"
 
 namespace
@@ -23,6 +25,19 @@ namespace
     uint16_t pendingPort = OCTOPRINT_PORT;
     volatile bool pending = false;
 
+    // Pending API key, same publish/consume pattern as the address above.
+    //
+    // A fixed char[] and NOT a String, deliberately. The `pending` flag only
+    // protects against a half-written read if the value is trivially copyable -
+    // a String assignment reallocates and would leave the task reading a
+    // freed or half-updated buffer with nothing to stop it. Same reason the
+    // address is a POD.
+    char pendingKey[ENC_OCTO_KEY_MAX] = {0};
+    volatile bool pendingKeyFlag = false;
+    // Guards the pendingKey copy between this file's writer (called from loop()
+    // and the web UI) and applyPendingApiKey() on the poll task.
+    portMUX_TYPE keyMux = portMUX_INITIALIZER_UNLOCKED;
+
     void applyPendingEndpoint()
     {
         if (!pending)
@@ -32,6 +47,31 @@ namespace
         // behaviour we want - no update is ever lost, and none is applied twice.
         pending = false;
         api.setEndpoint(pendingHost, pendingPort);
+    }
+
+    // Returns true when a new key was applied.
+    bool applyPendingApiKey()
+    {
+        if (!pendingKeyFlag)
+            return false;
+        // Copied out under a critical section, which the 4-byte endpoint handoff
+        // does not need and this one does.
+        //
+        // A flag-last/cleared-first protocol only prevents a half-written read
+        // in the window the flag covers. For a 65-byte value that window is wide
+        // enough to tear, and a torn key is the dangerous case: both the old and
+        // new key are printable ASCII of a similar length, so a half-updated
+        // buffer still passes validation and could be stored - leaving the board
+        // permanently unable to authenticate. A brief interrupt mask around a
+        // 65-byte copy costs nothing and makes the handoff indivisible.
+        char local[ENC_OCTO_KEY_MAX];
+        portENTER_CRITICAL(&keyMux);
+        pendingKeyFlag = false;
+        strncpy(local, pendingKey, ENC_OCTO_KEY_MAX - 1);
+        local[ENC_OCTO_KEY_MAX - 1] = '\0';
+        portEXIT_CRITICAL(&keyMux);
+        api.setApiKey(local);
+        return true;
     }
 
     void publishSnapshot()
@@ -59,12 +99,26 @@ namespace
 #if SERIAL_DEBUG
         Serial.println("[octoPoll] task started, begin()...");
 #endif
+        // The stored key may already be waiting: octoEndpointBegin() runs before
+        // octoPollerStart(), and octoEndpointAttachPoller() publishes it either
+        // just before or just after this task is created. Applying it here means
+        // begin()'s /api/version is authenticated with the right key in the
+        // common case rather than with the compiled-in fallback.
+        applyPendingApiKey();
         api.begin();
 #if SERIAL_DEBUG
         Serial.println("[octoPoll] begin() done");
 #endif
         for (;;)
         {
+            // Key first: it must be in force before the request below goes out,
+            // or this pass would 401 and the snapshot would publish garbage.
+            //
+            // begin() is re-run after a key change because setApiKey() cleared
+            // _doOnce: the cached server/API version strings were fetched with
+            // the previous key and must not be reported as the new one's.
+            if (applyPendingApiKey())
+                api.begin();
             applyPendingEndpoint();
             if (WiFi.status() == WL_CONNECTED)
             {
@@ -119,4 +173,19 @@ void octoPollerSetEndpoint(IPAddress host, uint16_t port)
     pendingHost = host;
     pendingPort = port;
     pending = true;
+}
+
+void octoPollerSetApiKey(const char *key)
+{
+    const char *safe = key ? key : "";
+    // Truncating copy. An over-long key cannot authenticate as anything, and
+    // strncpy would not terminate it - leaving the poll task to send a header
+    // value that runs past the end of its own buffer.
+    portENTER_CRITICAL(&keyMux);
+    strncpy(pendingKey, safe, ENC_OCTO_KEY_MAX - 1);
+    pendingKey[ENC_OCTO_KEY_MAX - 1] = '\0';
+    // Flag last, cleared first by the poll task: the same ordering the address
+    // uses, and for the same reason.
+    pendingKeyFlag = true;
+    portEXIT_CRITICAL(&keyMux);
 }

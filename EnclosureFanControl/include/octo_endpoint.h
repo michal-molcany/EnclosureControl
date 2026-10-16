@@ -51,11 +51,16 @@ bool octoEndpointOverridden();
 // cannot leave the board polling nothing - which reads as invalid data and
 // trips the cooling fail-safe.
 //
+// `apiKey` is the credential to PROBE WITH, not necessarily the one in force:
+// that is what lets a candidate key be tested before it is stored. Callers must
+// have validated it (no CR/LF/control bytes) - it goes into a raw header line
+// here. Null is treated as empty.
+//
 // Returns true when the server answered 2xx. On failure `reason` gets a short
 // human-readable cause ("connect failed", "timeout", "HTTP 401"). Blocking, and
 // only ever called from an explicit user action.
-bool octoEndpointProbe(IPAddress ip, uint16_t port, unsigned long timeoutMs,
-                       String &reason);
+bool octoEndpointProbe(IPAddress ip, uint16_t port, const char *apiKey,
+                       unsigned long timeoutMs, String &reason);
 
 // Stores an override and repoints the poll task. Assumes the caller has already
 // probed successfully. `ip` is written as given; validation is the caller's.
@@ -63,5 +68,42 @@ void octoEndpointSet(IPAddress ip, uint16_t port);
 
 // Drops the override, returning to the compiled-in OCTOPRINT_IP/PORT.
 void octoEndpointClear();
+
+// ---------------------------------------------------------------------------
+// OctoPrint API key, same ownership model as the address above.
+// ---------------------------------------------------------------------------
+
+// The key in force right now: the stored override if there is one, else the
+// compiled-in secrets::getOctoprintApiKey(). Every reader asks here, so there is
+// exactly one answer to "what credentials is this board using".
+String octoEndpointApiKey();
+
+// True when a stored override is shadowing the compiled-in secrets.h value.
+// Shown on the page so "the page says one thing and my firmware says another"
+// is answerable.
+bool octoEndpointApiKeyOverridden();
+
+// Stores an override and hands it to the poll task. The caller must already
+// have probed successfully - a wrong key reads as invalid OctoPrint data, which
+// trips the cooling fail-safe, exactly as a wrong address does.
+void octoEndpointSetApiKey(const char *key);
+
+// Drops the stored key, returning to the compiled-in secrets.h value. Also
+// pushes it to the poll task, so "reset" really does restore the built-in one
+// rather than leaving the last entered key in force.
+void octoEndpointClearApiKey();
+
+// How long after a change the key is repeated in telemetry frames before the
+// sparse cadence takes over, and how often it is refreshed while nothing has
+// changed. See octo_endpoint.cpp for why the key is not sent in every frame.
+//
+// Returns the ENC_KEYFLAG_* value the next telemetry frame should carry, and
+// records that it was used - so the caller is expected to call this ONCE per
+// frame it actually sends, not speculatively.
+//
+//   0                  -> carry nothing; the receiver keeps what it has
+//   ENC_KEYFLAG_PRESENT-> carry octoEndpointApiKey()
+//   ENC_KEYFLAG_CLEAR  -> tell the receiver to drop its override
+uint8_t octoEndpointApiKeyClaimFrame();
 
 #endif // OCTO_ENDPOINT_H

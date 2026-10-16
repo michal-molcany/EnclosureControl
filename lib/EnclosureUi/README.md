@@ -62,8 +62,8 @@ with `send_P()` (streams from flash) rather than `send()` (builds a `String`).
 | `/api/pid/save` | POST | persist the running gains to NVS |
 | `/api/pid/defaults` | POST | restore compiled-in defaults and persist |
 | `/api/manual` | POST | `{mode, louvre, fan}` |
-| `/api/octoprint` | POST | `{ip, port}` — **probes first**, stores only on success |
-| `/api/octoprint/defaults` | POST | drop the stored address, return to the compiled default |
+| `/api/octoprint` | POST | `{ip, port[, key]}` — **probes first**, stores only on success |
+| `/api/octoprint/defaults` | POST | drop **both** stored overrides, return to the compiled-in ones |
 
 Every response — including the ones to a write — is the same document
 `/api/status` returns, so the page can never end up showing a value the board
@@ -93,24 +93,61 @@ and board facts: RSSI, free heap, uptime, IP, firmware version.
 
 ## The OctoPrint card
 
-Setting the OctoPrint address is the one action in this page that can stop the
-enclosure being cooled, so it is gated: **Check and save** makes the board GET
-`/api/version` on the candidate address first, and stores nothing unless that
-answers. A mistyped address is refused with the reason rather than becoming a
-fail-safe fan-off twenty minutes into a print.
+Address **and** API key are one setting, entered together and submitted as one
+request, and that is load-bearing rather than tidy. A different OctoPrint server
+means a different address *and* a different key, but a probe can only ever use
+one stored value plus one candidate:
+
+- save the new address alone → probed with the **old** key → `401` → refused
+- save the new key alone → probed against the **old** address → refused
+
+Neither half can ever be applied first, so separating them does not merely make
+the form awkward — it makes a moved server unreachable without a serial flash.
+`POST /api/octoprint` takes `{ip, port, key}` and probes the candidate pair.
+
+An **omitted or empty `key` means "keep the key already in force"**, which leaves
+a plain address change as a one-step operation. The page shows which key is in
+force (a badge), so "which key will this submit use?" is always answerable even
+though the key itself is not displayed.
+
+Setting the pair is gated for the same reason the address always was — this is
+the one action in the page that can stop the enclosure being cooled. **Check and
+save** makes the board GET `/api/version` with the candidate credentials first and
+stores nothing unless that answers. A wrong address stops the board reading the
+printer; a wrong *key* does the same **and looks like a printer fault**, because
+OctoPrint answers `401` to every request — so an unverified key would trade a
+clear "the key was refused" message for a silent loss of cooling twenty minutes
+into a print.
 
 The probe lives in the programme, not here, because only the programme holds the
-OctoPrint API key needed to identify itself. It blocks the request for up to the
+credentials needed to identify itself. It blocks the request for up to the
 programme's timeout — it is never on the 2 s poll path.
 
 This library only does the parts that are purely mechanical: rejecting a malformed
 or impossible address before spending a probe on it (`0.0.0.0` is refused as well
 as rejected as nonsense — it is also the "no override" sentinel on the ESP-NOW
 link, so accepting it would turn "clear the override" into an override to
-nowhere), and reporting the outcome.
+nowhere), validating the key (length-bounded, printable ASCII), and reporting the
+outcome. The CR/LF rejection is not pedantry: the key is interpolated raw into an
+`X-Api-Key:` header line, so an embedded newline would end that line early and
+turn the rest of the value into headers sent to the user's OctoPrint server.
 
-The address is owned by whichever board runs this page and is pushed to the other
-board over ESP-NOW; see `ESPNOW_PROTOCOL.md`.
+**The key is never echoed back.** `/api/status` reports only `octoKeySet` and
+`octoKeyOverridden` — booleans, so the page can say *where the current key came
+from* — and the field is left blank, including after a successful save. The
+credential therefore never enters browser memory, the DOM, devtools, or a
+screenshot. This matches the rule the page already follows for `ENC_API_TOKEN`,
+one step stricter: the token never reaches the page at all, and neither does this.
+
+The address and key are owned by whichever board runs this page and are pushed to
+the other board over ESP-NOW; see `ESPNOW_PROTOCOL.md`. The key travels **not in
+every telemetry frame** — it rides along just after a change and then on a slow
+refresh, so the credential spends as little time on the unencrypted radio as
+possible. `ESPNOW_PROTOCOL.md` has the cadence and the `ENC_KEYFLAG_*` states
+that make a sparse cadence safe.
+
+Because they are one setting, `POST /api/octoprint/defaults` clears **both** — one
+button, rather than two near-identical ones in one card.
 
 ## Manual control, and the CYD
 

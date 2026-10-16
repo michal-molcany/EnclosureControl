@@ -17,7 +17,7 @@ Actual temperatures are **not** transferred over ESP-NOW. Both boards poll OctoP
 |---|---|
 | Transport | ESP-NOW peer-to-peer traffic on the Wi-Fi radio |
 | Direction | Unicast to the configured peer MAC |
-| Encryption | Disabled (`peer.encrypt = false`) |
+| Encryption | **Enabled** (`peer.encrypt = true`, 16-byte LTK from `include/espnow_key.h`) — unicast only; the discovery broadcast peer is deliberately unencrypted |
 | Application acknowledgment | None |
 | Peer identity validation | Both receive callbacks check the sender MAC against the active peer |
 | Peer address | Discovered by broadcast hello; `ENC_PEER_MAC` is the initial value and fallback |
@@ -155,6 +155,14 @@ unknown, exactly as the struct does. Field names and meanings mirror
 transport, independent of the ESP-NOW one, since the two packet streams are not
 comparable.
 
+`GET /api/enclosure` also carries `octoIp`, `octoPort`, `octoKeyFlags`, and —
+only when the flags are set — `octoKey`, with exactly the meanings given in
+[API key propagation](#octoprint-api-key-propagation). The CYD hands both the
+key and the address to the same `pollerSetApiKey()` / `pollerSetEndpoint()` entry
+points on both transports, so there is one implementation of "adopt what the C3
+says" rather than two that can drift apart — and a drift would only ever show up
+while one transport was down, i.e. never in testing.
+
 The port and token are shared between both firmwares through the git-ignored
 `include/enclosure_api.h` (copy from `enclosure_api.example.h`), so the two
 cannot drift apart the way a duplicated `#define` can.
@@ -177,9 +185,11 @@ ESP-NOW stays down.
 
 The token is a shared secret over plain HTTP. It stops a casual device on the
 LAN from driving the fan and louvre — it is not a defence against anything that
-can already observe the Wi-Fi link. This matches the existing posture of the OTA
-and ESP-NOW paths (see [Security limitations](#security-limitations)); it is a
-consistency improvement, not a change of threat model.
+can already observe the Wi-Fi link. Use a long random value; the shipped default
+is a placeholder. The same token also guards the browser page on 8082, so one
+leaked value covers both transports. This matches the existing posture of the OTA
+path (see [Security limitations](#security-limitations)); it is a consistency
+improvement, not a change of threat model.
 
 ## Packet format details
 
@@ -249,7 +259,7 @@ The setpoint remains in the packet but is ignored while the mode is MANUAL.
 ## C3 → CYD: `EnclosureTelemetry`
 
 **Direction:** EnclosureFanControl C3 to PrinterDisplay CYD  
-**Size:** 16 bytes (was 10; see *Protocol revision 2* below)  
+**Size:** 82 bytes (was 16; see *Protocol revision 3* below)  
 **Sent:** approximately every `ENC_TELEMETRY_INTERVAL_MS` (1 second)
 
 ### Byte layout
@@ -266,6 +276,8 @@ The setpoint remains in the packet but is ignored while the mode is MANUAL.
 | 9 | 1 | `mode` | Current CYD-selected control mode received by C3 |
 | 10 | 4 | `octoIp` | OctoPrint address the C3 is polling, 4 octets |
 | 14 | 2 | `octoPort` | OctoPrint port the C3 is polling |
+| 16 | 65 | `octoKey` | OctoPrint API key, NUL-terminated; meaningful only when `octoKeyFlags` says so |
+| 81 | 1 | `octoKeyFlags` | `ENC_KEYFLAG_*` state of `octoKey` |
 
 ### OctoPrint address propagation
 
@@ -292,16 +304,92 @@ Design points worth knowing before changing this:
   on the web UI would not reach the CYD during an ESP-NOW outage — which is
   precisely when the CYD most needs to know.
 
+### OctoPrint API key propagation
+
+`octoKey` carries the OctoPrint **credential**, so it is handled differently from
+the address in three ways: it is **not** in every frame, it needs an explicit
+flag byte, and it is a security decision rather than a convenience.
+
+#### `octoKeyFlags` — three states, not two
+
+| Value | Meaning | Receiver action |
+|---|---|---|
+| `0` | Nothing to say | Keep whatever it already has |
+| `ENC_KEYFLAG_PRESENT` (1) | `octoKey` holds a real key | Use it |
+| `ENC_KEYFLAG_CLEAR` (2) | The C3 has no override | Drop yours, return to your compiled-in default |
+
+The obvious design — "empty string means no override" — **cannot work here**, and
+the reason is worth stating because it is not obvious. The key is deliberately
+*not* sent in every frame, so the frames carrying no key are the overwhelming
+majority. Under an empty-string sentinel, every one of those frames would read as
+"drop your override", and the CYD would flip back to its own compiled-in key once
+per second.
+
+`0` is the third state that makes a sparse cadence possible. It is also what keeps
+a mixed-version pair working: an older C3 sends no `octoKeyFlags` at all, which
+reads as `0`, i.e. "leave the CYD's key alone" rather than "clear it".
+
+#### Cadence
+
+- Repeatedly for `OCTO_KEY_ANNOUNCE_MS` (5 s) after any change, so a CYD that is
+  mid-reboot or that missed the first frame still converges quickly.
+- Then once every `OCTO_KEY_REFRESH_MS` (30 s), so a CYD powered off across the
+  change still picks it up without being told again.
+- `0` otherwise.
+
+The 5 s window is re-armed on every frame that claims it, so it repeats rather
+than firing once, and the next refresh is rescheduled on each claimed frame — a
+frame that is sent but lost is followed by another.
+
+#### Security consequences — read before changing this
+
+This puts a live printer credential on the radio every 30 s and into the
+CYD's flash. Link encryption ([above](#link-encryption)) protects it in flight,
+but it remains stored in plaintext in the CYD's NVS, and it still crosses the
+HTTP fallback as bearer-authenticated cleartext. The 30 s cadence limits how
+often it is transmitted; it does not change what a flash dump yields.
+
+This is a deliberate trade: one place to configure the printer, instead of a key
+frozen into two firmwares that can disagree. The alternative — carrying the key
+only over the token-protected HTTP link — reintroduces exactly the two-sources-of-
+truth problem the shared header this field replaces was created to prevent.
+
+If this exposure is unacceptable, removing `octoKey` from telemetry and letting
+the CYD keep its own `secrets.h` copy is the cleanest retreat; it costs the
+single-source-of-truth property and nothing else.
+
+#### Receiver validation
+
+The CYD treats the key as untrusted, for the same reason it treats the address as
+untrusted: it accepts frames from any sender in receive-only bootstrap mode. It
+rejects (rather than sanitises) any value that is empty, over-length, or contains
+a non-printable-ASCII byte, **before** the value is stored or handed to the
+client. A CR or LF would end the `X-Api-Key:` header line early and turn the rest
+of the value into headers sent to the OctoPrint server. A key is machine-
+generated ASCII, so nothing legitimate is refused by this.
+
 ### Protocol revision 2
 
 `ENC_PROTO_VERSION` is now 2. Revision 2 grew `EnclosureTelemetry` from 10 to 16
 bytes by adding `octoIp` + `octoPort`.
+
+### Protocol revision 3
+
+Revision 3 grew `EnclosureTelemetry` from 16 to **82** bytes by adding `octoKey`
+(65 bytes) + `octoKeyFlags` (1 byte) — the API key propagation described above.
+Still comfortably inside the 127-byte ESP-NOW payload limit.
 
 Both boards validate the packet length against their own `sizeof()`, so a C3 and
 a CYD on mismatched builds **drop every frame** — the link goes quiet until both
 are flashed, with no error beyond the drop counters. Reflash both when updating.
 This is the only reason a change like this is safe: it fails loudly (a dead link)
 rather than silently (a field read from the wrong offset).
+
+**A mismatched pair does not break the pair.** A dead ESP-NOW link is exactly the
+condition the HTTP fallback exists for, so a CYD on an older build keeps working
+against a newer C3 over port 8081 — it just loses the key hand-off until both are
+flashed. The drop counters (`last=len`) are how you tell that is what is
+happening.
 
 `chamberCx10` encodes actual temperature as:
 
@@ -464,19 +552,64 @@ Pairing checklist, in order:
    A BSSID is the hardware MAC of one specific AP radio. The SSID is only a name and is not unique, so a station that joined "ERNI Device Network" may be on any of several radios. A channel pin cannot bridge two different BSSIDs: forcing a station off the AP it is associated with just gets it deauthenticated, after which it re-associates to the same radio it was trying to escape. `ENC_CHANNEL_PIN_GIVEUP_MS` makes that failure mode safe rather than silent — the board logs `giving up channel pin` and follows the AP again.
 
    This pair has been on two BSSIDs on one SSID: `C6:6E:2A:01:38:C0` on channel 11 and `C6:6E:2A:01:35:D0` on channel 1. Same vendor OUI with a byte apart, which is what a mesh or extender looks like. The link recovered on its own once a reboot moved the CYD onto the C3's BSSID — so this failure can be transient, and a reboot is worth trying before changing any configuration.
-4. `hellosRx` climbing on both boards means they are on the same channel and the unicast path is about to work; look for `discovery: peer learned`.
-5. If `hellosRx` stays 0 on one board but not the other, that board is on a different channel or AP entirely.
+4. Check `espnow encryption ON` on both boards. If one board is missing that line, or the two were built with different `include/espnow_key.h` values, the link is dead with no other symptom — see [Link encryption](#link-encryption).
+5. `hellosRx` climbing on both boards means they are on the same channel and the unicast path is about to work; look for `discovery: peer learned`.
+6. If `hellosRx` stays 0 on one board but not the other, that board is on a different channel or AP entirely.
+
+## Link encryption
+
+ESP-NOW frames never leave the radio, so the access point's WPA2 does nothing for
+them. Both boards therefore set `peer.encrypt = true` with a shared 16-byte LTK
+(AES-128-CCM) from the git-ignored `include/espnow_key.h`:
+
+```cpp
+peer.encrypt = true;
+memcpy(peer.lmk, ltk, sizeof(ltk));   // ESP_NOW_KEY_LEN bytes
+```
+
+Both boards print `espnow encryption ON` at boot, **outside** `SERIAL_DEBUG`, so
+encryption state can be confirmed without a debug build.
+
+**If the two boards hold different keys, the link is simply dead.** Each encrypts
+to the key it has and the other cannot read it — no negotiation, no error. It is
+indistinguishable from a channel split, a wrong `ENC_PEER_MAC`, or an absent
+peer. Compare the two boot lines *before* working through the channel/AP
+checklist below; changing the key requires reflashing both boards.
+
+### The broadcast peer stays unencrypted
+
+ESP-NOW encryption is per-unicast-peer and does not work against a broadcast
+destination, so an encrypted broadcast peer would simply stop discovery hellos
+going out. The consequence is that **peer discovery remains unauthenticated**:
+anyone can answer a hello and take the peer slot.
+
+What that buys an attacker changes, though. A hijacked peer is added as an
+*encrypted* peer, so everything sent to it is ciphertext they hold no key for.
+Hijacking now costs you the link, not the OctoPrint credential.
 
 ## Security limitations
 
 The current implementation remains suitable only for a trusted local environment:
 
-- ESP-NOW encryption is disabled.
-- Receivers validate packet length, magic, and sender MAC, but the MAC check is spoofable by a device that can transmit on the current channel.
+- **Outbound frames are encrypted, inbound frames are not authenticated.**
+  Encryption is a send-side setting; there is no receiver-side option to reject
+  an unencrypted frame. Anyone who forges the other board's MAC — and it is
+  broadcast in every frame — can still inject plaintext `EnclosureCommand`s and
+  be believed. Closing this needs an application-level MAC over the command
+  struct, which is not implemented.
+- **A live OctoPrint API key travels in telemetry** (`octoKey`), every 30 s and for
+  5 s after any change. It is now encrypted on the radio, but it is still stored
+  in plaintext in the CYD's flash, and it is still sent over the HTTP fallback
+  as bearer-authenticated cleartext. A leak of either board's flash still yields a
+  printer credential. See [API key propagation](#octoprint-api-key-propagation).
+- **Peer adoption is unauthenticated** — see above; the impact is denial of the
+  link rather than disclosure.
+- Receivers validate packet length, magic, and sender MAC, but the MAC check is
+  spoofable by a device that can transmit on the current channel.
 - Commands can change automatic temperature, manual louvre position, and manual fan output.
-- The HTTP fallback requires a shared token (`ENC_API_TOKEN`) in HTTP Basic auth, sent in the clear. It prevents an unauthenticated device from driving the enclosure, but not one that can observe the network.
+- The HTTP fallback requires a shared token (`ENC_API_TOKEN`) in HTTP Basic auth, sent in the clear. It prevents an unauthenticated device from driving the enclosure, but not one that can observe the network. Use a long random value — the shipped default is a placeholder.
 
-Sender-MAC validation closes the "any device on the channel can inject commands" gap and is the minimum recommended by the protocol design. Cryptographic authentication would require a protocol change and shared-key handling on both boards.
+Sender-MAC validation closes the "any device on the channel can inject commands" gap and is the minimum recommended by the protocol design. Link encryption (above) closes the confidentiality gap. Neither closes inbound authenticity; that needs an application-level MAC over the command struct, which remains open.
 
 ## Compatibility requirements
 
@@ -484,7 +617,7 @@ The wire format depends on the shared struct definitions, native little-endian b
 
 Recommended safeguards for future protocol revisions:
 
-- ~~Add explicit static assertions for struct sizes and field offsets.~~ Done — `enclosure_proto.h` pins both structs to 10 bytes with every offset asserted, including the two padding bytes.
+- ~~Add explicit static assertions for struct sizes and field offsets.~~ Done — `enclosure_proto.h` pins `EnclosureTelemetry` to 82 bytes and `EnclosureCommand` to 10, with every offset asserted, including the padding byte.
 - ~~Add sender-MAC validation.~~ Done — both receive callbacks enforce it once paired.
 - Consider packed wire structs with fixed-width serialization.
 - Use an explicit protocol version field.

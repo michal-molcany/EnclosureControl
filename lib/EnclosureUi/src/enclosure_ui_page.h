@@ -62,6 +62,8 @@ h1{font-size:18px;margin:0}
 .row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 .row2{display:grid;grid-template-columns:2fr 1fr;gap:10px}
 input[type=number]{width:100%;background:#0e1116;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 8px;font:inherit}
+input[type=password]{width:100%;background:#0e1116;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 8px;font:inherit}
+input[type=text]{width:100%;background:#0e1116;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 8px;font:inherit}
 input[type=range]{width:100%;accent-color:var(--acc)}
 button{background:#232a35;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:8px 12px;font:inherit;cursor:pointer}
 button:hover{border-color:var(--acc)}
@@ -123,16 +125,22 @@ button:disabled{opacity:.5;cursor:default}
 </div>
 
 <div class="card">
-  <h2>OctoPrint address <span class="badge" id="octosrc">&nbsp;</span></h2>
+  <h2>OctoPrint server <span class="badge" id="octosrc">&nbsp;</span></h2>
   <div class="row2">
     <div><div class="k">IP address</div><input id="octoip" type="text" inputmode="decimal" placeholder="192.168.1.88"></div>
     <div><div class="k">Port</div><input id="octoport" type="number" min="1" max="65535" step="1"></div>
   </div>
+  <div style="margin-top:10px">
+    <div class="k">API key <span class="badge" id="keysrc">&nbsp;</span></div>
+    <input id="octokey" type="password" autocomplete="off" spellcheck="false"
+           placeholder="leave blank to keep the current key" style="margin-top:5px">
+  </div>
   <div class="btns">
     <button class="primary" id="octosave">Check and save</button>
-    <button id="octoreset">Reset to firmware default</button>
+    <button id="octoreset">Reset both to firmware defaults</button>
   </div>
   <div class="note" id="octonote"></div>
+  <div class="note" id="keynote"></div>
   <div class="msg" id="octomsg"></div>
 </div>
 
@@ -164,6 +172,8 @@ var pidFilled = false;
 var pidBusy = false;
 var octoFilled = false;
 var octoBusy = false;
+// Set by a successful save; consumed by the next render() to blank the field.
+var keyJustSaved = false;
 
 function say(el, text, cls) {
   el.textContent = text;
@@ -254,6 +264,25 @@ function render(s) {
     ? ' The CYD is being told the same address.'
     : ' The CYD is not linked, so it has not been told yet.';
 
+  // API key provenance only. The value itself is never in /api/status and is
+  // never written into the field, so there is nothing here to fill in - the
+  // badge is the whole point. Leaving the field blank on a submit means "keep
+  // the key currently in force", which is why showing WHICH key that is matters.
+  var ksrc = $('keysrc');
+  if (s.octoKeyOverridden) {
+    ksrc.textContent = 'saved on this board'; ksrc.className = 'badge ok';
+    $('keynote').textContent = 'The key in force was saved through this page. It is never sent back to the browser, which is why the field is blank - paste a new one only if you are changing it.';
+  } else if (s.octoKeySet) {
+    ksrc.textContent = 'firmware default'; ksrc.className = 'badge';
+    $('keynote').textContent = 'The key in force comes from include/secrets.h. It is never sent to the browser, so a blank field keeps that same key.';
+  } else {
+    ksrc.textContent = 'none set'; ksrc.className = 'badge bad';
+    $('keynote').textContent = 'No API key is configured anywhere, so this board cannot read the printer. Paste one above.';
+  }
+  // Clear the field after a successful save so the credential does not linger in
+  // the DOM (and out of any screenshot of the tab).
+  if (keyJustSaved) { $('octokey').value = ''; keyJustSaved = false; }
+
   // Sliders show what the BOARD holds, not what this page last sent. They are
   // left alone while the user has one focused or is dragging, so a poll cannot
   // yank a handle out from under a finger.
@@ -317,15 +346,30 @@ $('save').onclick = function () { withPid($('pidmsg'), 'saving', 'api/pid/save')
 $('defaults').onclick = function () { withPid($('pidmsg'), 'restoring', 'api/pid/defaults'); };
 
 // "Check and save" because that is literally what the button does: the board
-// GETs /api/version on the address first and refuses to store it if nothing
-// answers. The failure text is the board's own, naming what went wrong.
+// GETs /api/version on the address first, using the key pasted in the field if
+// there is one and the key already in force if the field is blank, and refuses
+// to store anything unless that answers. The failure text is the board's own,
+// naming what went wrong.
+//
+// ONE request for the whole pair, and that is not a simplification. A different
+// OctoPrint server means a different address AND a different key, while a probe
+// can only use one stored value plus one candidate - so setting either half on
+// its own would be tested against the other half and fail, and neither could
+// ever be applied first. Sending them together is the only way the pair is
+// settable without a serial flash.
 $('octosave').onclick = function () {
   if (octoBusy) { return; }
+  var key = $('octokey').value;
   octoBusy = true;
-  say($('octomsg'), 'checking ' + $('octoip').value + ' ...', '');
-  post('api/octoprint', { ip: $('octoip').value, port: parseInt($('octoport').value, 10) || 80 })
+  say($('octomsg'), 'checking ' + $('octoip').value + (key.length ? ' with the new key' : '') + ' ...', '');
+  post('api/octoprint', {
+    ip: $('octoip').value,
+    port: parseInt($('octoport').value, 10) || 80,
+    key: key
+  })
     .then(function (s) {
       octoFilled = false;
+      keyJustSaved = key.length > 0;
       say($('octomsg'), 'Answered - saved on this board and being sent to the CYD.', 'ok');
       if (s) { render(s); }
     })
@@ -338,11 +382,12 @@ $('octosave').onclick = function () {
 $('octoreset').onclick = function () {
   if (octoBusy) { return; }
   octoBusy = true;
-  say($('octomsg'), 'restoring the firmware default ...', '');
+  say($('octomsg'), 'restoring the firmware defaults ...', '');
   post('api/octoprint/defaults')
     .then(function (s) {
       octoFilled = false;
-      say($('octomsg'), 'Back to the address compiled into the firmware.', 'ok');
+      keyJustSaved = true;
+      say($('octomsg'), 'Back to the address and key compiled into the firmware.', 'ok');
       if (s) { render(s); }
     })
     .catch(function (err) {

@@ -175,6 +175,22 @@ void OctoPrinter::setEndpoint(IPAddress host, int port)
   Serial.println(port);
 }
 
+void OctoPrinter::setApiKey(const char *key)
+{
+  const char *safe = key ? key : "";
+  if (_apiKey == safe)
+    return;
+
+  // Drop the socket: a transfer started with the old key would keep streaming
+  // into the parser while the next request presents different credentials.
+  _client.stop();
+  _apiKey = safe;
+  _doOnce = false;
+  Serial.print(F("[OctoPrinter] api key changed ("));
+  Serial.print(_apiKey.length());
+  Serial.println(F(" chars)"));
+}
+
 void OctoPrinter::update()
 {
   _parseConnection(_requester("/api/connection"));
@@ -549,11 +565,36 @@ void OctoPrinter::_parsePrinter(String json)
   _bed.target = temperature_bed["target"] | 0.0;
   _bed.offset = temperature_bed["offset"] | 0.0;
 
+  // Chamber temperature, tried under three names in order.
+  //
+  // "chamber" is the only STANDARD one: OctoPrint reports that key as soon as a
+  // chamber sensor is configured, and it is the only entry here that is not
+  // specific to one particular printer.
+  //
+  // The other two are custom-sensor names, and the casing matters - JSON keys are
+  // case-sensitive, so "enclosure" will never match a sensor called "Enclosure".
+  // That gap cost real time: on the printer this was written for, /api/printer
+  // reports NEITHER "chamber" NOR lowercase "enclosure", so the whole chamber
+  // reading rests on the third name below. The typo in it ("Encosure temp") was
+  // likewise load-bearing, and invisible, because it still matched a sensor that
+  // really existed under that misspelling.
+  //
+  // So the third name is not decoration - it is the one carrying the reading on
+  // a printer without a standard chamber sensor, and it must match the sensor's
+  // EXACT spelling. If that sensor is renamed or removed in OctoPrint, update it
+  // here in the same breath: with no match, _chamber.actual silently becomes 0.0,
+  // which reads as "no data" to the caller and trips the enclosure cooling
+  // fail-safe mid-print. A duplicate sensor left behind does not break anything
+  // (both report the same value), so deleting the old misspelled one is safe
+  // once this firmware is running.
+  //
+  // The robust fix is to configure a real OctoPrint chamber sensor so the first
+  // lookup answers and these custom names stop mattering at all.
   JsonObject temperature_chamber = temperature["chamber"];
   if (temperature_chamber.isNull())
     temperature_chamber = temperature["enclosure"];
   if (temperature_chamber.isNull())
-    temperature_chamber = temperature["Encosure temp"];
+    temperature_chamber = temperature["Enclosure temp"];
   _chamber.actual = temperature_chamber["actual"] | 0.0;
   _chamber.target = temperature_chamber["target"] | 0.0;
   _chamber.offset = temperature_chamber["offset"] | 0.0;

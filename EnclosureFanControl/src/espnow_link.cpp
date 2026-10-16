@@ -7,6 +7,7 @@
 
 #include <WiFi.h>
 #include <esp_now.h>
+#include <string.h>
 
 namespace
 {
@@ -103,12 +104,51 @@ namespace
         return true;
     }
 
+    // The ESP-NOW link key, copied out of the shared header once.
+    //
+    // Copied rather than referenced because esp_now_peer_info_t::lmk is a plain
+    // array that must outlive the struct - it does, being a namespace-scope
+    // buffer, but naming it separately keeps the "this is the key" fact in one
+    // visible place.
+    const uint8_t ltk[ESP_NOW_KEY_LEN] = ENC_ESP_NOW_LTK;
+
+    // ESP-NOW's key is AES-128-CCM and the driver rejects any other length. This
+    // build predates the lmk_len field (ESP-IDF v5), so the length is fixed by
+    // the struct rather than carried per-peer.
+    //
+    // A second array with a DEDUCED size is what makes the check meaningful: if
+    // the key header carries the wrong number of bytes, `ltk` would simply be
+    // zero-padded to fit and nothing would complain, producing a key that works
+    // only by accident. Asserting on the deduced size catches that at build time
+    // instead of as a link that will not come up.
+    static constexpr uint8_t ltkDeduced[] = ENC_ESP_NOW_LTK;
+    static_assert(sizeof(ltkDeduced) == ESP_NOW_KEY_LEN,
+                  "ENC_ESP_NOW_LTK must contain exactly ESP_NOW_KEY_LEN bytes");
+
+    // Registers a unicast peer at a channel, ENCRYPTED.
+    //
+    // Used both for the compiled-in address and for one learned from a discovery
+    // hello.
+    //
+    // Encryption is not optional decoration here: telemetry carries the OctoPrint
+    // API key, and ESP-NOW frames never leave the radio, so an unencrypted link
+    // puts a live printer credential on the air for anything in range to read.
+    // WPA2 does not help - these frames are not carried by the access point at
+    // all.
+    //
+    // It also makes peer hijacking much less useful: an attacker who answers a
+    // discovery hello and takes the peer slot receives ciphertext they have no
+    // key for, instead of the key itself.
+    //
+    // It does NOT authenticate what we RECEIVE - see the note in
+    // include/espnow_key.h.
     bool addOrUpdatePeer(const uint8_t *mac, int channel)
     {
         esp_now_peer_info_t peer = {};
         memcpy(peer.peer_addr, mac, 6);
         peer.channel = (uint8_t)channel;
-        peer.encrypt = false;
+        peer.encrypt = true;
+        memcpy(peer.lmk, ltk, sizeof(ltk));
         if (esp_now_is_peer_exist(mac))
         {
             if (esp_now_mod_peer(&peer) != ESP_OK)
@@ -126,6 +166,16 @@ namespace
 
     // The broadcast peer is what makes discovery possible. Channel 0 means
     // "whatever the STA is on", so it needs no resync.
+    //
+    // DELIBERATELY NOT ENCRYPTED. ESP-NOW encryption is per-unicast-peer and
+    // does not work against a broadcast destination, so an encrypted broadcast
+    // peer would simply stop the hellos going out.
+    //
+    // The cost is that peer discovery stays unauthenticated: anyone can answer a
+    // hello and take the peer slot. What that buys an attacker changes, though -
+    // they are added as an ENCRYPTED peer, so everything we send them is
+    // ciphertext they hold no key for. Hijacking now costs you the link, not the
+    // OctoPrint credential.
     void addBroadcastPeer()
     {
         if (esp_now_is_peer_exist(broadcastMac))
@@ -279,6 +329,23 @@ void espnowLinkBegin(const uint8_t *peerMacIn)
         printMacLn(peerMac);
     else
         Serial.println("<none>");
+
+    // Encryption state, on its own line and NOT behind SERIAL_DEBUG.
+    //
+    // This is the first thing to check when the link does not come up, because a
+    // mismatched LTK on the two boards produces a link that is dead for exactly
+    // the same reason as a channel split, a wrong peer MAC, or an absent peer -
+    // and nothing anywhere reports an error. Both boards print this; if the two
+    // lines disagree about anything, the key is the problem.
+    //
+    // The key itself is never printed. Only whether one is configured.
+    Serial.print(F("[LINK] espnow encryption ON (16-byte LTK, peer.encrypt=true)"));
+#if ENC_WIFI_CHANNEL != 0
+    Serial.print(" | channel pin ");
+#else
+    Serial.print(" | no channel pin");
+#endif
+    Serial.println();
 
     if (esp_now_init() != ESP_OK)
     {
@@ -499,6 +566,19 @@ void espnowLinkPoll(TemperatureRegulation &reg, double chamberTemp, bool chamber
         tele.octoIp[2] = octo[2];
         tele.octoIp[3] = octo[3];
         tele.octoPort = octoEndpointPort();
+        // The API key, but NOT every frame: this is a cleartext radio unicast,
+        // so octo_endpoint hands it out only just after a change and then on a
+        // slow refresh. The frames in between carry octoKeyFlags == 0, which the
+        // CYD reads as "keep what you have" rather than as "drop your override"
+        // - see ENC_KEYFLAG_* in enclosure_proto.h for why that third state is
+        // what makes the sparse cadence safe.
+        tele.octoKeyFlags = octoEndpointApiKeyClaimFrame();
+        if (tele.octoKeyFlags & ENC_KEYFLAG_PRESENT)
+        {
+            const String key = octoEndpointApiKey();
+            strncpy(tele.octoKey, key.c_str(), ENC_OCTO_KEY_MAX - 1);
+            tele.octoKey[ENC_OCTO_KEY_MAX - 1] = '\0';
+        }
         const esp_err_t err = esp_now_send(activeMac, (const uint8_t *)&tele, sizeof(tele));
         if (err != ESP_OK)
         {

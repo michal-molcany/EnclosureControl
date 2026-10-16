@@ -165,6 +165,22 @@ namespace EnclosureApi
             out.octoIp[3] = ip[3];
         }
         out.octoPort = (uint16_t)(doc["octoPort"] | 0);
+        // OctoPrint API key, same ENC_KEYFLAG_* semantics as the ESP-NOW fields.
+        //
+        // Absent flags (an older C3 build) stay 0, which means "nothing to say,
+        // keep what you have" - NOT "clear your override". That default is what
+        // keeps a mixed-version pair working: an old C3 is simply never asked to
+        // give up a key it never knew about.
+        out.octoKeyFlags = (uint8_t)(doc["octoKeyFlags"] | 0);
+        // Only PRESENT implies a key is present; CLEAR carries none by design.
+        if (out.octoKeyFlags & ENC_KEYFLAG_PRESENT)
+        {
+            const String keyText = doc["octoKey"] | "";
+            // Bounded copy into a fixed buffer: the wire struct is fixed-size,
+            // and strncpy would not NUL-terminate on an over-long value.
+            strncpy(out.octoKey, keyText.c_str(), ENC_OCTO_KEY_MAX - 1);
+            out.octoKey[ENC_OCTO_KEY_MAX - 1] = '\0';
+        }
         return true;
     }
 

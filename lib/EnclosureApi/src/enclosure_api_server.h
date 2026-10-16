@@ -62,6 +62,19 @@ namespace EnclosureApi
         // override"; see EnclosureTelemetry::octoIp.
         uint8_t octoIp[4] = {0, 0, 0, 0};
         uint16_t octoPort = 0;
+        // The OctoPrint API key and its ENC_KEYFLAG_* state, carrying exactly
+        // the same meaning as the ESP-NOW fields of the same name.
+        //
+        // Repeated here so the CYD has ONE apply path for the key regardless of
+        // which transport delivered it. Two copies of this logic, one per
+        // transport, is exactly how the two would drift - and the drift would
+        // show up only while one transport was down, i.e. never in testing.
+        //
+        // Over HTTP this is a token-protected request rather than a cleartext
+        // radio frame, so the flags matter less (a stale key is corrected on the
+        // next response), but reusing them keeps the receiver identical.
+        char octoKey[ENC_OCTO_KEY_MAX] = {0};
+        uint8_t octoKeyFlags = 0;
     };
 
     using TelemetryProvider = Telemetry (*)();
