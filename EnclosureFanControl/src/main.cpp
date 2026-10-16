@@ -2,6 +2,7 @@
 #include "main.h"
 #include "Arduino.h"
 #include <ArduinoOTA.h>
+#include <string.h>
 
 #include "HttpOta.h"
 #include "enclosure_api_server.h"
@@ -46,6 +47,19 @@ static EnclosureApi::Telemetry provideEnclosureTelemetry()
   t.octoIp[2] = octo[2];
   t.octoIp[3] = octo[3];
   t.octoPort = octoEndpointPort();
+  // The API key, on the same on-change/refresh cadence as the ESP-NOW copy and
+  // with the same ENC_KEYFLAG_* meaning. Carried here too so the CYD still
+  // receives a key changed through the web UI while the radio link is down -
+  // the endpoint hand-off above already works this way, and a setting that
+  // reached the display over one transport but not the other would be worse
+  // than not carrying it at all.
+  t.octoKeyFlags = octoEndpointApiKeyClaimFrame();
+  if (t.octoKeyFlags & ENC_KEYFLAG_PRESENT)
+  {
+    const String key = octoEndpointApiKey();
+    strncpy(t.octoKey, key.c_str(), ENC_OCTO_KEY_MAX - 1);
+    t.octoKey[ENC_OCTO_KEY_MAX - 1] = '\0';
+  }
   return t;
 }
 
@@ -198,6 +212,8 @@ static EnclosureUi::Status provideEnclosureUiStatus()
   s.octoIp = octoEndpointIp();
   s.octoPort = octoEndpointPort();
   s.octoOverridden = octoEndpointOverridden();
+  s.octoKeySet = octoEndpointApiKey().length() > 0;
+  s.octoKeyOverridden = octoEndpointApiKeyOverridden();
   // Reported as "the CYD is being told", never as "the CYD has it": telemetry
   // is one-way, so this board cannot know what the far end stored.
   s.octoSentToCyd = espnowLinkHasPeer();
@@ -228,20 +244,36 @@ static void applyEnclosureUiManual(const EnclosureCommand &cmd)
 // reported immediately rather than appearing to hang.
 static const unsigned long OCTO_PROBE_TIMEOUT_MS = 2500;
 
-static bool applyEnclosureUiEndpoint(IPAddress ip, uint16_t port, String &reason)
+static bool applyEnclosureUiEndpoint(IPAddress ip, uint16_t port, const char *key,
+                                     String &reason)
 {
   reason = "";
-  if (!octoEndpointProbe(ip, port, OCTO_PROBE_TIMEOUT_MS, reason))
+  // A pasted key is the candidate; a blank field means "keep the one in force".
+  // Either way the probe runs against the CANDIDATE ADDRESS with the CANDIDATE
+  // KEY, which is the only combination that answers the question being asked.
+  const String probeKey = (key && key[0]) ? String(key) : octoEndpointApiKey();
+  if (!octoEndpointProbe(ip, port, probeKey.c_str(), OCTO_PROBE_TIMEOUT_MS, reason))
     return false;
+
+  // Only now that the pair is known good is anything stored. Setting the key
+  // first publishes it to the poll task and to the CYD, so doing it after the
+  // address means the board is never briefly pointing at the new server with
+  // the old credentials.
+  if (key && key[0] && String(key) != octoEndpointApiKey())
+    octoEndpointSetApiKey(key);
   octoEndpointSet(ip, port);
   return true;
 }
 
-// Restore the compiled-in include/octoprint_endpoint.h value. No probe: the
-// point of this button is to get back to a state that is known to have worked.
+// Restore the compiled-in include/octoprint_endpoint.h address AND the
+// secrets.h key. No probe: the point of this button is to get back to a state
+// that is known to have worked. Both are cleared together because the page sets
+// them as a pair - see applyEnclosureUiEndpoint() for why they cannot be set
+// independently.
 static void resetEnclosureUiEndpoint()
 {
   octoEndpointClear();
+  octoEndpointClearApiKey();
 }
 
 // Suppresses the normal chamber repaint so the OLED shows OTA progress (and

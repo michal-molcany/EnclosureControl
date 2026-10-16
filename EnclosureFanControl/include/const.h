@@ -166,6 +166,20 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 #endif
 #include "enclosure_api.h"
 
+// ESP-NOW link encryption key. SHARED with the CYD, for the same reason the
+// header above is: two copies of a secret can disagree, and when they do the
+// symptom is a dead radio link with no error anywhere.
+//
+// Enforced here because the failure mode is otherwise very expensive to
+// diagnose: each board encrypts to the key it holds and the other cannot read
+// it, so a mismatch is indistinguishable from a channel split or a missing peer.
+#if defined(__has_include)
+#  if !__has_include("espnow_key.h")
+#    error "Missing ../include/espnow_key.h - copy include/espnow_key.example.h to include/espnow_key.h (at the repo root). Both boards must use the SAME 16-byte key or the ESP-NOW link will not come up."
+#  endif
+#endif
+#include "espnow_key.h"
+
 // Web UI (lib/EnclosureUi): status, PID tuning, manual control from a browser.
 //
 // Its OWN port, deliberately, not a path on the enclosure API's server. WebServer

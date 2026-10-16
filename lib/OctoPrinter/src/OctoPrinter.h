@@ -106,6 +106,19 @@ public:
   // pollerSetEndpoint, which exist for exactly that reason.
   void setEndpoint(IPAddress host, int port);
 
+  // Replaces the API key used in the X-Api-Key header of every request.
+  //
+  // Exists so the key can be changed at runtime - entered in the web UI and
+  // stored in NVS - instead of being frozen into the binary at build time by
+  // the constructor.
+  //
+  // Same rules as setEndpoint(): NOT THREAD SAFE (it touches _apiKey and the
+  // socket without locking), and it clears _doOnce so the next begin() re-runs
+  // /api/version against the new credentials - the cached server/API version
+  // strings were fetched with the old key, and a key that cannot read them
+  // would otherwise report another server's versions as its own.
+  void setApiKey(const char *key);
+
   /*
     These functions are used to check on the printer's status flags.
     All they do is return the state of the boolean flag.

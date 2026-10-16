@@ -4,8 +4,74 @@
 #include <Preferences.h>
 
 #include "const.h"
+#include "enclosure_proto.h" // ENC_KEYFLAG_*
 #include "octo_poller.h"
 #include "secrets.h"
+
+// Declared up here because both the API-key block below and the address block
+// further down need it.
+static secrets sec;
+
+// ---------------------------------------------------------------------------
+// OctoPrint API key.
+//
+// SEPARATE NVS NAMESPACE FROM THE ADDRESS, and not by tidiness: octoEndpointClear()
+// calls prefs.clear() on "octoend", which would wipe the key along with the
+// address. The two settings are reset independently in the UI, so sharing a
+// namespace would make "reset the address" silently discard a key the user
+// believes is still stored.
+// ---------------------------------------------------------------------------
+static const char *OCTO_KEY_NS = "octokey";
+static const char *OCTO_KEY_KEY = "apikey";
+
+// The compiled-in fallback, read once. Read lazily rather than in a static
+// initialiser because it constructs a String, and a global String constructed
+// before main() runs is a static-init hazard on ESP32 for no benefit.
+static String compiledInKey;
+static bool compiledInKeyRead = false;
+
+static String compiledKey()
+{
+  if (!compiledInKeyRead)
+  {
+    compiledInKey = sec.getOctoprintApiKey();
+    compiledInKeyRead = true;
+  }
+  return compiledInKey;
+}
+
+// Key currently in force, and whether it is a stored override.
+static String currentKey;
+static bool keyOverridden = false;
+
+// Cadence for putting the key into a telemetry frame.
+//
+// WHY NOT EVERY FRAME
+// -------------------
+// octoIp is sent every frame because four bytes cost nothing. A credential is
+// not four bytes: this is a cleartext radio unicast, so every frame carrying the
+// key is another copy of the OctoPrint credential in the air, forever, at 1 Hz.
+// So the key rides along only when it has something to say:
+//
+//   - repeatedly for ANNOUNCE_MS after any change, so a CYD that happens to be
+//     mid-reboot (or that misses the first frame) still converges quickly;
+//   - then once every REFRESH_MS, so a CYD that was powered off across the
+//     change still picks it up without being told again.
+//
+// The frames in between carry flags == 0, which the receiver treats as "keep
+// what you have" - see ENC_KEYFLAG_* in enclosure_proto.h. That third state is
+// the whole reason this is safe; without it a sparse cadence would read as a
+// stream of "drop your override" and the CYD would flip back to its own key once
+// per second.
+#define OCTO_KEY_ANNOUNCE_MS 5000UL
+#define OCTO_KEY_REFRESH_MS 30000UL
+
+// Set on any change. While it is set, every frame carries the key; once it
+// lapses, only the periodic refresh does.
+static unsigned long keyAnnounceUntilMs = 0;
+// Absolute time of the next refresh frame, so it survives a change landing
+// between two ticks without needing its own flag.
+static unsigned long nextKeyRefreshMs = 0;
 
 // The single source of truth for "which OctoPrint is this board talking to".
 //
@@ -26,7 +92,6 @@ static const char *OCTO_NS = "octoend";
 static const char *OCTO_KEY_IP = "ip";
 static const char *OCTO_KEY_PORT = "port";
 
-static secrets sec;
 static Preferences prefs;
 
 // Current address in force. Seeded from the compiled-in header and overwritten
@@ -69,6 +134,29 @@ void octoEndpointBegin()
   Serial.print(currentPort);
   Serial.println(overridden ? F(" (stored override)") : F(" (compiled default)"));
 
+  // The key, same override-or-default rule as the address above.
+  currentKey = compiledKey();
+  keyOverridden = false;
+  if (prefs.begin(OCTO_KEY_NS, true))
+  {
+    const String stored = prefs.getString(OCTO_KEY_KEY, "");
+    prefs.end();
+    if (stored.length() > 0)
+    {
+      currentKey = stored;
+      keyOverridden = true;
+    }
+  }
+  // Never print the key itself - not even at boot, not even on a debug build.
+  // The serial log is the most widely shared artefact in a project like this
+  // (pasted into an issue, attached to a bug report), so it reports the
+  // credential's provenance and length only.
+  Serial.print(F("[octo] api key "));
+  Serial.print(keyOverridden ? F("stored override") : F("compiled default"));
+  Serial.print(F(" ("));
+  Serial.print(currentKey.length());
+  Serial.println(F(" chars)"));
+
   if (pollerRunning)
     octoPollerSetEndpoint(currentIp, currentPort);
 }
@@ -80,6 +168,7 @@ void octoEndpointAttachPoller()
 {
   pollerRunning = true;
   octoPollerSetEndpoint(currentIp, currentPort);
+  octoPollerSetApiKey(currentKey.c_str());
 }
 
 IPAddress octoEndpointIp()
@@ -97,8 +186,8 @@ bool octoEndpointOverridden()
   return overridden;
 }
 
-bool octoEndpointProbe(IPAddress ip, uint16_t port, unsigned long timeoutMs,
-                       String &reason)
+bool octoEndpointProbe(IPAddress ip, uint16_t port, const char *apiKey,
+                       unsigned long timeoutMs, String &reason)
 {
   reason = "";
   if (WiFi.status() != WL_CONNECTED)
@@ -127,7 +216,12 @@ bool octoEndpointProbe(IPAddress ip, uint16_t port, unsigned long timeoutMs,
   client.print("Host: ");
   client.print(ip);
   client.print("\r\nX-Api-Key: ");
-  client.print(sec.getOctoprintApiKey());
+  // The candidate key, not the one in force: that is the entire point of probing
+  // a key before storing it. `apiKey` is validated by the caller (see
+  // receiveApiKey in lib/EnclosureUi) - this function must not have to defend
+  // against a CR/LF in it, because a newline here ends the header line and
+  // everything after it becomes a header of its own.
+  client.print(apiKey ? apiKey : "");
   client.print(F("\r\nConnection: close\r\n\r\n"));
 
   // The status line is all this needs; the body is irrelevant to "is it there".
@@ -160,9 +254,12 @@ bool octoEndpointProbe(IPAddress ip, uint16_t port, unsigned long timeoutMs,
     code = statusLine.substring(sp + 1).substring(0, 3).toInt();
   if (code < 200 || code >= 300)
   {
+    // 401 and 403 are both OctoPrint refusing the credential, and for the user's
+    // purposes they mean the same thing: the key does not work on this server.
     reason = "answered HTTP " + String(code) +
-             (code == 401 ? " (the API key in secrets.h is wrong for that server)"
-                          : "");
+             ((code == 401 || code == 403)
+                  ? " (the API key was refused by that server)"
+                  : "");
     return false;
   }
   return true;
@@ -200,4 +297,90 @@ void octoEndpointClear()
   Serial.println(F("[octo] override cleared, back to the compiled default"));
   if (pollerRunning)
     octoPollerSetEndpoint(currentIp, currentPort);
+}
+
+// ---------------------------------------------------------------------------
+// API key
+// ---------------------------------------------------------------------------
+
+String octoEndpointApiKey()
+{
+  return currentKey;
+}
+
+bool octoEndpointApiKeyOverridden()
+{
+  return keyOverridden;
+}
+
+// Shared by set and clear: apply the new key, hand it to the poll task, and
+// start the announce window so the CYD converges quickly.
+static void publishApiKey(const String &key, bool overridden)
+{
+  currentKey = key;
+  keyOverridden = overridden;
+  if (pollerRunning)
+    octoPollerSetApiKey(currentKey.c_str());
+  // Repeat the key in every frame for a few seconds (see the cadence notes
+  // above), then drop to the periodic refresh.
+  keyAnnounceUntilMs = millis() + OCTO_KEY_ANNOUNCE_MS;
+}
+
+void octoEndpointSetApiKey(const char *key)
+{
+  publishApiKey(key ? String(key) : String(), true);
+  if (prefs.begin(OCTO_KEY_NS, false))
+  {
+    prefs.putString(OCTO_KEY_KEY, currentKey);
+    prefs.end();
+  }
+  else
+  {
+    // Say so rather than letting the page report success: the poll task now has
+    // the new key, but it will be gone at the next reboot.
+    Serial.println(F("[octo] WARNING key applied but NVS write FAILED - lost on reboot"));
+  }
+  Serial.print(F("[octo] api key stored ("));
+  Serial.print(currentKey.length());
+  Serial.println(F(" chars)"));
+}
+
+void octoEndpointClearApiKey()
+{
+  if (prefs.begin(OCTO_KEY_NS, false))
+  {
+    prefs.clear();
+    prefs.end();
+  }
+  // Re-read the compiled-in value rather than trusting a cached copy: the whole
+  // point of this button is to get back to a state known to have worked, and
+  // the compiled default is that state.
+  publishApiKey(compiledKey(), false);
+  Serial.println(F("[octo] api key override cleared, back to the compiled default"));
+}
+
+uint8_t octoEndpointApiKeyClaimFrame()
+{
+  const unsigned long now = millis();
+
+  // Signed subtraction, not `now > deadline`: millis() wraps every ~49 days,
+  // and a plain comparison reads a wrapped clock as "the deadline passed 49
+  // days ago", which would suppress the announce window forever.
+  const bool announcing = (int32_t)(now - keyAnnounceUntilMs) < 0;
+  const bool refreshDue = (int32_t)(now - nextKeyRefreshMs) >= 0;
+
+  if (!announcing && !refreshDue)
+    return 0;
+
+  // Re-arm BEFORE returning, so a frame that is sent but lost still gets
+  // followed by another. Rescheduling on every claimed frame is what makes the
+  // announce window repeat rather than fire once.
+  nextKeyRefreshMs = now + OCTO_KEY_REFRESH_MS;
+  if (announcing)
+    keyAnnounceUntilMs = now + OCTO_KEY_ANNOUNCE_MS;
+
+  // CLEAR is the flag on its own: a receiver told "present" and "clear" at once
+  // has contradictory instructions, and the sane reading (keep nothing) is the
+  // one that matches the sender's actual state here.
+  return keyOverridden ? ENC_KEYFLAG_PRESENT : ENC_KEYFLAG_CLEAR;
 }

@@ -3,14 +3,32 @@
 #include <WiFi.h>
 #include <OctoPrinter.h>
 #include <Preferences.h>
+#include <string.h>
 
 #include "const.h"
+#include "enclosure_proto.h" // ENC_OCTO_KEY_MAX, ENC_KEYFLAG_*
 #include "secrets.h"
 
 namespace
 {
     secrets sec;
     OctoPrinter api(sec.getOctoprintApiKey(), OCTOPRINT_IP, OCTOPRINT_PORT);
+
+    // The compiled-in key, read once and lazily. Not in a static initialiser:
+    // it builds a String, and a global String constructed before main() runs is a
+    // static-init hazard for no benefit.
+    String compiledKeyCache;
+    bool compiledKeyRead = false;
+
+    String compiledKey()
+    {
+        if (!compiledKeyRead)
+        {
+            compiledKeyCache = sec.getOctoprintApiKey();
+            compiledKeyRead = true;
+        }
+        return compiledKeyCache;
+    }
 
     // ---------------------------------------------------------------------
     // OctoPrint address, as told to us by the C3.
@@ -40,6 +58,35 @@ namespace
     uint16_t pendingPort = OCTOPRINT_PORT;
     volatile bool pending = false;
 
+    // ---------------------------------------------------------------------
+    // OctoPrint API key, as told to us by the C3.
+    //
+    // Same ownership as the address: the C3 owns the setting (it has the web
+    // UI), this board follows it. Stored for the same reason - this board can
+    // be power-cycled while the C3 is off, and a reverted key would look
+    // exactly like "OctoPrint is down" until the link came back.
+    //
+    // Its own namespace, because this board also keeps the ADDRESS in
+    // "octoend" and clearEndpoint() wipes that whole namespace; sharing one
+    // would make a reset of one setting destroy the other.
+    // ---------------------------------------------------------------------
+    const char *OCTO_KEY_NS = "octokey";
+    const char *OCTO_KEY_KEY = "apikey";
+
+    String currentKey;
+    bool apiKeyOverridden = false;
+
+    // A fixed char[] and NOT a String, for the same reason pendingHost is a POD:
+    // the flag-last/cleared-first protocol only prevents a half-written read if
+    // the value is trivially copyable. A String assignment reallocates.
+    char pendingKey[ENC_OCTO_KEY_MAX] = {0};
+    uint8_t pendingKeyFlags = 0;
+    volatile bool pendingKeyFlag = false;
+    // Guards the pendingKey copy between this file's writer (called from the
+    // link task, on both the ESP-NOW and HTTP paths) and applyPendingApiKey() on
+    // the poll task.
+    portMUX_TYPE keyMux = portMUX_INITIALIZER_UNLOCKED;
+
     void storeEndpoint(IPAddress ip, uint16_t port)
     {
         if (octoPrefs.begin(OCTO_NS, false))
@@ -62,11 +109,36 @@ namespace
     // Reads the stored override before the poll task starts. A missing or
     // unreadable pair simply means "no override", which is the compiled-in
     // default - never a reason to refuse to boot.
+    //
+    // Forward-declared because it validates the stored API key too, and
+    // plausibleKey() is defined further down with the other validators.
+    bool plausibleKey(const char *key);
+
     void loadEndpoint()
     {
         currentHost.fromString(OCTOPRINT_IP);
         currentPort = OCTOPRINT_PORT;
         endpointOverridden = false;
+
+        // The API key, same override-or-default rule as the address. Applied to
+        // the client for the same reason as below - the OctoPrinter instance is
+        // constructed at static-init with the compiled-in values, so recording a
+        // stored value without applying it leaves this board using the old one
+        // for the whole session.
+        currentKey = "";
+        apiKeyOverridden = false;
+        if (octoPrefs.begin(OCTO_KEY_NS, true))
+        {
+            const String stored = octoPrefs.getString(OCTO_KEY_KEY, "");
+            octoPrefs.end();
+            if (plausibleKey(stored.c_str()))
+            {
+                currentKey = stored;
+                apiKeyOverridden = true;
+                api.setApiKey(currentKey.c_str());
+            }
+        }
+
         if (octoPrefs.begin(OCTO_NS, true))
         {
             const uint32_t raw = octoPrefs.getUInt(OCTO_KEY_IP, 0);
@@ -108,6 +180,113 @@ namespace
     // frame would point this board permanently at an address that does not
     // exist, and the symptom (no printer data) is identical to OctoPrint being
     // down. Validate before storing, and store nothing on failure.
+    // Is this a usable OctoPrint API key at all?
+    //
+    // Untrusted for the same reason the address is: this board accepts frames
+    // from any sender in receive-only bootstrap mode, so four arbitrary bytes -
+    // or here, up to 64 arbitrary ones - can arrive from a neighbouring board
+    // or anyone with a radio.
+    //
+    // The failure this prevents is specific and bad. The key is interpolated
+    // raw into an "X-Api-Key:" header line by the OctoPrinter client, so a value
+    // containing CR or LF would end that line early and turn the rest of the
+    // value into headers sent to the OctoPrint server. Anything unprintable is
+    // rejected rather than sanitised: a key is machine-generated ASCII, so there
+    // is no legitimate value this would refuse.
+    //
+    // Rejecting (rather than storing and hoping) also means a corrupt frame
+    // cannot leave this board permanently unable to authenticate, which would
+    // survive every reboot and be indistinguishable from a wrong key by mistake.
+    bool plausibleKey(const char *key)
+    {
+        if (!key || !*key)
+            return false;
+        const size_t n = strnlen(key, ENC_OCTO_KEY_MAX);
+        if (n == 0 || n > ENC_OCTO_KEY_MAX - 1)
+            return false;
+        for (size_t i = 0; i < n; ++i)
+        {
+            const unsigned char c = (unsigned char)key[i];
+            if (c < 0x20 || c > 0x7E)
+                return false;
+        }
+        return true;
+    }
+
+    void applyPendingApiKey()
+    {
+        if (!pendingKeyFlag)
+            return;
+        // Snapshotted under a critical section. A flag-last/cleared-first
+        // protocol does not make a 65-byte handoff indivisible, and this one
+        // genuinely has to be: both the old and new key are printable ASCII of a
+        // similar length, so a torn read would still pass plausibleKey() and
+        // could be persisted - leaving the display unable to authenticate until
+        // someone re-entered the key by hand. A brief interrupt mask around a
+        // 65-byte copy costs nothing.
+        char key[ENC_OCTO_KEY_MAX];
+        portENTER_CRITICAL(&keyMux);
+        pendingKeyFlag = false;
+        const uint8_t flags = pendingKeyFlags;
+        strncpy(key, pendingKey, ENC_OCTO_KEY_MAX - 1);
+        key[ENC_OCTO_KEY_MAX - 1] = '\0';
+        portEXIT_CRITICAL(&keyMux);
+
+        // 0 means "the C3 had nothing to say". NOT a reset: the C3 omits the key
+        // from most frames precisely because it repeats it only after a change,
+        // and treating an absent key as "clear" would revert this board to its
+        // own compiled-in key once per second.
+        if (flags == 0)
+            return;
+
+        if (flags & ENC_KEYFLAG_CLEAR)
+        {
+            // Follow the C3 back to our compiled default, so a "reset" in the
+            // web UI resets both boards.
+            if (!apiKeyOverridden && currentKey == String())
+                return; // already on our default; nothing to do
+            apiKeyOverridden = false;
+            currentKey = "";
+            if (octoPrefs.begin(OCTO_KEY_NS, false))
+            {
+                octoPrefs.clear();
+                octoPrefs.end();
+            }
+            api.setApiKey(compiledKey().c_str());
+            Serial.println(F("[POLL] api key override cleared by C3"));
+            return;
+        }
+
+        if ((flags & ENC_KEYFLAG_PRESENT) == 0)
+            return; // some flag combination nobody defined - ignore it
+
+        if (!plausibleKey(key))
+        {
+            Serial.println(F("[POLL] api key REJECTED (implausible characters)"));
+            return;
+        }
+
+        // Re-assert even when unchanged: setApiKey() returns immediately when
+        // the client already holds this key, so it costs nothing and makes the
+        // client and the bookkeeping self-heal instead of depending on the two
+        // having been updated together.
+        api.setApiKey(key);
+
+        if (apiKeyOverridden && currentKey == String(key))
+            return; // unchanged: no NVS write, no log spam every refresh frame
+
+        apiKeyOverridden = true;
+        currentKey = String(key);
+        if (octoPrefs.begin(OCTO_KEY_NS, false))
+        {
+            octoPrefs.putString(OCTO_KEY_KEY, currentKey);
+            octoPrefs.end();
+        }
+        Serial.print(F("[POLL] api key from C3 ("));
+        Serial.print(currentKey.length());
+        Serial.println(F(" chars)"));
+    }
+
     bool plausibleEndpoint(IPAddress ip, uint16_t port)
     {
         if (port == 0)
@@ -387,6 +566,9 @@ namespace
         for (;;)
         {
             applyPendingEndpoint();
+            // Key first: it must be in force before the request below goes out,
+            // or this pass would 401 and publish a snapshot with no readings.
+            applyPendingApiKey();
 PollerCommand cmd = {};
         while (xQueueReceive(commandQueue, &cmd, 0) == pdTRUE)
                 executeCommand(cmd);
@@ -468,6 +650,31 @@ void pollerSetEndpoint(IPAddress host, uint16_t port)
 bool pollerEndpointOverridden()
 {
     return endpointOverridden;
+}
+
+void pollerSetApiKey(const char *key, uint8_t flags)
+{
+    if (flags == 0)
+        return; // nothing to say - see applyPendingApiKey()
+    // Truncating copy, always NUL-terminated: strncpy alone would leave an
+    // over-long value unterminated, and the poll task would then read past the
+    // end of this buffer when it validates and sends it.
+    const char *safe = key ? key : "";
+    // Truncating copy, always NUL-terminated: strncpy alone would leave an
+    // over-long value unterminated, and the poll task would then read past the
+    // end of this buffer when it validates and sends it.
+    portENTER_CRITICAL(&keyMux);
+    strncpy(pendingKey, safe, ENC_OCTO_KEY_MAX - 1);
+    pendingKey[ENC_OCTO_KEY_MAX - 1] = '\0';
+    pendingKeyFlags = flags;
+    // Flag last, cleared first by the poll task: same ordering as the address.
+    pendingKeyFlag = true;
+    portEXIT_CRITICAL(&keyMux);
+}
+
+bool pollerApiKeyOverridden()
+{
+    return apiKeyOverridden;
 }
 
 void pollerSendCommand(const PollerCommand &cmd)

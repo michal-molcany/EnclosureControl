@@ -15,6 +15,13 @@
 // with an older build. Both boards must then be flashed - a mismatched pair
 // still links, but the protocol assumptions differ.
 //
+// DO THIS BEFORE FLASHING, NOT AFTER CODING. The version is the only thing that
+// makes "what is actually running on this board?" answerable from the device
+// itself, so a change that is built and flashed without it ships a board that
+// under-reports what it is - and the `proto` label in particular is the first
+// thing to check when a link misbehaves. Bump it as part of the change, every
+// time, not as a follow-up.
+//
 // Each board prints its own version at boot over serial, prefixed with its role,
 // so the line identifies both the build AND which board printed it:
 //
@@ -26,17 +33,25 @@
 // version number are still distinguishable on the device.
 
 #define ENC_FW_VERSION_MAJOR 0
-#define ENC_FW_VERSION_MINOR 3
+#define ENC_FW_VERSION_MINOR 4
 #define ENC_FW_VERSION_PATCH 0
 
 // Protocol revision, bumped only when the structs in enclosure_proto.h or the
 // JSON keys in lib/EnclosureApi change in a backward-incompatible way.
 // Bumped to 2 when EnclosureTelemetry grew the OctoPrint endpoint fields
-// (octoIp + octoPort), taking it from 10 to 16 bytes. Both boards check the
-// packet LENGTH against their own sizeof(), so a C3 and a CYD on mismatched
-// builds drop every frame rather than misreading it - the link goes quiet until
-// both are flashed. Reflash both when this moves.
-#define ENC_PROTO_VERSION 2
+// (octoIp + octoPort), taking it from 10 to 16 bytes. Bumped to 3 when it grew
+// the OctoPrint API key (octoKey + octoKeyFlags), taking it from 16 to 82 bytes,
+// and when /api/enclosure gained the matching octoKey/octoKeyFlags JSON keys.
+// Both boards check the packet LENGTH against their own sizeof(), so a C3 and a
+// CYD on mismatched builds drop every frame rather than misreading it - the link
+// goes quiet until both are flashed. Reflash both when this moves.
+//
+// Note this number is a DIAGNOSTIC LABEL, not an enforced handshake: nothing on
+// the link compares it, and the length check does that work implicitly. Its whole
+// value is that "proto vN" on a boot line names the layout, so a reader chasing a
+// dead link can rule a version mismatch in or out immediately. That only helps if
+// it is actually correct.
+#define ENC_PROTO_VERSION 3
 
 // Stringify the numbers above so the printed line cannot drift from them.
 #define ENC_STR2(x) #x

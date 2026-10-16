@@ -46,6 +46,13 @@ enum EnclosureMaterial : uint8_t
     ENC_MATERIAL_UNKNOWN = 7
 };
 
+// Max OctoPrint API key length, including the NUL. OctoPrint issues 32-character
+// keys, so this is deliberately double that: it costs 33 bytes in a frame that is
+// nowhere near the 127-byte ESP-NOW payload limit, and a future longer key must
+// not silently truncate into something that authenticates as a different
+// credential.
+#define ENC_OCTO_KEY_MAX 65
+
 // C3 -> CYD, sent every TELEMETRY_INTERVAL_MS.
 struct EnclosureTelemetry
 {
@@ -74,7 +81,54 @@ struct EnclosureTelemetry
     // bytes on the wire with no alignment padding.
     uint8_t octoIp[4];
     uint16_t octoPort;
+    // The OctoPrint API key, for the same reason octoIp is here: one setting,
+    // one owner. The C3 can have it changed in its web UI at runtime; without
+    // this the CYD would be left polling with the key frozen into its own
+    // firmware at build time, and the two boards would disagree about which
+    // credentials are current.
+    //
+    // CREDENTIAL ON THE AIR, DELIBERATELY. This is a cleartext ESP-NOW unicast
+    // (peer.encrypt is false), so this field puts the OctoPrint credential on
+    // the air whenever it is actually sent - see octoKeyFlags for how rarely
+    // that is. It is a real widening of the blast radius of a leak: anyone
+    // within radio range, or anyone reading either board's flash, obtains the
+    // key. It is a considered trade for "one place to configure the printer",
+    // not an oversight. The alternative - carrying the key only over the
+    // token-protected HTTP link - reintroduces two sources of truth, which is
+    // the failure this whole field exists to prevent.
+    //
+    // octoKeyFlags says whether octoKey is meaningful. An EMPTY KEY ALONE IS NOT
+    // A SIGNAL - see ENC_KEYFLAG_* below, because a naive "empty means no
+    // override" reading makes this field unusable on a mostly-silent wire.
+    char octoKey[ENC_OCTO_KEY_MAX];
+    uint8_t octoKeyFlags;
 };
+
+// Whether octoKey carries a value, and whether the receiver should act on it.
+//
+// WHY A FLAGS BYTE AND NOT AN EMPTY-STRING SENTINEL
+// -------------------------------------------------
+// The key is NOT sent in every frame (a credential is worth keeping off the air
+// when nothing has changed), but the CYD still has to be able to fall back to its
+// own compiled-in key when the C3's override is cleared. Those two needs
+// collide: with "empty means no override", the frames that carry no key - the
+// overwhelming majority - would read as "drop your override" and the CYD would
+// flip back to its own key once per second.
+//
+// So there are three states, and only two of them are actionable:
+//
+//   flags == 0                      NOTHING TO SAY. The receiver keeps whatever
+//                                    it already has. This is what the in-between
+//                                    frames carry, and it is why a sparse cadence
+//                                    is safe at all.
+//   ENC_KEYFLAG_PRESENT             octoKey holds a real key; use it.
+//   ENC_KEYFLAG_CLEAR               The C3 has no override; drop yours and
+//                                    return to your compiled-in default.
+//
+// PRESENT and CLEAR are mutually exclusive; a receiver must reject both set,
+// rather than picking one, because that state has no meaning.
+#define ENC_KEYFLAG_PRESENT 0x01
+#define ENC_KEYFLAG_CLEAR 0x02
 
 #define ENC_CHAMBER_INVALID INT16_MIN
 
@@ -116,7 +170,7 @@ enum EnclosureRxDrop : uint8_t
 // mismatch - which shows up only as "the link is dead" - into a build error.
 // ESP32 (CYD) and ESP32-C3 (fan control) are both 32-bit little-endian with
 // 2-byte alignment on uint16_t/int16_t, so the two layouts must agree.
-static_assert(sizeof(EnclosureTelemetry) == 16, "EnclosureTelemetry must stay 16 bytes on the wire");
+static_assert(sizeof(EnclosureTelemetry) == 82, "EnclosureTelemetry must stay 82 bytes on the wire");
 static_assert(offsetof(EnclosureTelemetry, magic) == 0, "telemetry magic offset");
 static_assert(offsetof(EnclosureTelemetry, seq) == 2, "telemetry seq offset");
 static_assert(offsetof(EnclosureTelemetry, louvrePct) == 3, "telemetry louvrePct offset");
@@ -126,6 +180,9 @@ static_assert(offsetof(EnclosureTelemetry, state) == 8, "telemetry state offset"
 static_assert(offsetof(EnclosureTelemetry, mode) == 9, "telemetry mode offset");
 static_assert(offsetof(EnclosureTelemetry, octoIp) == 10, "telemetry octoIp offset");
 static_assert(offsetof(EnclosureTelemetry, octoPort) == 14, "telemetry octoPort offset");
+static_assert(offsetof(EnclosureTelemetry, octoKey) == 16, "telemetry octoKey offset");
+static_assert(offsetof(EnclosureTelemetry, octoKeyFlags) == 81, "telemetry octoKeyFlags offset");
+static_assert(sizeof(EnclosureTelemetry) < 127, "ESP-NOW payload limit");
 
 static_assert(sizeof(EnclosureCommand) == 10, "EnclosureCommand must stay 10 bytes on the wire");
 static_assert(offsetof(EnclosureCommand, magic) == 0, "command magic offset");

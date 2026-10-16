@@ -83,6 +83,19 @@ namespace EnclosureUi
         // telemetry is one-way. Reported as "the CYD has been told", never as
         // "the CYD has it".
         bool octoSentToCyd = false;
+
+        // The OctoPrint API key: reported as PROVENANCE ONLY, never as a value.
+        //
+        // The page does not receive the credential, ever - not prefilled into a
+        // field, not in /api/status, not in the DOM. So it cannot be copied out
+        // of the page, out of browser devtools, or out of a screenshot. What it
+        // does get is enough to answer "is a key in force, and where did it come
+        // from", which is the question a user actually has.
+        //
+        // octoKeySet is true when a usable key exists at all; a board whose
+        // secrets.h has none configured has nothing to poll OctoPrint with.
+        bool octoKeySet = false;
+        bool octoKeyOverridden = false;
     };
 
     using StatusProvider = Status (*)();
@@ -105,17 +118,32 @@ namespace EnclosureUi
     // fallback that exists to catch a real disconnection.
     using ManualHandler = void (*)(const EnclosureCommand &cmd);
 
-    // Probes and stores a new OctoPrint address. Must return false with a
-    // human-readable `reason` when the address does not answer, and in that case
-    // change NOTHING: the board keeps running on the address it already has.
+    // Probes and stores a new OctoPrint address, and optionally a new API key
+    // alongside it. Must return false with a human-readable `reason` when the
+    // combination does not work, and in that case change NOTHING: the board
+    // keeps running on the address and key it already has.
+    //
+    // ADDRESS AND KEY ARE ONE SETTING, not two. They are submitted together
+    // because separating them deadlocks: moving to a different OctoPrint server
+    // means a new address AND a new key, but each probe can only use one stored
+    // value and one candidate. Setting the address first probes the new server
+    // with the old key (401); setting the key first probes the old server with
+    // the new key. Neither can ever be applied first, and the only way out would
+    // be a serial flash.
+    //
+    // `key` is nullptr or "" when the user left the field blank, which means
+    // "keep the key already in force". That keeps a plain address change a
+    // one-step operation, without ever making the submitted set ambiguous - the
+    // page shows which key is in force, just never its value.
     //
     // The probe belongs to the programme, not to this library, because only the
-    // programme holds the OctoPrint API key needed to identify itself to the
-    // server. Getting this wrong is not cosmetic - the C3 treats unreachable
-    // OctoPrint data as invalid, which trips the cooling fail-safe.
-    using EndpointSetter = bool (*)(IPAddress ip, uint16_t port, String &reason);
+    // programme holds the credentials needed to identify itself to the server.
+    // Getting this wrong is not cosmetic - the C3 treats unreachable or
+    // unauthorised OctoPrint data as invalid, which trips the cooling fail-safe.
+    using EndpointSetter = bool (*)(IPAddress ip, uint16_t port, const char *key, String &reason);
 
-    // Drops any stored override, returning to the compiled-in default.
+    // Drops every stored override - address AND key - returning both to their
+    // compiled-in defaults. One button, because they are configured as a pair.
     using EndpointReset = void (*)();
 
     struct Config
@@ -140,9 +168,9 @@ namespace EnclosureUi
     //
     // Every callback is optional. Without status there is no /api/status; without
     // the PID callbacks the /api/pid routes answer 501; without manual there is
-    // no /api/manual; without setEndpoint there is no /api/octoprint. A board
-    // that wires up only part of this still serves the page, with the missing
-    // sections reporting why rather than failing silently.
+    // no /api/manual; without setEndpoint there is no /api/octoprint. A board that
+    // wires up only part of this still serves the page, with the missing sections
+    // reporting why rather than failing silently.
     void begin(const Config &cfg);
 
     // Handles one pending request. Call from loop(); returns immediately.

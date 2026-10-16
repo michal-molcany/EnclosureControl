@@ -152,6 +152,72 @@ copy include\octoprint_endpoint.example.h include\octoprint_endpoint.h
 ```
 
 `include/secrets.h` is git-ignored; only `include/secrets.example.h` is tracked.
+
+### The address and API key are editable at runtime
+
+Both are set **together**, from the web UI on port 8082, and verified with a
+`/api/version` probe before either is stored.
+
+`getOctoprintApiKey()` is the **fallback**, not the only place the key lives.
+Precedence is **stored override → `secrets.h`**, so you can leave it holding a
+placeholder and configure the real key in the browser — useful when the key
+changes often enough that recompiling is annoying, or when flashing a board for
+someone else. Leaving the key field blank on a submit keeps the key already in
+force, so an address-only change is still one step. The page shows which of the
+two is in force; *Reset both to firmware defaults* drops the overrides and puts
+`octoEndpoint.h` and `secrets.h` back in charge.
+
+They have to be one operation. Moving to a different OctoPrint server means a new
+address *and* a new key, and a probe can only use one stored value plus one
+candidate — so setting either half on its own tests it against the other half and
+fails. That would leave a moved server unreachable without a serial flash.
+
+The key is stored separately from the address on purpose: `octoEndpointClear()`
+wipes the whole `octoend` namespace, so sharing one would mean resetting the
+address silently discarded the key.
+
+Setting it in the page also sends it to the CYD, so the display stops holding its
+own compiled-in copy. That is a credential crossing the radio link, so both boards
+encrypt ESP-NOW with a shared LTK from `include/espnow_key.h` — see below for why
+that matters and what it still does not cover.
+
+### The ESP-NOW link key (LTK)
+
+A git-ignored header at the repo root, **shared with the CYD and required by both
+builds**:
+
+```text
+copy include\espnow_key.example.h include\espnow_key.h
+```
+
+ESP-NOW frames never pass through the access point, so WPA2 never protected them —
+with `peer.encrypt = false` every telemetry frame was plaintext on the air, which
+matters now that telemetry carries the OctoPrint API key. Both boards set
+`peer.encrypt = true` with the 16-byte key from that header.
+
+**If the two boards hold different keys the link is simply dead**, with no error
+anywhere, and it looks exactly like a channel split or a missing peer. Both boards
+therefore print `espnow encryption ON` at boot outside `SERIAL_DEBUG` — check that
+first when the link will not come up. Changing the key requires reflashing both
+boards.
+
+Generate it with `python -c "import secrets;print(secrets.token_bytes(16).hex())"`.
+See [`../include/espnow_key.example.h`](../include/espnow_key.example.h) for what
+link encryption does *not* protect: it is configured on the send side, so inbound
+command forgery is still possible.
+
+### The shared API token
+
+`ENC_API_TOKEN` in `include/enclosure_api.h` guards both this board's enclosure API
+(port 8081) and its browser page (port 8082). It is a bearer token sent in the
+clear on every request, so use a long random value:
+
+```text
+python -c "import secrets;print(secrets.token_hex(32))"
+```
+
+Changing it requires reflashing both boards, and the browser prompt asks for the
+new value.
 Never commit real credentials.
 
 WiFi credentials are not stored in `secrets.h`. The board opens a WiFiManager
