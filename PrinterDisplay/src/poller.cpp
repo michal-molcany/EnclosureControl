@@ -11,6 +11,11 @@
 
 namespace
 {
+    // Forward-declared because applyPendingEndpoint() below takes it to publish
+    // the address bookkeeping atomically for the UI reader, while its actual
+    // definition sits further down with the rest of the shared state.
+    SemaphoreHandle_t snapshotMutex = nullptr;
+
     secrets sec;
     OctoPrinter api(sec.getOctoprintApiKey(), OCTOPRINT_IP, OCTOPRINT_PORT);
 
@@ -127,16 +132,30 @@ namespace
         // for the whole session.
         currentKey = "";
         apiKeyOverridden = false;
-        if (octoPrefs.begin(OCTO_KEY_NS, true))
+        // Opened READ-WRITE, unlike the address namespace below. A read-only
+        // open of a namespace that does not exist yet fails with
+        // nvs_open failed: NOT_FOUND and logs an ESP_ERROR every boot - which is
+        // exactly the case here until the C3 first sends a key, since a board
+        // with no override never writes this namespace at all. Read-write creates
+        // it quietly and costs nothing.
+        if (octoPrefs.begin(OCTO_KEY_NS, false))
         {
-            const String stored = octoPrefs.getString(OCTO_KEY_KEY, "");
-            octoPrefs.end();
-            if (plausibleKey(stored.c_str()))
+            // isKey() first: getString() on an absent key logs
+            // "nvs_get_str len fail: apikey NOT_FOUND" at error level, which is
+            // exactly the state of a board the C3 has never sent a key to. The
+            // answer we want ("nothing stored") is not an error, so it should not
+            // be reported as one.
+            if (octoPrefs.isKey(OCTO_KEY_KEY))
             {
-                currentKey = stored;
-                apiKeyOverridden = true;
-                api.setApiKey(currentKey.c_str());
+                const String stored = octoPrefs.getString(OCTO_KEY_KEY, "");
+                if (plausibleKey(stored.c_str()))
+                {
+                    currentKey = stored;
+                    apiKeyOverridden = true;
+                    api.setApiKey(currentKey.c_str());
+                }
             }
+            octoPrefs.end();
         }
 
         if (octoPrefs.begin(OCTO_NS, true))
@@ -309,6 +328,29 @@ namespace
             return;
         pending = false;
 
+        // Held across the bookkeeping below, and released before the slow calls.
+        //
+        // pollerCopyOctoInfo() reads currentHost/currentPort/endpointOverridden
+        // from the UI task, and IPAddress is 4 bytes - so an unlocked read can
+        // splice two different addresses together and put a nonsense IP on the
+        // info screen. Cheap here: this runs at most once per *changed* value,
+        // not once per poll, and none of storeEndpoint()/setEndpoint() re-enter
+        // this mutex.
+        struct BookkeepingLock
+        {
+            SemaphoreHandle_t m;
+            explicit BookkeepingLock(SemaphoreHandle_t mutex) : m(mutex)
+            {
+                if (m)
+                    xSemaphoreTake(m, portMAX_DELAY);
+            }
+            ~BookkeepingLock()
+            {
+                if (m)
+                    xSemaphoreGive(m);
+            }
+        } bookKeeping(snapshotMutex);
+
         const IPAddress ip = pendingHost;
         const uint16_t port = pendingPort;
         const bool isZero = ((uint32_t)ip == 0) || port == 0;
@@ -354,7 +396,6 @@ namespace
         Serial.print(':');
         Serial.println(port);
     }
-    SemaphoreHandle_t snapshotMutex = nullptr;
     QueueHandle_t commandQueue = nullptr;
     PrinterSnapshot shared;
     volatile bool hasData = false;
@@ -551,6 +592,10 @@ namespace
         copy.lastLayerDuration = api.lastLayerDuration();
         copy.lastLayerDurationSeconds = api.lastLayerDurationSeconds();
         copy.valid = true;
+        // Stamped here, on the poll task, so it means "this task last had data at
+        // T" - not "the UI last copied it". That is what makes it usable as a
+        // staleness signal.
+        copy.updatedMs = millis();
         if (xSemaphoreTake(snapshotMutex, portMAX_DELAY) == pdTRUE)
         {
             shared = copy;
@@ -636,6 +681,28 @@ bool pollerCopySnapshot(PrinterSnapshot &out)
 bool pollerHasData()
 {
     return hasData;
+}
+
+bool pollerCopyOctoInfo(PollerOctoInfo &out)
+{
+    if (!snapshotMutex)
+        return false;
+    // Same mutex as the snapshot, and for the same reason: currentHost,
+    // currentPort, endpointOverridden, apiKeyOverridden and `shared` are all
+    // written by the poll task and read here from the UI task. Reading them
+    // directly would be an unsynchronised cross-task read of a multi-byte struct.
+    if (xSemaphoreTake(snapshotMutex, pdMS_TO_TICKS(20)) != pdTRUE)
+        return false;
+    out.host = currentHost;
+    out.port = currentPort;
+    out.endpointOverridden = endpointOverridden;
+    out.apiKeyOverridden = apiKeyOverridden;
+    out.printing = shared.printing;
+    out.paused = shared.paused;
+    out.valid = shared.valid;
+    out.lastUpdateMs = shared.updatedMs;
+    xSemaphoreGive(snapshotMutex);
+    return true;
 }
 
 void pollerSetEndpoint(IPAddress host, uint16_t port)

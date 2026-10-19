@@ -2,6 +2,7 @@
 #define ENCLOSURE_LINK_H
 
 #include <Arduino.h>
+#include <IPAddress.h>
 #include <enclosure_proto.h>
 
 // Live telemetry from EnclosureFanControl. Produced by the background link
@@ -56,6 +57,12 @@ struct EnclosureLinkStats
     uint8_t peerChannelReported = 0;        // channel the peer says it is on
     bool apiActive = false;                 // HTTP API fallback currently feeding telemetry
     unsigned long lastApiRxMs = 0;          // last telemetry accepted from the API
+    // Where the C3 was last resolved (mDNS, or the static fallback). Reported
+    // for the info screen: over ESP-NOW the peer has no IP at all, so this is
+    // also how the screen says "the API fallback has never resolved" instead of
+    // leaving the row blank. Meaningless unless apiHostKnown is set.
+    IPAddress apiHost;
+    bool apiHostKnown = false;
 };
 EnclosureLinkStats enclosureLinkStats();
 
