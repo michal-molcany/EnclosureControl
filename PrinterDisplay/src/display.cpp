@@ -1,6 +1,9 @@
 #include "display.h"
 
+#include <WiFi.h>
 #include <XPT2046_Touchscreen.h>
+
+#include "enclosure_version.h" // ENC_FW_VERSION_STR / ENC_PROTO_VERSION
 
 #include "enclosure_link.h"
 
@@ -393,11 +396,70 @@ namespace
 // through its parents: an unconditional handler here would also fire for a tap
 // on a file row and bounce the user out of the list they were choosing from.
 void filesPanelTouchEvent(lv_event_t *event)
-{
-    (void)event;
-    if (activeDisplay)
-        activeDisplay->filesPanelTouched();
-}
+    {
+        (void)event;
+        if (activeDisplay)
+            activeDisplay->filesPanelTouched();
+    }
+
+    // Tap box for the wifi-signal / info-screen gesture. x=270 is just left of the
+// first bar (275); y=26 clears the header separator at y=28.
+static constexpr lv_coord_t WIFI_TAP_X = 270;
+static constexpr lv_coord_t WIFI_TAP_Y = 26;
+
+// The info screen is opened by tapping the wifi signal in the header.
+//
+// Handled on the main CONTAINER with a coordinate test, rather than on a
+// transparent hit-area object sitting over the bars: it saves an LVGL object,
+// which is worth having on a board whose pool is capped at 60 KB. The cost is
+// that the handler sees every press on the main view, because LVGL bubbles
+// events from the touched child (the chamber/bed/tool/file panels) up through
+// its parents - so it must check WHERE the touch landed.
+//
+// PRESSED, not CLICKED: this is an entry gesture on a fixed target, and reading
+// the touch point is only reliable on the press.
+    void mainContainerTapEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) != LV_EVENT_PRESSED || !activeDisplay)
+            return;
+        // Only from the main view: on any other view the header is not shown, and
+        // a stray press should never summon a full-screen diagnostic.
+        if (activeDisplay->currentView() != Display::View::Main)
+            return;
+        lv_point_t point;
+        lv_indev_t *indev = lv_event_get_indev(event);
+        if (!indev)
+            return;
+        // Returns void in this LVGL, so there is no failure case to test.
+        lv_indev_get_point(indev, &point);
+        // The signal group: four 7 px bars at x=275..315, bottom-aligned to y=22.
+        // The box is deliberately looser than the bars themselves - 7 px is a
+        // fiddly target on a 320x240 panel - and stops short of the link icons at
+        // x=230 and x=252, which are left free for separate taps later.
+        if (point.x >= WIFI_TAP_X && point.x <= SCREEN_WIDTH && point.y < WIFI_TAP_Y)
+            activeDisplay->showInfoView();
+    }
+
+    // Back out of the info screen.
+    void infoBackEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->showMainView();
+    }
+
+    // Tap anywhere on the info screen also closes it.
+    //
+    // LV_EVENT_CLICKED, not the PRESSED that filesPanelTouchEvent uses, and the
+    // difference matters: this screen is a grid of labels with no draggable or
+    // interactive content, but a PRESSED handler also fires on the way into a
+    // scroll or a stray drag, so a finger resting on the glass would dismiss it
+    // before it had finished registering. LVGL suppresses CLICKED when a press
+    // turns into a scroll, which is exactly the behaviour wanted here.
+    void infoTapEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->closeInfoView();
+    }
 
     // ---- formatting for the file-info view -------------------------------
     //
@@ -746,15 +808,7 @@ void Display::splashScreen(String message)
     // repainting the screen background alone is not enough to make this opaque:
     // hide them while the splash is up. No-ops during boot, when they are still
     // null.
-    if (_mainContainer)
-        lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
-    if (_chamberContainer)
-        lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
-    if (_filesContainer)
-        lv_obj_add_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
-    for (size_t slot = 0; slot < kPreheatCount; ++slot)
-        if (_preheat[slot].container)
-            lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
+    hideAllViews();
     // A stale Yes must never fire after an OTA splash: dismiss the job confirm
     // while the splash is up. hideJobConfirm() is null-safe before createLabes().
     hideJobConfirm();
@@ -859,6 +913,7 @@ void Display::createLabes()
     _mainContainer = createViewContainer(false);
     _chamberContainer = createViewContainer(true);
     _filesContainer = createViewContainer(true);
+    _infoContainer = createViewContainer(true);
     for (size_t slot = 0; slot < kPreheatCount; ++slot)
         _preheat[slot].container = createViewContainer(true);
 
@@ -878,6 +933,20 @@ void Display::createLabes()
         lv_obj_set_style_bg_color(_wifiBars[index], color565(TFT_GREEN), 0);
         lv_obj_add_flag(_wifiBars[index], LV_OBJ_FLAG_HIDDEN);
     }
+
+    // The wifi-signal tap opens the info screen, handled on the MAIN CONTAINER
+    // rather than on a dedicated hit-area object: one fewer LVGL object, which on
+    // this board matters (see the note on the info view's pool budget).
+    //
+    // It has to be a coordinate test rather than "any tap on the container",
+    // because LVGL bubbles events from the touched child up through its parents -
+    // the chamber, bed, tool and file panels are all children of this container,
+    // so an unfiltered handler would open the info screen every time the user
+    // tapped a panel. mainContainerTapEvent() therefore checks where the touch
+    // actually landed.
+    lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_mainContainer, mainContainerTapEvent, LV_EVENT_PRESSED,
+                        nullptr);
 
     _encLinkIcon = lv_image_create(_mainContainer);
     lv_image_set_src(_encLinkIcon, &icon_c3);
@@ -1025,14 +1094,25 @@ void Display::createLabes()
     createPreheatView(PreheatKind::Tool, "Nozzle Preheat");
     createPreheatView(PreheatKind::Bed, "Bed Preheat");
     createFilesView();
+    createInfoView();
     createJobConfirm();
     showMainView();
     refreshChamberDetail();
     _isDrawn = true;
     setJobState(false, false);
-    Serial.printf("[HEAP] createLabes free=%u min=%u maxblock=%u lvglPool=%u lvglTest=%d\n",
+    // lvglPoolFree is the pool's FREE bytes, not LV_MEM_SIZE.
+//
+// It used to print the pool SIZE, which is a constant and therefore says nothing
+// about how much room is left - so the one number that matters when deciding
+// whether a new view fits was missing, and an over-large one looked fine right
+// up until lv_label_create() started returning NULL. free/total is what answers
+// "is there room for this".
+    lv_mem_monitor_t poolMon;
+    lv_mem_monitor(&poolMon);
+    Serial.printf("[HEAP] createLabes free=%u min=%u maxblock=%u lvglPool=%u/%u lvglTest=%d\n",
                   ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
-                  (unsigned)LV_MEM_SIZE, (int)lv_mem_test());
+                  (unsigned)poolMon.free_size, (unsigned)poolMon.total_size,
+                  (int)lv_mem_test());
 }
 
 void Display::createChamberView()
@@ -1351,18 +1431,445 @@ void Display::refreshPreheatDetail(PreheatKind kind)
         setLabelTextOnce(view.currentLabel, String(view.actual, 1) + " C");
 }
 
-void Display::showMainView()
+// Hides every view container. The single place that knows the full list, so a
+// new view cannot be added to some hide-lists and missed in others.
+//
+// Null-safe throughout: this is also called from the splash path during boot,
+// before createLabes() has created anything.
+// ---------------------------------------------------------------------------
+// Info screen
+//
+// ONE multi-line label, not one per row. The first version used a label and a
+// value per row (42 objects), which exhausted the 60 KB LVGL pool -
+// lv_label_create() began returning NULL and the board boot-looped. Values are
+// space-padded into the same string as their label instead, so alignment is
+// approximate (montserrat is not monospace) and the screen costs one object.
+// That is a deliberate trade for the board booting at all.
+//
+// TWELVE lines in THREE categories, separated by blank lines. The screen answers
+// three unrelated questions - what am I, can I reach the fan board, can I reach
+// the printer - and running them together as seven undifferentiated rows made it
+// read as a wall of text. Twelve 16 px lines under the title land at 212 px of
+// 240.
+//
+//   THIS BOARD - Firmware / Uptime / Address. What this board is.
+//   C3         - Link / Status.           Whether the fan board is reachable.
+//   OCTOPRINT  - Address / Status.        Whether the printer server is up.
+//
+// The blank separators cost no LVGL objects at all: extra newlines in one label
+// are extra blank lines, not extra widgets. That matters - see the pool note
+// above, where the object count is the binding constraint on this screen.
+//
+// Each category's two facts are ADDRESS and STATUS as separate rows rather than
+// one, because their lifetimes differ: an address is fixed at boot and never
+// changes, while the status is the thing you actually opened the screen to
+// check. Merged, the colour would end up reporting on the address.
+//
+// Headings and status values are COLOUR-CODED through LVGL's inline recolor
+// markup (lv_label_set_recolor) rather than by giving each its own label. A
+// second label per coloured row would be five more LVGL objects - the exact thing
+// that exhausted the pool here before - and recolor costs zero.
+//
+// Deliberately NOT on this screen: packet counters, drop reasons, BSSID,
+// channel, MACs, RSSI, and the C3's own IP. All of the diagnostics are on the
+// serial log at a 1 Hz heartbeat, which is where a number you need to compare
+// frame by frame belongs. A screen you tap while checking whether something works
+// should answer that in one look, not make you read twelve lines to find out.
+//
+// The MAC/BSSID pairing facts are not lost, just moved: the boot pairing screen
+// shows them when you are actually transcribing one into another board.
+//
+// Values are formatted into char buffers and handed to the label, never
+// assembled as Strings. This board's static DRAM has historically been ~800
+// bytes under its linker limit, and a diagnostic screen refreshed every tick is
+// exactly the place a per-frame String would quietly cost more than it looks.
+// ---------------------------------------------------------------------------
+
+// 16 px IS montserrat_14's own line height (lv_font_montserrat_14.c:
+// .line_height = 16), so rows butt up exactly as the font intends - there is no
+// descender saving being claimed here.
+static constexpr lv_coord_t kInfoLineH = 16;
+static constexpr lv_coord_t kInfoTop = 20; // under the title/back row
+static constexpr lv_coord_t kInfoLeftX = 2;
+// Rows the single block writes. Load-bearing: kInfoRows rows at kInfoLineH must
+// fit SCREEN_HEIGHT - kInfoTop, and this is the number to change when adding or
+// removing one.
+//
+// The count includes the BLANK separator lines between the three categories, not
+// just the data rows: 3 headers + 7 data rows + 2 blanks = 12. 12 * 16 + 20 =
+// 212 of 240 px.
+static constexpr size_t kInfoRows = 12;
+
+// Recolor command for lv_label_set_recolor(): '#', six hex digits, a space, the
+// text, then '#' again. The parser (lv_draw_label.c RECOLOR_CMD_STATE_*) consumes
+// all of it and never draws it - but it DOES consume buffer, which is why
+// kInfoBuf has to allow for it. A bare '#' inside a value is escaped by doubling
+// it ("##"), so a value containing one cannot be used here unescaped.
+#define INFO_RECOLOR_GREEN "#00FF00 "
+#define INFO_RECOLOR_RED "#FF4040 "
+// Amber for the three category headings: distinct from both the white data rows
+// and the green/red status values, so a heading never reads as a status.
+#define INFO_RECOLOR_HEAD "#FFB020 "
+#define INFO_RECOLOR_END "#"
+
+// Pixel x at which every value starts, so the column lines up on a real boundary
+// rather than on a character count.
+//
+// Montserrat is proportional: "WiFi" and "www" are four characters and four very
+// different widths, so the old "%-6s" padding lined the values up to WITHIN a few
+// pixels of each other and no further. That is why it looked ragged.
+//
+// The label is padded with spaces until MEASURED pixel width reaches this value.
+// The width comes from lv_font_get_glyph_width(), so it stays correct if the font
+// or its size ever changes - the alternative, hardcoding a character count, is
+// exactly the thing that drifts.
+//
+// Sized to the WIDEST label on the screen ("Firmware" = 70 px), not to a round
+// number: any label wider than this is dropped by infoPadLabel rather than
+// allowed to push its value out of the column.
+//
+// Grouping the rows into three categories let the labels shrink from
+// "Printer status" (99 px) to "Firmware" (70 px), which is what brought the
+// column back from 104 px to 78 - 26 px more room for every value, and the
+// widest value ("255.255.255.255:65535" = 149 px) still ends 87 px inside the
+// 314 px label.
+static constexpr lv_coord_t kInfoValueX = 78;
+
+// Width of `text` in pixels at the info font. Per-glyph, and LVGL applies
+// kerning via letter_next, so it matches what the label will actually draw.
+//
+// Only valid for the ASCII the rows use. A multi-byte character would be measured
+// per byte and come out wrong - acceptable here because every label and value on
+// this screen is ASCII, and a wrong-looking row is not a crash.
+static lv_coord_t infoTextWidth(const char *text)
 {
-    _view = View::Main;
+    lv_coord_t width = 0;
+    for (const char *p = text; *p; ++p)
+        width += lv_font_get_glyph_width(&lv_font_montserrat_14, (uint32_t)(uint8_t)*p, 0);
+    return width;
+}
+
+// Copies `label` into `out` and pads it with spaces until it is at least
+// kInfoValueX pixels wide. Shared by both row writers so a plain row and a
+// coloured one can never drift out of alignment with each other.
+//
+// Returns false if the label is too long to pad into `out` - in which case the
+// caller drops the row. A label wider than the column would silently push its
+// value right and break the alignment of every row below it.
+static bool infoPadLabel(char *out, size_t cap, const char *label)
+{
+    size_t len = 0;
+    for (const char *p = label; *p && len + 1 < cap; ++p)
+        out[len++] = *p;
+    out[len] = '\0';
+
+    // Track the width in a VARIABLE rather than re-measuring `out` each time.
+    //
+    // The obvious loop - "while (infoTextWidth(out) < kInfoValueX) out[len++] =
+    // ' ';" - is WRONG, and was: it appends a space and then measures a buffer
+    // whose NUL is still one position behind, so infoTextWidth() runs on past the
+    // end into uninitialized stack until it stumbles on a zero byte. The pad
+    // count then depended on whatever was on the stack that refresh, which is
+    // why the column visibly WOBBLED between updates instead of being
+    // consistently off.
+    lv_coord_t width = infoTextWidth(out);
+
+    // A label already at or past the column cannot be padded back, so it would
+    // overflow the column. Reject it rather than misalign the screen.
+    if (width >= kInfoValueX)
+        return false;
+
+    const lv_coord_t spaceW =
+        lv_font_get_glyph_width(&lv_font_montserrat_14, (uint32_t)' ', 0);
+    while (width + spaceW <= kInfoValueX && len + 1 < cap)
+    {
+        out[len++] = ' ';
+        width += spaceW;
+    }
+    out[len] = '\0';
+    return true;
+}
+
+// Appends one "label<pad>value" line, padding the label out to kInfoValueX.
+static void infoLine(char *buf, size_t n, const char *label, const char *value)
+{
+    // +2 for the '\n' and the NUL that snprintf always writes.
+    const size_t used = strnlen(buf, n);
+    if (used + 2 >= n)
+        return; // buffer full: drop the row rather than truncate mid-value
+    char padded[32];
+    if (!infoPadLabel(padded, sizeof(padded), label))
+        return;
+    snprintf(buf + used, n - used, "%s%s%s\n", used ? "" : "", padded,
+             value ? value : "-");
+}
+
+// As infoLine, but the VALUE is wrapped in an LVGL recolor command so a single
+// label can carry a red/green status. This is what makes the traffic-light rows
+// possible without a second LVGL object per row - the whole reason the screen
+// fits in the pool at all.
+//
+// Requires lv_label_set_recolor(_infoLabel, true), set in createInfoView().
+// text must NOT contain a bare '#' (see INFO_RECOLOR_END).
+static void infoStatusLine(char *buf, size_t n, const char *label,
+                           const char *color, const char *value)
+{
+    const size_t used = strnlen(buf, n);
+    // 2 for the '\n' and the NUL, plus the recolor wrapper is accounted for by
+    // the caller sizing kInfoBuf generously.
+    if (used + 2 >= n)
+        return;
+    char padded[32];
+    if (!infoPadLabel(padded, sizeof(padded), label))
+        return;
+    snprintf(buf + used, n - used, "%s%s%s%s" INFO_RECOLOR_END "\n",
+             used ? "" : "", padded, color, value ? value : "-");
+}
+
+static void infoBlockStart(char *buf, size_t n)
+{
+    buf[0] = '\0';
+}
+
+// Appends a category heading - NOT padded to the value column, because it is a
+// title for the rows under it, not a label in the table.
+//
+// Coloured so the three groups read as three groups even at a glance, and so the
+// white rows below them are visibly the data.
+static void infoHeader(char *buf, size_t n, const char *text)
+{
+    const size_t used = strnlen(buf, n);
+    if (used + 2 >= n)
+        return;
+    snprintf(buf + used, n - used, "%s" INFO_RECOLOR_HEAD "%s" INFO_RECOLOR_END
+             "\n", used ? "" : "", text);
+}
+
+// Appends a BLANK line, which is what separates one category from the next.
+//
+// Cheaper than it looks: a label with N rows and N-1 newlines renders the same
+// as one with extra empty lines between them, so grouping costs no extra LVGL
+// objects - only a few bytes of buffer and 16 px of vertical space each.
+static void infoGap(char *buf, size_t n)
+{
+    const size_t used = strnlen(buf, n);
+    if (used + 2 >= n)
+        return;
+    snprintf(buf + used, n - used, "\n");
+}
+
+void Display::createInfoView()
+{
+    lv_obj_t *parent = _infoContainer;
+
+    // No title label: the Back button already labels the screen. One fewer
+    // object for a word that changes never.
+    lv_obj_t *backButton = lv_button_create(parent);
+    lv_obj_set_size(backButton, 56, 18);
+    lv_obj_set_pos(backButton, SCREEN_WIDTH - 62, 0);
+    lv_obj_add_flag(backButton, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(backButton, infoBackEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *backLabel = lv_label_create(backButton);
+    if (backLabel)
+    {
+        lv_label_set_text(backLabel, "Back");
+        lv_obj_set_style_text_font(backLabel, &lv_font_montserrat_14, 0);
+        lv_obj_center(backLabel);
+    }
+
+    // ONE label for the whole screen. The allocation is guarded: an exhausted
+    // pool returns NULL, and handing that to lv_label_set_text() is what
+    // boot-looped this board before. A screen that comes up short is a cosmetic
+    // problem; a board that reboots forever is not.
+    _infoLabel = lv_label_create(parent);
+    if (!_infoLabel)
+    {
+        Serial.println("[UI] info view: LVGL pool exhausted, label missing");
+    }
+    else
+    {
+        lv_obj_set_pos(_infoLabel, kInfoLeftX, kInfoTop);
+        lv_obj_set_width(_infoLabel, SCREEN_WIDTH - kInfoLeftX - 4);
+        lv_obj_set_style_text_color(_infoLabel, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(_infoLabel, &lv_font_montserrat_14, 0);
+        // WRAP, not DOT: the rows are explicit '\n'-separated, and a long value
+        // (a BSSID, a MAC) must stay readable rather than being ellipsised away -
+        // comparing those by eye is the point of the screen.
+        lv_label_set_long_mode(_infoLabel, LV_LABEL_LONG_WRAP);
+        // Lets a single label carry red/green status text via the '#RRGGBB ..#'
+        // markup. Costs no extra LVGL object, which is the point - see the note
+        // on the info view's pool budget.
+        lv_label_set_recolor(_infoLabel, true);
+        lv_label_set_text(_infoLabel, "");
+    }
+
+    // Tap-anywhere-to-close, on the container itself. Attached once at creation
+    // and gated on _view inside the handler (see infoTapEvent) rather than
+    // added/removed on entry and exit, so it can never be left attached and fire
+    // against another view.
+    lv_obj_add_flag(parent, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(parent, infoTapEvent, LV_EVENT_CLICKED, nullptr);
+}
+
+void Display::showInfoView()
+{
+    if (!_mainContainer || !_infoContainer)
+        return;
+    _view = View::Info;
+    infoUpdate();
+    hideAllViews();
+    lv_obj_clear_flag(_infoContainer, LV_OBJ_FLAG_HIDDEN);
+}
+// "3d 04h", "4h 12m", "12m 03s" - coarse on purpose, so the width never jumps
+// between refreshes and pushes the value around.
+static void formatUptime(char *buf, size_t n)
+{
+    const unsigned long up = millis();
+    const unsigned long secs = up / 1000UL;
+    if (secs >= 86400UL)
+        snprintf(buf, n, "%lu d %02lu h", (unsigned long)(secs / 86400UL),
+                 (unsigned long)((secs % 86400UL) / 3600UL));
+    else if (secs >= 3600UL)
+        snprintf(buf, n, "%lu h %02lu m", (unsigned long)(secs / 3600UL),
+                 (unsigned long)((secs % 3600UL) / 60UL));
+    else
+        snprintf(buf, n, "%lu m %02lu s", (unsigned long)(secs / 60UL),
+                 (unsigned long)(secs % 60UL));
+}
+
+// millis() wraps every ~49.7 days. Ages are computed with a SIGNED difference so
+// a wrapped clock reads as "just now" rather than as a 49-day-old reading, which
+// is the failure the subtraction-order rule exists to prevent.
+static unsigned long ageMs(unsigned long since)
+{
+    return since == 0 ? 0UL : (unsigned long)((int32_t)(millis() - since));
+}
+
+// Dotted-quad for either board's address. IPAddress deliberately gets its own
+// rather than reusing a MAC formatter: it is FOUR octets, and the MAC helper
+// reads six - so passing it one would read two bytes past the object and print a
+// plausible-looking trailing pair.
+static void infoAddr(const IPAddress &ip, char *buf, size_t n)
+{
+    snprintf(buf, n, "%u.%u.%u.%u", (unsigned)ip[0], (unsigned)ip[1],
+             (unsigned)ip[2], (unsigned)ip[3]);
+}
+
+// How stale an OctoPrint reading may get before the row says Offline.
+//
+// Ten poll cycles at API_REFRESH_TIME (3 s). Generous on purpose: OctoPrint is
+// slow to answer while a large slice is being requested, and a row that flickers
+// red mid-print is worse than one that takes a few seconds to admit a real
+// outage. It is still well inside the window where "unreachable" and "idle" have
+// to be told apart, which is the whole reason this threshold exists.
+static constexpr unsigned long kOctoStaleMs = 30000UL;
+
+void Display::infoUpdate()
+{
+    // Cheap no-op unless this screen is up. Called from the UI tick, so without
+    // this it would repaint labels behind whatever view the user is actually on.
+    if (_view != View::Info || !_infoContainer)
+        return;
+
+    // Long enough for the widest value on the screen ("255.255.255.255:65535" = 21),
+    // plus headroom so a longer hostname or version string is never truncated -
+    // a truncated status row reads as a real value, which is worse than a short
+    // one.
+    char value[48];
+    PollerOctoInfo octo = {};
+    const bool haveOcto = pollerCopyOctoInfo(octo);
+    const EnclosureLinkStats link = enclosureLinkStats();
+
+    infoBlockStart(_infoText, sizeof(_infoText));
+
+    // Three CATEGORIES, separated by a blank line. The screen answers three
+    // unrelated questions - what am I, can I reach the fan board, can I reach the
+    // printer - and running them together as seven undifferentiated rows made it
+    // read as a wall. Grouping them costs two blank lines and no extra objects.
+    //
+    // Grouping is also what bought the narrower label column: inside a group the
+    // label can be the short form ("Address", not "This board" / "OctoPrint"),
+    // which drops the widest label from 99 px to 70 px.
+    infoHeader(_infoText, sizeof(_infoText), "THIS BOARD");
+    snprintf(value, sizeof(value), "v" ENC_FW_VERSION_STR " proto %d",
+             (int)ENC_PROTO_VERSION);
+    infoLine(_infoText, sizeof(_infoText), "Firmware", value);
+    formatUptime(value, sizeof(value));
+    infoLine(_infoText, sizeof(_infoText), "Uptime", value);
+    infoAddr(WiFi.localIP(), value, sizeof(value));
+    infoLine(_infoText, sizeof(_infoText), "Address", value);
+
+    infoGap(_infoText, sizeof(_infoText));
+    infoHeader(_infoText, sizeof(_infoText), "C3  (enclosure fan board)");
+
+    // Two rows, because "which transport" and "is it working" are separate
+    // questions and merging them hides one when the other is fine. The counters
+    // and drop reasons are gone: they are on the serial log at 1 Hz, which is
+    // where you compare them frame by frame.
+    const bool linkUp = link.apiActive || link.lastRxMs != 0;
+    infoLine(_infoText, sizeof(_infoText), "Link",
+             linkUp ? (link.apiActive ? "HTTP API" : "ESP-NOW radio")
+                    : "not connected");
+    infoStatusLine(_infoText, sizeof(_infoText), "Status",
+                   linkUp ? INFO_RECOLOR_GREEN : INFO_RECOLOR_RED,
+                   linkUp ? "online" : "offline");
+
+    infoGap(_infoText, sizeof(_infoText));
+    infoHeader(_infoText, sizeof(_infoText), "OCTOPRINT");
+
+    // Same split as the C3 group: the address never changes but the reachability
+    // does, and a single row forces one colour onto both facts.
+    //
+    // Offline is decided by FRESHNESS, not by the poll's own valid flag: the poll
+    // task keeps republishing the last good values after OctoPrint stops
+    // answering, so a printer that has gone away still looks perfectly fine
+    // without this check. The threshold is generous on purpose - three missed
+    // polls on a busy print (API_REFRESH_TIME is 3 s) should not flicker the row
+    // red mid-job.
+    const unsigned long octoAge = ageMs(haveOcto ? octo.lastUpdateMs : 0);
+    const bool octoOnline =
+        haveOcto && octo.valid && octo.lastUpdateMs != 0 &&
+        octoAge < kOctoStaleMs;
+    if (haveOcto && octo.host.toString().length())
+    {
+        const String host = octo.host.toString();
+        snprintf(value, sizeof(value), "%s:%u", host.c_str(), (unsigned)octo.port);
+    }
+    else
+    {
+        snprintf(value, sizeof(value), "not configured");
+    }
+    infoLine(_infoText, sizeof(_infoText), "Address", value);
+    infoStatusLine(_infoText, sizeof(_infoText), "Status",
+                   octoOnline ? INFO_RECOLOR_GREEN : INFO_RECOLOR_RED,
+                   octoOnline ? "online" : "offline");
+
+    // ONE set_text for the whole screen, not one per row: twelve lines, one call.
+    if (_infoLabel)
+        lv_label_set_text(_infoLabel, _infoText);
+}
+
+void Display::hideAllViews()
+{
     if (_mainContainer)
-        lv_obj_clear_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
     if (_chamberContainer)
         lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
     if (_filesContainer)
         lv_obj_add_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
+    if (_infoContainer)
+        lv_obj_add_flag(_infoContainer, LV_OBJ_FLAG_HIDDEN);
     for (size_t slot = 0; slot < kPreheatCount; ++slot)
         if (_preheat[slot].container)
             lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
+}
+
+void Display::showMainView()
+{
+    _view = View::Main;
+    hideAllViews();
+    if (_mainContainer)
+        lv_obj_clear_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
 }
 
 void Display::showToolView()
@@ -1382,14 +1889,7 @@ void Display::showPreheatView(PreheatKind kind)
         return;
     _view = preheatView(kind);
     refreshPreheatDetail(kind);
-    lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
-    if (_chamberContainer)
-        lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
-    if (_filesContainer)
-        lv_obj_add_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
-    for (size_t other = 0; other < kPreheatCount; ++other)
-        if (_preheat[other].container)
-            lv_obj_add_flag(_preheat[other].container, LV_OBJ_FLAG_HIDDEN);
+    hideAllViews();
     lv_obj_clear_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -1399,9 +1899,7 @@ void Display::showChamberView()
         return;
     _view = View::Chamber;
     refreshChamberDetail();
-    lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
-    if (_filesContainer)
-        lv_obj_add_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
+    hideAllViews();
     lv_obj_clear_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
     Serial.printf("[HEAP] chamber open free=%u min=%u maxblock=%u lvglTest=%d\n",
                   ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
@@ -1633,12 +2131,7 @@ void Display::showFilesView()
         return;
     _view = View::Files;
     refreshFilesDetail();
-    lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_HIDDEN);
-    if (_chamberContainer)
-        lv_obj_add_flag(_chamberContainer, LV_OBJ_FLAG_HIDDEN);
-    for (size_t slot = 0; slot < kPreheatCount; ++slot)
-        if (_preheat[slot].container)
-            lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
+    hideAllViews();
     lv_obj_clear_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
     // Coming back from the details panel: put the list and its buttons back and
     // hide the panel. Done here rather than in showFileInfo() so there is exactly

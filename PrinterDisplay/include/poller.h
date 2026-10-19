@@ -29,6 +29,10 @@ struct PrinterSnapshot
     String lastLayerDuration;
     int lastLayerDurationSeconds = 0;
     bool valid = false;
+    // When this snapshot was published. Lets a reader tell fresh data from
+    // stale, which "valid" alone cannot: the poll task keeps republishing the
+    // last good values when OctoPrint stops answering, so valid stays true.
+    unsigned long updatedMs = 0;
 };
 
 // Starts the poll task and its sync primitives. Returns immediately.
@@ -40,6 +44,36 @@ bool pollerCopySnapshot(PrinterSnapshot &out);
 
 // True once at least one poll cycle has published data.
 bool pollerHasData();
+
+// Lightweight, mutex-protected view of the poll task's state, for the info
+// screen. Deliberately NOT a PrinterSnapshot: that one carries six Strings, and
+// the UI only needs a handful of scalars to say "what is this board pointed at,
+// and is the data any good".
+//
+// SCALARS ONLY, no String members. Static DRAM on this board is historically
+// ~800 bytes under its linker limit (see the FileListCache note above), so a
+// struct that grew a String per field would be the wrong trade for a read-only
+// diagnostic view.
+//
+// lastUpdateMs is when the last snapshot was published, which is the only way
+// to tell "OctoPrint is idle" from "OctoPrint stopped answering". Without it a
+// stale board and a quiet printer look identical, which is the single most
+// common reason this screen is opened.
+struct PollerOctoInfo
+{
+    IPAddress host;
+    uint16_t port = 0;
+    bool endpointOverridden = false;  // address came from the C3, not const.h
+    bool apiKeyOverridden = false;    // key came from the C3, not secrets.h
+    bool printing = false;
+    bool paused = false;
+    bool valid = false;         // at least one poll has ever succeeded
+    unsigned long lastUpdateMs = 0; // 0 until the first publish
+};
+
+// Copies the above under the snapshot mutex. Returns false if the mutex was busy
+// (skip this refresh and try again), exactly like pollerCopySnapshot().
+bool pollerCopyOctoInfo(PollerOctoInfo &out);
 
 // Repoints the poll task at a different OctoPrint server, and stores it in NVS
 // so it survives a power cycle.

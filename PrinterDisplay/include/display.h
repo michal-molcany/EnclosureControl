@@ -21,7 +21,8 @@ public:
         Tool,
         Bed,
         Files,
-        FileInfo
+        FileInfo,
+        Info
     };
 
     // Targets that get their own preheat screen, reached by tapping the
@@ -80,6 +81,19 @@ public:
     // dimensions, filament, print history). Reads the same listing the rows were
     // built from, so it is immediate and costs no request.
     void showFileInfo();
+    // Diagnostic screen, reached by tapping the wifi signal in the header.
+    // Reports what this board is: firmware, uptime, network, which transport is
+    // carrying the C3 link, and what OctoPrint it is pointed at - the four
+    // things that are otherwise only visible over a serial cable.
+    void showInfoView();
+    // Closes the info screen back to the main view. Separate from showMainView()
+    // only so the tap-anywhere handler and the Back button share one path.
+    void closeInfoView() { showMainView(); }
+    // Repaint the open info screen. Cheap and idempotent, so it is safe to call
+    // every UI tick; it returns immediately unless the info view is showing, so
+    // nothing repaints behind another view. Uptime has to tick, and a screen
+    // that only read its values once would be a screenshot rather than a status.
+    void infoUpdate();
     // A touch anywhere on the details panel. Returns to the list, but ONLY while
     // the panel is showing - see the note on the implementation, which explains
     // why that guard is load-bearing rather than tidy.
@@ -176,6 +190,37 @@ private:
     void createChamberView();
     void createPreheatView(PreheatKind kind, const char *title);
     void createFilesView();
+    // Info screen. ONE multi-line label, not one object per row.
+//
+// The LVGL pool is capped at 60 KB by the .dram0.bss linker region and cannot
+// grow (96 KB fails to link), so it - not DRAM in general - is the binding
+// constraint on adding UI. The first version used a label and a value per row
+// (42 objects), which exhausted it: lv_label_create() returned NULL and the board
+// boot-looped on a NULL dereference.
+//
+    // So the screen is a SINGLE multi-line label, with every row's text appended
+    // into a static char buffer and handed over in one lv_label_set_text() per
+    // refresh. One object.
+    //
+    // kInfoRows is load-bearing against SCREEN_HEIGHT: rows * 16 px + 20 px top
+    // must fit 240 px. The field list is triaged to fit that rather than to show
+    // everything possible - the full triage rationale lives in display.cpp.
+    static constexpr size_t kInfoRows = 12;
+    // Sized for the worst case INCLUDING three things that cost bytes but no
+    // pixels: the label padding to kInfoValueX (up to 11 space characters on
+    // "Link"), the recolor markup, which the label consumes but never draws
+    // ('#' + 6 hex + ' ' + '#' = 9 bytes per coloured row - three headings and
+    // two status rows), and the two blank separator lines.
+    //
+    // Generous on purpose: per infoLine(), overflow DROPS the trailing row rather
+    // than truncating mid-value, so running short would lose whole rows.
+    static constexpr size_t kInfoBuf = 400;
+    void createInfoView();
+    // Hides every view container. One place, called by every show*View(), so a
+    // view cannot be added to some hide-lists and missed in others - which is
+    // exactly how showChamberView came to leave the preheat containers visible
+    // underneath it while the same hide-list was repeated by hand in five places.
+    void hideAllViews();
     void showPreheatView(PreheatKind kind);
     void createJobConfirm();
     void refreshPreheatDetail(PreheatKind kind);
@@ -241,6 +286,13 @@ private:
     View _view = View::Main;
     lv_obj_t *_mainContainer = nullptr;
     lv_obj_t *_chamberContainer = nullptr;
+    // Info view widgets. Created once in createInfoView(); only the label's text
+    // changes afterwards, so opening the screen never mallocs in steady state -
+    // the same reasoning as the file list's recycled row pool, and for the same
+    // LVGL-pool reason.
+    lv_obj_t *_infoContainer = nullptr;
+    lv_obj_t *_infoLabel = nullptr;
+    char _infoText[kInfoBuf] = {0};
     PreheatView _preheat[kPreheatCount];
     PreheatAction _preheatAction[kPreheatCount] = {};
     // Printable-files view widgets. Rows are a fixed pool of clickable

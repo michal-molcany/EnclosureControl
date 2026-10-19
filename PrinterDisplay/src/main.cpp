@@ -113,6 +113,11 @@ void octoPrintUpdate()
     disp.jobUpdate(snapshot);
     disp.setJobState(snapshot.printing || snapshot.paused, snapshot.paused);
     disp.filesUpdate();
+    // The info screen repaints itself, and only itself: infoUpdate() returns
+    // immediately unless that view is showing, so this costs nothing while the
+    // user is anywhere else. Uptime and the data ages have to keep moving, or
+    // the screen would be a snapshot rather than a status.
+    disp.infoUpdate();
 
     // Enclosure link: feed live louvre/fan telemetry into the chamber view
     // (throttled to 1 Hz; stale data is greyed out by the view itself).

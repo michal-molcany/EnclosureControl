@@ -819,6 +819,8 @@ EnclosureLinkStats enclosureLinkStats()
     s.peerChannelReported = peerDiscChannel;
     s.apiActive = apiActive;
     s.lastApiRxMs = lastApiRxMs;
+    s.apiHost = apiHost;
+    s.apiHostKnown = apiHostKnown;
     return s;
 }
 

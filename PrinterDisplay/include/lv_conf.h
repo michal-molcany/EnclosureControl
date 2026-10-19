@@ -21,6 +21,19 @@
 
 /* ---- Memory ---- */
 #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
+/* 60 KB, and it is NOT RAISABLE. This sits in the ESP32's .dram0.bss segment,
+ * which the linker refuses to exceed: 96 KB fails with
+ *   region `dram0_0_seg' overflowed by 34000 bytes
+ * so the headroom above 60 KB is about 2 KB, not 36.
+ *
+ * The pool is therefore the binding constraint on adding UI, not DRAM in general.
+ * Adding the info screen as 24 individual labels exhausted it - lv_label_create()
+ * began returning NULL and the board boot-looped on a NULL dereference. It is
+ * built from THREE multi-line labels instead, which costs 3 objects.
+ *
+ * The board logs pool headroom at boot:
+ *   [HEAP] createLabes free=... lvglPool=<free bytes> lvglTest=<corruption>
+ * Watch that number when adding widgets. */
 #define LV_MEM_SIZE (60U * 1024U)
 
 /* ---- Widgets actually used ---- */
@@ -43,6 +56,25 @@
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_20 1
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
+
+/* DO NOT SET LV_DRAW_SW_COMPLEX TO 0 - it corrupts every rounded panel.
+ *
+ * Tempting for flash (0 drops ~16 KB by removing the shadow/blur/transform
+ * paths), but it is NOT only about those paths. In lv_draw_sw_mask.h it also
+ * selects:
+ *     #if LV_DRAW_SW_COMPLEX
+ *     #  define LV_MASK_MAX_NUM 16      // simultaneous mask slots
+ *     #else
+ *     #  define LV_MASK_MAX_NUM 1       // ONE slot
+ *     #endif
+ * and lv_draw_sw_border.c draws a rounded border from TWO radius masks at once
+ * (mask_rin + mask_rout, mask_list[0] and [1]). With a single slot the second
+ * mask has nowhere to go, so the border renders from an uninitialised mask
+ * buffer - which is the speckled white/pink noise that filled every panel body
+ * on the main view. Confirmed on hardware 2026-10-19.
+ *
+ * This UI rounds its panels (createPanel sets radius 3), so it needs the
+ * complex path. The flash has to come from somewhere else. */
 
 /* ==========================================================================
    Everything below is unused by this UI.
