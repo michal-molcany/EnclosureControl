@@ -9,6 +9,7 @@ Run:  python tools/build_package.py
 """
 
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -18,9 +19,25 @@ ROOT = os.path.dirname(HERE)
 PKG = os.path.join(ROOT, "octoprint_enclosure_fan")
 DIST = os.path.join(ROOT, "dist")
 
-# Must match plugin_version in setup.py - the archive filename is cosmetic, but
-# keeping them equal means a built zip is identifiable by name alone.
-VERSION = "0.3.5"
+
+def read_version():
+    """Take the version from setup.py instead of keeping a second copy here.
+
+    A duplicated version is not cosmetic: the archive NAME is what the Plugin
+    Manager's update check compares, so a stale copy here ships a zip that is
+    labelled 0.3.5, installs 0.3.6 code, and never looks like an update. (That
+    had already happened once: this file still said 0.3.4 while setup.py said
+    0.3.5.) Reading one source of truth makes the two impossible to disagree.
+    """
+    with open(os.path.join(ROOT, "setup.py"), encoding="utf-8") as handle:
+        match = re.search(r'^plugin_version\s*=\s*"([^"]+)"', handle.read(),
+                          re.MULTILINE)
+    if not match:
+        raise SystemExit("plugin_version not found in setup.py")
+    return match.group(1)
+
+
+VERSION = read_version()
 NAME = "OctoPrint-EnclosureFan"
 
 # Everything the installed package needs. __pycache__ is excluded deliberately:

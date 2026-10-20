@@ -59,17 +59,30 @@ every poll, so the controls return on their own once the CYD drops off.
 1. In OctoPrint: **Settings → Plugin Manager → Install from URL**
 2. Paste the URL of `OctoPrint-EnclosureFan-<version>.zip` and install
 3. **Restart OctoPrint** (required)
-4. Open **Settings → Enclosure Fan Control** and set:
+4. Open **Settings → Enclosure-Fan-Control** and set:
    - **Board address** — `enclosure-fan-control.local` (default), or an IP
    - **Port** — `8082`
    - **API token** — `ENC_API_TOKEN` from the firmware's `include/enclosure_api.h`
+5. Press **Test connection**. It probes what is currently typed, unsaved, and says
+   which of the four things went wrong: unreachable, wrong port, token rejected,
+   or connected (and then shows the firmware version).
 
 The username is fixed at `Enclosure` by the plugin. It is not a placeholder:
 `WebServer::authenticate()` base64-encodes `"user:password"` and compares the
 whole header, so the username is part of the credential.
 
 The token is stored in OctoPrint's `config.yaml`, which is not in version control.
-It is deliberately **not** defaulted in the plugin source.
+It is deliberately **not** defaulted in the plugin source. It is also never sent
+back to the browser: the settings API masks it, so an empty token box after a
+reload means "a token is set", and saving with the box empty keeps the stored one.
+
+## Troubleshooting
+
+**The tab is empty / says the credentials were rejected.** Check the port first.
+8082 is the status API; **8081 is the CYD's channel** and uses a different
+username, so it answers and rejects the plugin's credentials — the symptom looks
+exactly like a wrong token. 8080 is the OTA uploader. *Test connection* in the
+settings dialog distinguishes the two.
 
 ## Known limitations
 
@@ -93,6 +106,8 @@ tools/build_package.py      # builds dist/OctoPrint-EnclosureFan-<v>.zip
 ```
 
 `selftest_plugin.py` covers the CYD-link gate, input validation, poller recovery
-from transient failures, and behaviour against a dead board — plus a live check
+from transient failures, behaviour against a dead board, the token round-trip
+through a settings save, the connection-test classifications, and the two
+front-end wiring mistakes that once made the page look dead — plus a live check
 against the real C3 when one is reachable. It needs no OctoPrint installed: it
 stubs `octoprint.plugin` and drives the real plugin class.

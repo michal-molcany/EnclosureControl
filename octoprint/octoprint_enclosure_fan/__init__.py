@@ -36,6 +36,7 @@
 # answer instead of waiting for the next poll.
 
 import threading
+import time
 
 import flask
 import octoprint.plugin
@@ -65,6 +66,10 @@ POLL_INTERVAL_S = 1.0
 # How long a request may take before it is reported as a failure rather than left
 # hanging. Generous for a LAN board; the point is to bound the wait.
 REQUEST_TIMEOUT_S = 6.0
+
+# The settings dialog's "Test connection" button has someone watching it, so it
+# gives up sooner than the background poller would.
+TEST_TIMEOUT_S = 5.0
 
 
 class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
@@ -108,16 +113,58 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
 
     def get_settings_restricted_paths(self):
         # Mark the token sensitive so it is masked rather than echoed by the
-        # settings API.
-        return dict(token=[["token"]])
+        # settings API. "never" is a DOCUMENTED level and is what was meant all
+        # along: an earlier version used the key "token", which is not a level at
+        # all, and an unknown key falls back to `conditions.get(level, False)` -
+        # i.e. it happened to mask the token by accident and would have kept
+        # masking it even for admins if the fallback ever changed.
+        return dict(never=[["token"]])
 
     def on_settings_save(self, data):
+        data = dict(data or {})
+
+        # `token` is masked to None on read (get_settings_restricted_paths above),
+        # so the settings dialog posts None back whenever the field was not
+        # retyped. SettingsPlugin.on_settings_save MERGES the incoming dict over
+        # the stored values - None is a value, not an omission - so passing it
+        # through would overwrite a perfectly good token with null and leave the
+        # board answering 401. Dropping the key leaves the stored token alone,
+        # which is also what the field's "leave blank to keep" help text promises.
+        if not data.get("token"):
+            data.pop("token", None)
+
+        # Normalise what the form sends. A Knockout `value` binding on an
+        # <input type="number"> hands back a STRING, and persisting port as
+        # "8082" alongside an integer default is the kind of type drift that
+        # works until something compares it by identity.
+        if "host" in data:
+            data["host"] = str(data["host"] or "").strip()
+        if "port" in data:
+            try:
+                data["port"] = int(data["port"])
+            except (TypeError, ValueError):
+                data.pop("port", None)
+
         octoprint.plugin.SettingsPlugin.on_settings_save(self, data)
+
         # Rebuild the client and poll at once: someone who just fixed the host or
         # pasted a token should not sit through the old failure state first.
         self._build_client()
         if self._thread is not None and self._thread.is_alive():
             self._refresh()
+
+        # Log that the save arrived, and with what. A settings page that silently
+        # discards input is invisible otherwise: nothing in OctoPrint's log says
+        # "settings received", so there is no way to tell a broken save from a
+        # save that never happened. The token is reported as set/unset, never
+        # echoed - this log is world-readable through the Logging plugin.
+        self._logger.info(
+            "settings saved: host=%r port=%r token=%s poll=%s",
+            self._client.host if self._client else None,
+            self._client.port if self._client else None,
+            "set" if (self._client and self._client.token) else "unset",
+            self._settings.get(["poll"]) is not False,
+        )
 
     def _build_client(self):
         # NOTE: SettingsPlugin hands back a wrapper whose get() takes exactly ONE
@@ -189,11 +236,24 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
     # SimpleApiPlugin - the endpoints the tab calls
     # ------------------------------------------------------------------ #
 
+    def is_api_protected(self):
+        # OctoPrint 1.11.2 added this and warns every start-up about plugins that
+        # leave it at the default. The default is False today and will become
+        # True. Declaring it is not cosmetic: these commands drive real hardware,
+        # so an anonymous request must not reach them. Any authenticated user may
+        # use the tab; it is not admin-only, because operating the enclosure is
+        # the same class of action as pressing a control in the Control tab.
+        return True
+
     def get_api_commands(self):
         return dict(
             # Reads the cache. Does NOT touch the board, so it is instant and
             # cannot fail for network reasons; a dead board is reported ok=false.
             status=dict(),
+            # Probes the board ONCE with values that may not be saved yet, so the
+            # settings dialog can tell a typo from a firewall before the user
+            # commits them. Never reads or writes the cache.
+            test=dict(),
             setpid=dict(parameters=[
                 dict(name="kp", type="number", optional=False),
                 dict(name="ki", type="number", optional=False),
@@ -222,6 +282,7 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
         """
         handlers = {
             "status": self.on_status,
+            "test": self.on_test,
             "setpid": self.on_setpid,
             "savepid": self.on_savepid,
             "defaultpid": self.on_defaultpid,
@@ -244,6 +305,159 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
 
     def on_status(self, data):
         return self._snapshot()
+
+    # ------------------------------------------------------------------ #
+    # "Test connection" - the validation the settings page needs
+    # ------------------------------------------------------------------ #
+
+    def on_test(self, data):
+        """Check one host/port/token triple against the live board and explain.
+
+        Deliberately separate from the poller. It has to test what the user is
+        LOOKING AT, which may not be saved yet, and it has to be able to say "the
+        token is wrong" rather than leave that to be inferred from a banner that
+        only ever says the board is offline.
+
+        The token is masked on read, so the form cannot send it back. Any field
+        that arrives empty therefore falls back to the saved setting - which is
+        also why the field is documented as "leave blank to keep the current
+        token".
+        """
+        data = data or {}
+
+        host = str(data.get("host") or "").strip()
+        if not host:
+            host = str(self._settings.get(["host"]) or "").strip()
+
+        raw_port = data.get("port")
+        if raw_port in (None, ""):
+            raw_port = self._settings.get(["port"])
+        try:
+            port = int(raw_port or 8082)
+        except (TypeError, ValueError):
+            raise CommandFailed(
+                "Port must be a number - 8082 is the board's status API - got "
+                "{0!r}".format(raw_port))
+
+        token = str(data.get("token") or "").strip()
+        if not token:
+            token = str(self._settings.get(["token"]) or "")
+
+        if not host:
+            raise CommandFailed(
+                "Enter the board's address first - an IP such as 10.201.93.245, "
+                "or its .local name.")
+        if not 1 <= port <= 65535:
+            raise CommandFailed("Port must be between 1 and 65535, got {0}".format(port))
+
+        client = C3Client(host=host, port=port, token=token, timeout=TEST_TIMEOUT_S)
+        started = time.time()
+        tested = {"host": host, "port": port, "tokenProvided": bool(token)}
+
+        try:
+            status = client.get_status()
+        except C3Error as err:
+            return {
+                "ok": False,
+                "kind": err.kind,
+                "error": str(err),
+                "hint": self._test_hint(err.kind, host, port, bool(token),
+                                        status=err.status),
+                "tested": tested,
+                "elapsed": round(time.time() - started, 2),
+            }
+
+        # JSON that parses but has none of the status document's keys is some
+        # OTHER service on that port. Reporting "connected" there would be a lie
+        # that costs an hour to unpick, so check for the fields every firmware
+        # since 0.1 has sent.
+        missing = [key for key in ("fw", "chamber") if key not in status]
+        if missing:
+            return {
+                "ok": False,
+                "kind": "wrong_board",
+                "error": "Something answered at {0}:{1}, but not with the "
+                         "enclosure status document (no {2}).".format(
+                             host, port, " or ".join(missing)),
+                "hint": self._test_hint("wrong_board", host, port, bool(token)),
+                "tested": tested,
+                "elapsed": round(time.time() - started, 2),
+            }
+
+        fw = status.get("fw") or "unknown"
+        reported = status.get("ip") or host
+        message = "Connected to the board at {0} (firmware {1}).".format(reported, fw)
+        if status.get("remote"):
+            message += (" The CYD is linked, so manual control stays disabled "
+                        "while it is plugged in.")
+
+        return {
+            "ok": True,
+            "kind": "connected",
+            "message": message,
+            "error": None,
+            "hint": None,
+            "fw": fw,
+            "ip": reported,
+            "cydLinked": bool(status.get("remote")),
+            "chamber": status.get("chamber"),
+            "chamberValid": bool(status.get("chamberValid")),
+            "status": status,
+            "tested": tested,
+            "elapsed": round(time.time() - started, 2),
+        }
+
+    def _test_hint(self, kind, host, port, token_given, status=None):
+        """Turn a failure kind into the one sentence that fixes it.
+
+        Port 8081 is called out explicitly because it is the mistake that
+        actually happened: it is a real HTTP API on the same board, it answers,
+        and what it says depends on the credentials. With a wrong token it is a
+        401 (looks like a bad token); with the right one it is a 404 for
+        /api/status (looks like the board is broken). Neither is about the token.
+        """
+        if kind == "auth":
+            if port != 8082:
+                return ("The board answered on port {0}, but that is not this API. "
+                        "Use 8082: 8081 is the CYD's channel and expects a "
+                        "different username, 8080 is the OTA uploader.").format(port)
+            if not token_given:
+                return ("No API token is set. Paste the ENC_API_TOKEN value from the "
+                        "firmware's include/enclosure_api.h.")
+            return ("The token was refused. Copy ENC_API_TOKEN again from "
+                    "include/enclosure_api.h - if the board was re-flashed with a "
+                    "new token, the old one no longer works.")
+
+        if kind == "dns":
+            return ("The name '{0}' did not resolve. mDNS (.local) is often blocked "
+                    "on managed networks - use the board's IP address "
+                    "instead.").format(host)
+
+        if kind == "http":
+            if status == 404:
+                return ("The board answered 404 for /api/status on port {0} - that "
+                        "port serves something else. Use 8082.").format(port)
+            return ("The board answered HTTP {0}. That is not an authentication "
+                    "failure, so the address is right and the port is probably "
+                    "wrong: the status API is on 8082.").format(status)
+
+        if kind == "refused":
+            if port == 8081:
+                return ("Port 8081 is the CYD's machine channel, not this API. "
+                        "Use 8082.")
+            return ("Nothing is listening on port {0}. The board serves its status "
+                    "API on 8082 - check the port, and that this is not the OTA "
+                    "port 8080.").format(port)
+
+        if kind == "timeout":
+            return ("The board accepted the connection but did not answer in time. "
+                    "It may be rebooting; try again in a few seconds.")
+
+        if kind in ("empty", "not_json", "not_object", "wrong_board"):
+            return ("Something answered on port {0}, but it is not the enclosure "
+                    "API. Use port 8082.").format(port)
+
+        return ""
 
     def _write(self, action):
         """Run one board write and fold its returned status into the cache.
@@ -319,6 +533,15 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
         # No stock bundle: this tab needs neither jQuery nor Bootstrap, and
         # OctoPrint already provides the Knockout the 1.x templates bind with.
         return dict(js=["js/enclosure_fan.js"], css=["css/enclosure_fan.css"])
+
+    def is_template_autoescaped(self):
+        # Both templates are static HTML: they interpolate no Jinja variables at
+        # all (all live data arrives through Knockout bindings), so enabling
+        # autoescape cannot change what they render. Declaring it stops the
+        # start-up warning and keeps the plugin working when 1.13 makes
+        # autoescaping unconditional. OctoPrint 1.11 added this method; older
+        # versions never call it.
+        return True
 
     def get_template_configs(self):
         # `template` is a BARE FILENAME, resolved inside this plugin's templates/
