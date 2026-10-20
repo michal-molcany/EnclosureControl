@@ -1,0 +1,108 @@
+<!--
+  Settings for the Enclosure-Fan-Control plugin.
+
+  BINDINGS: everything here goes through `settingsViewModel.settings.plugins...`.
+  That prefix is not decoration. OctoPrint binds a plugin template with the
+  PLUGIN's view model as the Knockout root (see main.js: ko.applyBindings(
+  viewModel, element)), so a bare `settings.plugins...` resolves against the
+  plugin view model, finds no `plugins` property, and throws. The block then
+  never binds: whatever is typed is never written to an observable, and Save
+  posts the untouched server values back. To the user that looks like "my
+  settings do not stick", with nothing in any log to say why.
+-->
+<form class="form-horizontal">
+  <h4>Enclosure fan control (C3)</h4>
+  <p class="help-block">
+    Live state, PID tuning and manual control for the C3 board. Changes take
+    effect immediately - no restart is needed. The tab is called
+    <strong>Enclosure-Fan-Control</strong> in the navigation bar.
+  </p>
+
+  <div class="control-group">
+    <label class="control-label" for="ef_settings_host">Board address</label>
+    <div class="controls">
+      <input type="text" class="input-block-level" id="ef_settings_host"
+             data-bind="value: settingsViewModel.settings.plugins.enclosure_fan.host">
+      <span class="help-block">
+        The board's IP address, e.g. <code>10.201.93.245</code>, or its mDNS name
+        <code>enclosure-fan-control.local</code>. The name survives the board taking a
+        new DHCP lease; the IP does not, but it works where mDNS is blocked.
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <label class="control-label" for="ef_settings_port">Port</label>
+    <div class="controls">
+      <input type="number" class="input-mini" id="ef_settings_port"
+             data-bind="value: settingsViewModel.settings.plugins.enclosure_fan.port">
+      <span class="help-block">
+        <strong>8082.</strong> That is the board's status/PID API, and the only port
+        that reports whether a CYD is linked.
+        <br>
+        <strong>8081 will not work here</strong> - it is the CYD's machine channel and
+        uses a different username. 8080 is the firmware upload page. Both exist on the
+        board, so a wrong port looks like a rejected password rather than a wrong
+        address; <em>Test connection</em> below says which it is.
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <label class="control-label" for="ef_settings_token">API token</label>
+    <div class="controls">
+      <input type="password" class="input-block-level" id="ef_settings_token"
+             autocomplete="new-password"
+             data-bind="value: settingsViewModel.settings.plugins.enclosure_fan.token, valueUpdate: 'blur'">
+      <span class="help-block">
+        The shared secret from the firmware's <code>ENC_API_TOKEN</code>, in
+        <code>include/enclosure_api.h</code>. The board wants HTTP Basic auth with the
+        username <code>Enclosure</code> and this value as the password; the username is
+        fixed by the plugin.
+        <br><br>
+        <strong>Leave this blank to keep the token that is already saved.</strong>
+        It is stored in OctoPrint's <code>config.yaml</code> (not in version control)
+        and is never sent back to the browser, so an empty box after reloading the page
+        means "a token is set", not "no token".
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <div class="controls">
+      <label class="checkbox">
+        <input type="checkbox"
+               data-bind="checked: settingsViewModel.settings.plugins.enclosure_fan.poll">
+        Poll the board for live status
+      </label>
+      <span class="help-block">
+        Off freezes the tab on the last known values. Useful when you are debugging
+        something else on the network and do not want the traffic.
+      </span>
+    </div>
+  </div>
+
+  <hr>
+
+  <div class="control-group">
+    <label class="control-label">Check it</label>
+    <div class="controls">
+      <button type="button" class="btn"
+              data-bind="click: testConnection, disable: testBusy">
+        <i class="fa fa-plug"></i>
+        <span data-bind="text: testBusy() ? 'Testing...' : 'Test connection'"></span>
+      </button>
+      <span class="help-block">
+        Probes the address, port and token <em>as typed above</em>, including a token
+        you have not saved yet, and reports exactly what the board said. This is the
+        quickest way to tell a wrong port from a wrong token.
+      </span>
+
+      <div class="alert" style="margin-top: 8px;"
+           data-bind="visible: testResult() !== '', css: testOk() ? 'alert-success' : 'alert-danger'">
+        <i class="fa" data-bind="css: testOk() ? 'fa-check-circle' : 'fa-exclamation-triangle'"></i>
+        <span data-bind="text: testResult"></span>
+      </div>
+    </div>
+  </div>
+</form>

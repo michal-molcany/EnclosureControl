@@ -1,0 +1,173 @@
+<div id="tab_enclosure_fan">
+  <h1>Fan Control</h1>
+
+  <!-- Connection banner. One of three states, always exactly one visible.
+       The error text is the board's own or the client's; either way it says what
+       to do rather than just "error". -->
+  <div class="alert alert-danger ef-banner" data-bind="visible: !connected()">
+    <i class="fa fa-exclamation-triangle"></i>
+    <span data-bind="text: errorText"></span>
+  </div>
+
+  <div class="alert alert-warning ef-banner" data-bind="visible: connected() && emergency()">
+    <i class="fa fa-exclamation-triangle"></i>
+    <strong>Emergency cooling active.</strong>
+    The C3 has bypassed the regulator and forced full louvre and fan.
+  </div>
+
+  <!-- The manual-control gate. Shown whenever a CYD is linked, because that is
+       the one state where the controls below would silently do nothing. -->
+  <div class="alert alert-info ef-banner" data-bind="visible: cydLinked()">
+    <i class="fa fa-info-circle"></i>
+    <strong>CYD is linked</strong> &mdash; it re-sends its own settings every 2 seconds,
+    which would immediately override anything set here. Manual control is disabled.
+    Unplug the display to take control from OctoPrint.
+  </div>
+
+  <div data-bind="visible: connected()">
+    <div class="row-fluid">
+      <div class="span6">
+
+        <h3>State</h3>
+        <table class="table table-condensed ef-table">
+          <tbody>
+            <tr>
+              <td>Chamber</td>
+              <td>
+                <span data-bind="visible: chamberValid()">
+                  <span data-bind="text: chamberText"></span> &deg;C
+                </span>
+                <span class="text-muted" data-bind="visible: !chamberValid()">no sensor</span>
+              </td>
+            </tr>
+            <tr>
+              <td>Setpoint</td>
+              <td><span data-bind="text: setpoint"></span> &deg;C</td>
+            </tr>
+            <tr>
+              <td>Material</td>
+              <td data-bind="text: material"></td>
+            </tr>
+            <tr>
+              <td>Regulation</td>
+              <td data-bind="text: stateText"></td>
+            </tr>
+            <tr>
+              <td>Mode</td>
+              <td><span data-bind="text: modeText"></span></td>
+            </tr>
+            <tr>
+              <td>Print job</td>
+              <td data-bind="text: jobText"></td>
+            </tr>
+          </tbody>
+        </table>
+
+      </div>
+      <div class="span6">
+
+        <h3>Outputs</h3>
+        <div class="ef-meter">
+          <label>Louvre <span class="ef-meter-value" data-bind="text: louvre"></span>%</label>
+          <div class="progress"><div class="bar" data-bind="style: louvreWidth"></div></div>
+        </div>
+        <div class="ef-meter">
+          <label>Fan <span class="ef-meter-value" data-bind="text: fan"></span>%</label>
+          <div class="progress"><div class="bar" data-bind="style: fanWidth"></div></div>
+        </div>
+
+        <h4>Board</h4>
+        <table class="table table-condensed ef-table">
+          <tbody>
+            <tr><td>Address</td><td data-bind="text: ip"></td></tr>
+            <tr><td>Firmware</td><td data-bind="text: fw"></td></tr>
+            <tr><td>Signal</td><td><span data-bind="text: rssi"></span> dBm</td></tr>
+            <tr><td>Free heap</td><td><span data-bind="text: heapKb"></span> kB</td></tr>
+            <tr><td>Uptime</td><td data-bind="text: uptime"></td></tr>
+          </tbody>
+        </table>
+
+      </div>
+    </div>
+
+    <hr>
+
+    <h3>PID regulation</h3>
+    <p class="ef-help">
+      Output is <code>kp&middot;error + ki&middot;integral + kd&middot;derivative</code>,
+      driving the louvre across the lower half of its travel and the fan across the
+      upper half. <strong>Apply</strong> changes the running gains only; they are lost
+      on reboot. <strong>Save</strong> also writes them to the board's NVS so they
+      survive a power cycle.
+    </p>
+
+    <form class="form-inline ef-pid">
+      <label class="ef-gain">kp
+        <input type="number" class="input-mini" step="0.1"
+               data-bind="value: kp, attr: {min: pidMin().kp, max: pidMax().kp, step: 0.1},
+                          disable: pidSaving">
+      </label>
+      <label class="ef-gain">ki
+        <input type="number" class="input-mini" step="0.01"
+               data-bind="value: ki, attr: {min: pidMin().ki, max: pidMax().ki, step: 0.01},
+                          disable: pidSaving">
+      </label>
+      <label class="ef-gain">kd
+        <input type="number" class="input-mini" step="0.1"
+               data-bind="value: kd, attr: {min: pidMin().kd, max: pidMax().kd, step: 0.1},
+                          disable: pidSaving">
+      </label>
+      <button class="btn btn-primary" data-bind="click: applyPid, disable: pidSaving">Apply</button>
+      <button class="btn" data-bind="click: savePid, disable: pidSaving">Save</button>
+      <button class="btn" data-bind="click: defaultPid, disable: pidSaving">Defaults</button>
+    </form>
+
+    <p class="ef-help">
+      Accepted ranges: kp <span data-bind="text: pidRange('kp')"></span>,
+      ki <span data-bind="text: pidRange('ki')"></span>,
+      kd <span data-bind="text: pidRange('kd')"></span>.
+      <span data-bind="visible: !pidSaved()">
+        <strong>Running gains are not saved</strong> &mdash; they will be lost on reboot.
+      </span>
+    </p>
+
+    <hr>
+
+    <h3>Manual control</h3>
+    <div class="alert alert-warning" data-bind="visible: cydLinked()">
+      Unavailable while the CYD is linked.
+    </div>
+
+    <div data-bind="visible: !cydLinked()">
+      <div class="btn-group ef-modes">
+        <button class="btn" data-bind="click: setAuto, disable: manualBusy">Automatic</button>
+        <button class="btn" data-bind="click: setManual, disable: manualBusy">Manual</button>
+      </div>
+
+      <div data-bind="visible: manualMode()">
+        <div class="ef-meter">
+          <label>Louvre <span data-bind="text: manualLouvre"></span>%</label>
+          <input type="range" min="0" max="100" step="1"
+                 data-bind="value: manualLouvre, event: {change: pushManual},
+                            disable: manualBusy">
+        </div>
+        <div class="ef-meter">
+          <label>Fan <span data-bind="text: manualFan"></span>%</label>
+          <input type="range" min="0" max="100" step="1"
+                 data-bind="value: manualFan, event: {change: pushManual},
+                            disable: manualBusy">
+        </div>
+      </div>
+
+      <p class="ef-help">
+        Manual mode bypasses the regulator entirely. Switching back to Automatic
+        while the display is unplugged leaves the board on its conservative 50&nbsp;&deg;C
+        fallback target, because this endpoint does not claim to know the material.
+      </p>
+    </div>
+
+    <div class="alert alert-danger" data-bind="visible: writeError() !== ''">
+      <span data-bind="text: writeError"></span>
+    </div>
+  </div>
+</div>

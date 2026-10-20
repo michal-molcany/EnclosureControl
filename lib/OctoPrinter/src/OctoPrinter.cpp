@@ -37,6 +37,77 @@ static bool readLineYielding(WiFiClient &client, uint32_t deadlineMs, String &ou
   }
 }
 
+// Stream adapter that blocks (yielding) until data arrives, the deadline
+// passes, or the peer disconnects, so a deserializer never mistakes a TCP
+// gap for end-of-input (Arduino Stream's -1 means "no data right now", which
+// a socket returns constantly mid-transfer).
+class DeadlineStream : public Stream
+{
+public:
+  DeadlineStream(WiFiClient &client, uint32_t deadlineMs)
+      : _client(client), _deadline(deadlineMs)
+  {
+  }
+  int available() override { return _client.available(); }
+  int read() override
+  {
+    while (!_client.available())
+    {
+      if (!_client.connected() || (int32_t)(millis() - _deadline) >= 0)
+        return -1;
+      delay(1);
+    }
+    const int c = _client.read();
+    maybeYield();
+    return c;
+  }
+  int peek() override
+  {
+    while (!_client.available())
+    {
+      if (!_client.connected() || (int32_t)(millis() - _deadline) >= 0)
+        return -1;
+      delay(1);
+    }
+    return _client.peek();
+  }
+  void flush() override {}
+  size_t write(uint8_t) override { return 0; }
+
+private:
+  // YIELD BY BYTE COUNT, not only while the socket is idle.
+  //
+  // Waiting for data is only half the problem. Once the Wi-Fi RX buffer holds
+  // data, the deserializer calls read() back-to-back and the loop above never
+  // runs - so nothing yields, the idle task never gets scheduled, and the task
+  // watchdog aborts the chip mid-parse:
+  //
+  //   [POLL] files refresh start
+  //   E (78556) task_wdt: Aborting.
+  //
+  // which reaches the user as the display rebooting when they open the file list.
+  // GET /api/files?recursive=true is ~75 KB of JSON and the parse alone is long
+  // enough to blow the 5 s budget.
+  //
+  // Every 1 KB rather than every character: a delay(1) per character would
+  // dominate the transfer, while a kilobyte is milliseconds of work even on a
+  // poor link - comfortably inside the watchdog window.
+  void maybeYield()
+  {
+    if (++_sinceYield >= kYieldEveryBytes)
+    {
+      _sinceYield = 0;
+      delay(1);
+    }
+  }
+
+  static const uint32_t kYieldEveryBytes = 1024;
+
+  WiFiClient &_client;
+  uint32_t _deadline;
+  uint32_t _sinceYield = 0;
+};
+
 // Reads the response body the same yielding way: exactly contentLength bytes
 // when announced, otherwise until close or deadline.
 static void readBodyYielding(WiFiClient &client, uint32_t deadlineMs, int contentLength, String &out)
@@ -81,6 +152,43 @@ void OctoPrinter::begin()
     update();
     _doOnce = true;
   }
+}
+
+void OctoPrinter::setEndpoint(IPAddress host, int port)
+{
+  if ((uint32_t)host == (uint32_t)_host && port == _port)
+    return;
+
+  // A socket open against the old server would keep streaming its response into
+  // the old host's parser while the next request targets the new one. Dropping
+  // it here means a repoint mid-transfer costs one failed poll, not a corrupt
+  // snapshot.
+  _client.stop();
+  _host = host;
+  _hostAddress = host.toString();
+  _port = port;
+  // The cached version strings came from the server we are leaving.
+  _doOnce = false;
+  Serial.print(F("[OctoPrinter] endpoint -> "));
+  Serial.print(_hostAddress);
+  Serial.print(':');
+  Serial.println(port);
+}
+
+void OctoPrinter::setApiKey(const char *key)
+{
+  const char *safe = key ? key : "";
+  if (_apiKey == safe)
+    return;
+
+  // Drop the socket: a transfer started with the old key would keep streaming
+  // into the parser while the next request presents different credentials.
+  _client.stop();
+  _apiKey = safe;
+  _doOnce = false;
+  Serial.print(F("[OctoPrinter] api key changed ("));
+  Serial.print(_apiKey.length());
+  Serial.println(F(" chars)"));
 }
 
 void OctoPrinter::update()
@@ -409,10 +517,9 @@ void OctoPrinter::_parseLayerProgress(String json)
     Serial.println(error.c_str());
     return;
   }
-  if (SERIAL_DEBUG)
-  {
+#if OCTO_DEBUG_LOG
     Serial.println("Layer Progress JSON: " + json);
-  }
+#endif
   JsonObject layer = doc["layer"];
   if (layer.isNull())
     return;
@@ -442,10 +549,9 @@ void OctoPrinter::_parsePrinter(String json)
     return;
   }
 
-  if (SERIAL_DEBUG)
-  {
+#if OCTO_DEBUG_LOG
     Serial.println("Printer JSON: " + json);
-  }
+#endif
   JsonObject temperature = doc["temperature"];
   if (temperature.isNull())
     return;
@@ -459,11 +565,36 @@ void OctoPrinter::_parsePrinter(String json)
   _bed.target = temperature_bed["target"] | 0.0;
   _bed.offset = temperature_bed["offset"] | 0.0;
 
+  // Chamber temperature, tried under three names in order.
+  //
+  // "chamber" is the only STANDARD one: OctoPrint reports that key as soon as a
+  // chamber sensor is configured, and it is the only entry here that is not
+  // specific to one particular printer.
+  //
+  // The other two are custom-sensor names, and the casing matters - JSON keys are
+  // case-sensitive, so "enclosure" will never match a sensor called "Enclosure".
+  // That gap cost real time: on the printer this was written for, /api/printer
+  // reports NEITHER "chamber" NOR lowercase "enclosure", so the whole chamber
+  // reading rests on the third name below. The typo in it ("Encosure temp") was
+  // likewise load-bearing, and invisible, because it still matched a sensor that
+  // really existed under that misspelling.
+  //
+  // So the third name is not decoration - it is the one carrying the reading on
+  // a printer without a standard chamber sensor, and it must match the sensor's
+  // EXACT spelling. If that sensor is renamed or removed in OctoPrint, update it
+  // here in the same breath: with no match, _chamber.actual silently becomes 0.0,
+  // which reads as "no data" to the caller and trips the enclosure cooling
+  // fail-safe mid-print. A duplicate sensor left behind does not break anything
+  // (both report the same value), so deleting the old misspelled one is safe
+  // once this firmware is running.
+  //
+  // The robust fix is to configure a real OctoPrint chamber sensor so the first
+  // lookup answers and these custom names stop mattering at all.
   JsonObject temperature_chamber = temperature["chamber"];
   if (temperature_chamber.isNull())
     temperature_chamber = temperature["enclosure"];
   if (temperature_chamber.isNull())
-    temperature_chamber = temperature["Encosure temp"];
+    temperature_chamber = temperature["Enclosure temp"];
   _chamber.actual = temperature_chamber["actual"] | 0.0;
   _chamber.target = temperature_chamber["target"] | 0.0;
   _chamber.offset = temperature_chamber["offset"] | 0.0;
@@ -520,10 +651,9 @@ void OctoPrinter::_parseJob(String json)
     Serial.println(error.c_str());
     return;
   }
-  if (SERIAL_DEBUG)
-  {
+#if OCTO_DEBUG_LOG
     Serial.println("Job JSON: " + json);
-  }
+#endif
   JsonObject progress = doc["progress"];
   if (progress.isNull())
   {
@@ -548,8 +678,8 @@ int OctoPrinter::_parseFilament(String json)
   {
     if (json.indexOf(_filamentName[i]) != -1)
     {
-#if (SERIAL_DEBUG)
-      Serial.println("Parsed filament: " + _filamentName[i]);
+#if OCTO_DEBUG_LOG
+        Serial.println("Parsed filament: " + _filamentName[i]);
 #endif
       return i;
     }
@@ -563,8 +693,8 @@ String OctoPrinter::_parseNozzle(String json)
   {
     if (json.indexOf(_nozzleName[i]) != -1)
     {
-#if (SERIAL_DEBUG)
-      Serial.println("Parsed nozzle: " + _nozzleName[i]);
+#if OCTO_DEBUG_LOG
+        Serial.println("Parsed nozzle: " + _nozzleName[i]);
 #endif
       return _nozzleName[i];
     }
@@ -614,17 +744,29 @@ String OctoPrinter::apiVersion()
   return _server._apiVersion;
 }
 
-int OctoPrinter::preheat(int toolTemp)
+int OctoPrinter::preheatTool(int toolTemp)
 {
   String command = "{\"command\": \"target\", \"targets\": {\"tool0\": " + String(toolTemp) + "}}";
   String response = _poster("/api/printer/tool", command);
   return response.toInt();
 }
 
-int OctoPrinter::preheatOff()
+int OctoPrinter::preheatToolOff()
 {
   String command = "{\"command\": \"target\", \"targets\": {\"tool0\": 0}}";
   String response = _poster("/api/printer/tool", command);
+  return response.toInt();
+}
+
+int OctoPrinter::preheatBed(int bedTemp)
+{
+  // NOTE: the bed endpoint does NOT mirror the tool's body shape. /api/printer/tool
+  // takes a "targets" map keyed by tool name ({"targets": {"tool0": N}}), but
+  // /api/printer/bed takes a scalar "target". Sending the tool's shape here is
+  // rejected with HTTP 400 "Mandatory parameters missing". 0 turns the bed off,
+  // so it needs no separate call.
+  String command = "{\"command\": \"target\", \"target\": " + String(bedTemp) + "}";
+  String response = _poster("/api/printer/bed", command);
   return response.toInt();
 }
 
@@ -702,4 +844,400 @@ int OctoPrinter::resumeJob()
 int OctoPrinter::toggleJobPauseState()
 {
   return _poster("/api/job", "{\"command\": \"pause\", \"action\": \"toggle\"}").toInt();
+}
+
+// Percent-encodes a file path for the POST URI, leaving '/' separators and
+// unreserved characters alone.
+static String urlEncodePath(const char *path)
+{
+  String out;
+  out.reserve(strlen(path) + 8);
+  char hex[4];
+  for (const char *p = path; *p; ++p)
+  {
+    const unsigned char c = static_cast<unsigned char>(*p);
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || c == '/')
+      out += static_cast<char>(c);
+    else
+    {
+      snprintf(hex, sizeof(hex), "%%%02X", c);
+      out += hex;
+    }
+  }
+  return out;
+}
+
+// Heuristic hints read out of a file name.
+//
+// WHY THIS EXISTS: layer height and nozzle diameter are the two slicer settings
+// OctoPrint does not expose anywhere. Checked against the live server: neither
+// /api/files nor /api/files/local/<path> carries them, not even in the embedded
+// slicer metadata. The name is all that is left, and it is where PrusaSlicer,
+// Orca and Cura all put them by default.
+//
+// WHAT IT IS NOT: authoritative. It is a guess from a naming convention, so the
+// UI marks these two values as coming from the name. A file called
+// spare-part.gcode yields nothing, and 0 here means not-found, not a real zero.
+
+static bool isNameBoundary(char c)
+{
+  return !(isalnum((unsigned char)c) || c == '_' || c == '.');
+}
+
+// Materials worth recognising. Ordered so the longer names are tried before the
+// shorter ones they start with; PC is last and matches only as a whole token.
+static const char *const kMaterialOrder[] = {"NYLON", "HIPS", "WOOD", "FLEX", "PETG",
+                                             "POLY",  "PVA",  "TPU",  "ABS",  "ASA",
+                                             "PLA",   "PC",   nullptr};
+
+static bool findMaterial(const char *name, char *out, size_t outSize)
+{
+  for (int i = 0; kMaterialOrder[i]; ++i)
+  {
+    const size_t len = strlen(kMaterialOrder[i]);
+    for (const char *p = name; *p; ++p)
+    {
+      if (strncasecmp(p, kMaterialOrder[i], len) != 0)
+        continue;
+      const bool leftOk = (p == name) || isNameBoundary(p[-1]);
+      if (!leftOk || !isNameBoundary(p[len]))
+        continue;
+      strncpy(out, kMaterialOrder[i], outSize - 1);
+      out[outSize - 1] = '\0';
+      return true;
+    }
+  }
+  return false;
+}
+
+// Collects every <number>mm in the name. Both a dot and a comma are accepted as
+// the decimal separator, because European slicer locales write 0,15mm.
+static int scanMmValues(const char *name, float *out, int maxOut)
+{
+  int found = 0;
+  for (const char *p = name; *p && found < maxOut; ++p)
+  {
+    if (!isdigit((unsigned char)*p))
+      continue;
+    char *end = nullptr;
+    float value = strtof(p, &end);
+    if (end == p || value <= 0)
+      continue;
+    if (*end == ',' || *end == '.')
+    {
+      // A locale decimal comma: re-parse with that separator honoured.
+      value = strtof(p, &end);
+      if (end == p || value <= 0)
+        continue;
+    }
+    if (strncasecmp(end, "mm", 2) != 0)
+      continue;
+    if (end - p > 8)
+      continue; // too many digits to be a dimension we care about
+    out[found++] = value;
+    p = end + 1; // resume past the digits, before the unit
+  }
+  return found;
+}
+
+static void parseNameHints(const char *name, OctoFile &entry)
+{
+  if (entry.material[0] == '\0')
+    findMaterial(name, entry.material, sizeof(entry.material));
+
+  float mm[8];
+  const int count = scanMmValues(name, mm, 8);
+  if (count == 0)
+    return;
+
+  // Distinguish the two by size, not by keyword. Layer heights run about
+  // 0.05-0.35 and nozzles about 0.2-0.8, so the ranges overlap and a keyword
+  // alone is not reliable. With two or more values the ordering is unambiguous:
+  // smallest is the layer, largest the nozzle.
+  if (count >= 2)
+  {
+    float lo = mm[0], hi = mm[0];
+    for (int i = 1; i < count; ++i)
+    {
+      if (mm[i] < lo)
+        lo = mm[i];
+      if (mm[i] > hi)
+        hi = mm[i];
+    }
+    if (lo > 0.001f && lo < hi)
+    {
+      entry.layerHeightMm = lo;
+      entry.nozzleMm = hi;
+    }
+    else
+    {
+      entry.layerHeightMm = mm[0];
+    }
+    return;
+  }
+
+  // A single value: 0.4 on its own is far more often a nozzle, and 0.15 on its
+  // own is obviously a layer height.
+  if (mm[0] < 0.36f)
+    entry.layerHeightMm = mm[0];
+  else
+    entry.nozzleMm = mm[0];
+}
+
+// Inserts one entry into the out[0..*found] array kept sorted newest-first.
+// When full, only displaces the oldest entry if the newcomer is newer.
+static void insertFileSorted(OctoFile *out, size_t capacity, size_t &found,
+                             const OctoFile &entry)
+{
+  size_t slot;
+  if (found < capacity)
+  {
+    slot = found++;
+  }
+  else
+  {
+    if (entry.date <= out[found - 1].date)
+      return;
+    slot = found - 1;
+  }
+  out[slot] = entry;
+  while (slot > 0 && out[slot].date > out[slot - 1].date)
+  {
+    OctoFile tmp = out[slot];
+    out[slot] = out[slot - 1];
+    out[slot - 1] = tmp;
+    --slot;
+  }
+}
+
+// Walks one files[] level (top level or a folder's children), recursing into
+// folders and collecting printable machinecode entries.
+static void collectFiles(JsonArray level, OctoFile *out, size_t capacity, size_t &found)
+{
+  for (JsonVariant item : level)
+  {
+    JsonObject obj = item.as<JsonObject>();
+    if (obj.isNull())
+      continue;
+    const char *type = obj["type"] | "";
+    if (strcmp(type, "folder") == 0)
+    {
+      JsonArray children = obj["children"].as<JsonArray>();
+      if (!children.isNull())
+        collectFiles(children, out, capacity, found);
+      continue;
+    }
+    if (strcmp(type, "machinecode") != 0)
+      continue;
+    const char *path = obj["path"] | "";
+    if (!path || !*path)
+      continue;
+
+    OctoFile entry = {};
+    strncpy(entry.path, path, sizeof(entry.path) - 1);
+    const char *name = obj["name"] | "";
+    strncpy(entry.name, (name && *name) ? name : path, sizeof(entry.name) - 1);
+    entry.date = obj["date"] | 0;
+    entry.size = obj["size"] | 0;
+
+    // Details, all already present in this listing entry. Each is guarded
+    // because a file sliced by something other than PrusaSlicer/Orca has no
+    // analysis block at all, and one absent field must not lose the rest.
+    JsonObject analysis = obj["gcodeAnalysis"].as<JsonObject>();
+    if (!analysis.isNull())
+    {
+      entry.estimatedPrintTime = analysis["estimatedPrintTime"] | 0.0;
+      const char *mat = analysis["firstFilament"] | "";
+      if (mat && *mat)
+        strncpy(entry.material, mat, sizeof(entry.material) - 1);
+
+      JsonObject dims = analysis["dimensions"].as<JsonObject>();
+      if (!dims.isNull())
+      {
+        entry.dimX = dims["X"] | 0.0f;
+        entry.dimY = dims["Y"] | 0.0f;
+        entry.dimZ = dims["Z"] | 0.0f;
+      }
+
+      // filament is keyed per tool; the enclosure is single-extruder and the
+      // display has room for one total, so tools are summed rather than tool0
+      // being picked - a two-tool file would otherwise under-report by half.
+      JsonObject fil = analysis["filament"].as<JsonObject>();
+      if (!fil.isNull())
+      {
+        for (JsonPair kv : fil)
+        {
+          JsonObject tool = kv.value().as<JsonObject>();
+          if (tool.isNull())
+            continue;
+          entry.filamentLengthMm += tool["length"] | 0.0;
+          entry.filamentVolumeCm3 += tool["volume"] | 0.0;
+        }
+      }
+    }
+
+    JsonObject stats = obj["statistics"].as<JsonObject>();
+    if (!stats.isNull())
+    {
+      JsonObject avg = stats["averagePrintTime"].as<JsonObject>();
+      if (!avg.isNull())
+        entry.averagePrintTime = avg["_default"] | 0.0;
+    }
+    JsonObject prints = obj["prints"].as<JsonObject>();
+    if (!prints.isNull())
+    {
+      entry.printsSuccess = prints["success"] | 0;
+      entry.printsFailure = prints["failure"] | 0;
+    }
+
+    // Name-derived hints LAST, and only as a fallback: the slicer metadata above
+    // is real data, this is a guess from a naming convention.
+    parseNameHints(entry.name, entry);
+
+    insertFileSorted(out, capacity, found, entry);
+  }
+}
+
+int OctoPrinter::fetchFiles(OctoFile *out, size_t capacity, FetchDiag &diag, uint8_t &parseCode)
+{
+  diag = FETCH_NOFILES;
+  parseCode = 0;
+  if (!out || capacity == 0)
+    return -1;
+
+  // The full recursive listing is ~75 KB for a handful of files
+  // (gcodeAnalysis, thumbnails, refs, statistics per file) - far beyond what
+  // fits in a String plus a full JsonDocument on this heap. So the body is
+  // deserialized straight from the socket through a field filter keeping only
+  // what collectFiles() reads; the document stays around 1-2 KB.
+  //
+  // The [0] element templates every array item (see parseArray). Children
+  // nesting is written out to 4 levels; anything deeper is skipped by the
+  // filter (its "type" never materializes, so collectFiles ignores it).
+  //
+  // Build ONLY through handles to real storage (to<>()/add<>()): resolving an
+  // intermediate proxy into a JsonVariant first (e.g. `level =
+  // filter["files"][0]`) yields a detached null handle whose writes go
+  // nowhere, leaving an empty filter that parses every reply down to {}.
+  JsonDocument filter;
+  JsonVariant level = filter["files"].to<JsonArray>().add<JsonVariant>();
+  for (int depth = 0; depth < 4; ++depth)
+  {
+    level["type"] = true;
+    level["path"] = true;
+    level["name"] = true;
+    level["date"] = true;
+    level["size"] = true;
+
+    // Details for the info view, kept in the SAME listing pass - no second
+    // per-file request. Every nested object is built through a handle to real
+    // storage (see the warning above): assigning an intermediate proxy to a
+    // JsonVariant first yields a detached handle whose writes go nowhere, and a
+    // filter that silently holds nothing parses the whole reply down to {}.
+    //
+    // Only tool0 is templated even though the collector sums every tool. The
+    // filter has to name keys to keep them, and OctoPrint's tool count is not
+    // known until after the parse - so a second tool's numbers simply do not
+    // survive the filter. One enclosure has one extruder, so this is not a real
+    // loss; the summing in collectFiles is what makes it correct if it ever is.
+    JsonObject analysis = level["gcodeAnalysis"].to<JsonObject>();
+    analysis["estimatedPrintTime"] = true;
+    analysis["firstFilament"] = true;
+    JsonObject dims = analysis["dimensions"].to<JsonObject>();
+    dims["X"] = true;
+    dims["Y"] = true;
+    dims["Z"] = true;
+    JsonObject filament = analysis["filament"].to<JsonObject>();
+    JsonObject tool0 = filament["tool0"].to<JsonObject>();
+    tool0["length"] = true;
+    tool0["volume"] = true;
+    JsonObject statistics = level["statistics"].to<JsonObject>();
+    JsonObject average = statistics["averagePrintTime"].to<JsonObject>();
+    average["_default"] = true;
+    JsonObject prints = level["prints"].to<JsonObject>();
+    prints["success"] = true;
+    prints["failure"] = true;
+
+    level = level["children"].to<JsonArray>().add<JsonVariant>();
+  }
+  if (filter["files"].isNull())
+  {
+    Serial.println(F("[FILES] filter build failed"));
+    diag = FETCH_PARSE;
+    return -1;
+  }
+
+  _client.setTimeout(OCTOPRINTER_READ_TIMEOUT_S);
+  const uint32_t deadlineMs = millis() + OCTOPRINTER_REQUEST_TIMEOUT_MS;
+  if (!_client.connect(_host, _port, OCTOPRINTER_CONNECT_TIMEOUT_MS))
+  {
+    Serial.println(F("[FILES] connect failed"));
+    diag = FETCH_CONN;
+    return -1;
+  }
+  _client.println("GET /api/files?recursive=true HTTP/1.1");
+  _client.println("Host: " + _hostAddress);
+  _client.println("Cache-Control: no-cache");
+  _client.println("Connection: close");
+  _client.println("X-Api-Key: " + _apiKey);
+  _client.println("");
+
+  String line;
+  bool headersComplete = false;
+  while (readLineYielding(_client, deadlineMs, line))
+  {
+    if (line.length() == 0)
+    {
+      headersComplete = true;
+      break;
+    }
+  }
+  int found = -1;
+  if (headersComplete)
+  {
+    DeadlineStream body(_client, deadlineMs);
+    JsonDocument doc;
+    DeserializationError err =
+        deserializeJson(doc, body, DeserializationOption::Filter(filter));
+    if (err)
+    {
+      parseCode = static_cast<uint8_t>(err.code());
+      diag = FETCH_PARSE;
+      Serial.printf("[FILES] stream parse fail %s heap=%u maxblock=%u\n",
+                    err.c_str(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    }
+    else
+    {
+      JsonArray roots = doc["files"].as<JsonArray>();
+      if (roots.isNull())
+      {
+        diag = FETCH_NOFILES;
+        Serial.println(F("[FILES] no files[]"));
+      }
+      else
+      {
+        size_t n = 0;
+        collectFiles(roots, out, capacity, n);
+        found = static_cast<int>(n);
+        diag = FETCH_OK;
+        Serial.printf("[FILES] ok count=%d heap=%u\n", found, ESP.getFreeHeap());
+      }
+    }
+  }
+  else
+  {
+    diag = FETCH_HDRS;
+    Serial.println(F("[FILES] headers incomplete"));
+  }
+  _client.stop();
+  return found;
+}
+
+int OctoPrinter::selectAndPrint(const char *path)
+{
+  if (!path || !*path)
+    return 0;
+  String response = _poster("/api/files/local/" + urlEncodePath(path),
+                            "{\"command\":\"select\",\"print\":true}");
+  return response.toInt();
 }

@@ -9,6 +9,7 @@
 struct OctoSnapshot
 {
     bool printing = false;
+    bool paused = false;
     String filament;
     double toolActual = 0;
     double bedActual = 0;
@@ -38,5 +39,30 @@ bool octoPollerCopy(OctoSnapshot &out);
 
 // True once at least one poll cycle has published data.
 bool octoPollerHasData();
+void octoPollerRequestCancel();
+
+// Repoints the poll task at a different OctoPrint server.
+//
+// Non-blocking and safe to call from any task: it only records the value. The
+// OctoPrinter instance is owned by the poll task and is mid-request most of the
+// time, so mutating its host underneath that would be a data race. The task
+// applies a pending change at the top of its own loop, which also means a
+// repoint can never land in the middle of a request.
+//
+// Last write wins: the value is a single slot, not a queue, because there is
+// only ever one correct answer and queueing a backlog of intermediate addresses
+// would just poll each of them in turn.
+void octoPollerSetEndpoint(IPAddress host, uint16_t port);
+
+// Repoints the poll task at a different OctoPrint API key.
+//
+// Same contract and same reason as octoPollerSetEndpoint(): the OctoPrinter
+// instance belongs to the poll task and is mid-request most of the time, so the
+// value is only recorded here and applied by that task at the top of its own
+// loop. Safe to call from any task, never blocks.
+//
+// `key` is copied into a fixed buffer, so the caller may pass a pointer into a
+// String that changes immediately afterwards.
+void octoPollerSetApiKey(const char *key);
 
 #endif // OCTO_POLLER_H

@@ -22,12 +22,12 @@ void ChamberDisplay::begin()
 
 String ChamberDisplay::shortState(const String &state)
 {
-    if (state == "PLA_COOLING")
-        return "PLA";
-    if (state == "PETG_COOLING")
-        return "PETG";
-    if (state == "ASA_ABS_COOLING")
-        return "ASA";
+    if (state == "AUTO")
+        return "AUTO";
+    if (state == "FAN_COOLING")
+        return "FAN";
+    if (state == "PASSIVE_COOLING")
+        return "PASSIVE";
     return "IDLE";
 }
 
@@ -46,8 +46,11 @@ void ChamberDisplay::update(double chamberTemp, bool valid, const String &state,
     else
         snprintf(tempBuf, sizeof(tempBuf), "---");
 
+    const bool emergency = state == "EMERGENCY";
     String status;
-    if (manual)
+    if (emergency)
+        status = "MAX";
+    else if (manual)
         status = "ML" + String(louvrePct) + " F" + String(fanPct);
     else
     {
@@ -56,8 +59,11 @@ void ChamberDisplay::update(double chamberTemp, bool valid, const String &state,
             status += " FAN";
     }
 
+    const String mode = emergency ? "EMERG" : manual ? "MANUAL" : "AUTO";
+    const String footer = mode + (linked ? " +CYD OK" : " NO CYD");
+
     // Layout (72x40): small temp on top, big louvre/fan in the middle,
-    // small link state at the bottom.
+    // small mode and link state at the bottom.
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tr);
     u8g2.setCursor(2, 10);
@@ -67,7 +73,7 @@ void ChamberDisplay::update(double chamberTemp, bool valid, const String &state,
     u8g2.print(status);
     u8g2.setFont(u8g2_font_5x7_tr);
     u8g2.setCursor(2, 38);
-    u8g2.print(linked ? "+CYD LINK OK" : "-CYD NO LINK");
+    u8g2.print(footer);
     u8g2.sendBuffer();
 }
 

@@ -1,0 +1,95 @@
+// VS Code tasks for the C3 (EnclosureFanControl).
+//
+// Run with Ctrl+Shift+B for the default (Build + OTA), or
+// Terminal > Run Task... to pick one.
+//
+// NOTE: the PlatformIO toolbar's "Upload" button always does a USB flash. It
+// cannot do OTA, so use the tasks below for over-the-air updates.
+
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "C3: Build + OTA",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}\\..\\tools\\ota-upload.ps1",
+                "-Project", "${workspaceFolder}",
+                "-Env", "esp32-c3-devkitm-1",
+                "-Device", "enclosure-fan-control.local"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "group": { "kind": "build", "isDefault": true },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true,
+                "showReuseMessage": false
+            }
+        },
+        {
+            "label": "C3: OTA (skip build)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}\\..\\tools\\ota-upload.ps1",
+                "-Project", "${workspaceFolder}",
+                "-Env", "esp32-c3-devkitm-1",
+                "-Device", "enclosure-fan-control.local",
+                "-SkipBuild"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "C3: Build only",
+            "type": "shell",
+            "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\pio.exe",
+            "args": ["run", "-e", "esp32-c3-devkitm-1"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$platformio"],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "C3: Flash over USB",
+            "type": "shell",
+            "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\pio.exe",
+            "args": [
+                "run", "-t", "upload",
+                "-e", "esp32-c3-devkitm-1",
+                "--upload-port", "COM11"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "C3: Monitor serial",
+            "type": "shell",
+            "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\pio.exe",
+            "args": ["device", "monitor", "-e", "esp32-c3-devkitm-1"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": false }
+        },
+        {
+            "label": "C3: OTA web page",
+            "detail": "Opens the board's upload form in a browser (asks for the OTA password)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-Command", "Start-Process 'http://enclosure-fan-control.local:8080/'"
+            ],
+            "problemMatcher": [],
+            "presentation": { "reveal": "silent", "panel": "dedicated" }
+        }
+    ]
+}
