@@ -1,0 +1,3 @@
+include README.md
+include octoprint_enclosure_fan/templates/*.html
+recursive-include octoprint_enclosure_fan/static *.js *.css
