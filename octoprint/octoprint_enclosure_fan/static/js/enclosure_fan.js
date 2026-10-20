@@ -1,5 +1,5 @@
 /*
- * Fan Control tab for the EnclosureFanControl (C3) board.
+ * Fan Control tab and settings for the EnclosureFanControl (C3) board.
  *
  * Target is OctoPrint 1.11, so the front end is the 1.x stack: Knockout for the
  * template bindings. The plugin contributes one Knockout view model and lets
@@ -7,20 +7,47 @@
  * is the smallest thing that works on this version.
  *
  * The view model never talks to the board. Every board interaction goes through
- * the plugin's own /api/plugin/enclosure_fan/* endpoints, so the C3 token stays on
+ * the plugin's own /api/plugin/enclosure_fan endpoint, so the C3 token stays on
  * the server and OctoPrint's app-key auth covers the browser-to-server hop. The
  * tab reads a server-side cache, which is why it stays responsive when the board
  * is unreachable instead of spinning.
+ *
+ * TWO API DETAILS THAT COST A DAY BETWEEN THEM - do not "simplify" either:
+ *
+ *   1. OctoPrint.simpleApiCommand(...) returns a jQuery promise. It does NOT
+ *      take a callback: the fourth argument is an options object, and a function
+ *      passed there is silently dropped by $.extend. Calling it with a callback
+ *      sends the request, ignores the answer, and leaves the UI on its initial
+ *      values forever. Everything below is .done()/.fail().
+ *
+ *   2. The dependency injected as parameters[0] must be exposed on the view
+ *      model under the name the TEMPLATE uses. Plugin templates are bound with
+ *      the plugin view model as Knockout's root, so `settings.plugins...` would
+ *      look for `plugins` on the plugin view model - not on the settings view
+ *      model - and throw. Hence `settingsViewModel`, matching
+ *      settingsViewModel.settings.plugins.enclosure_fan.* in both templates.
  */
+
 $(function () {
     var PLUGIN = "enclosure_fan";
     var POLL_MS = 1000;
 
     // Board enum -> readable text. Kept here rather than in Python because the tab
     // only ever displays them; the plugin passes the raw numbers through untouched.
+    // The lists mirror lib/EnclosureProto/src/enclosure_proto.h; a value missing
+    // here would otherwise render as a bare number ("7" for unknown material).
     var STATE_NAMES = { 0: "Idle", 1: "PLA cooling", 2: "PETG cooling", 3: "ASA cooling" };
     var MODE_NAMES = { 0: "Automatic", 1: "Manual" };
-    var MATERIAL_NAMES = { 0: "PLA", 1: "PETG", 2: "ASA", 3: "TPU", 4: "Unknown" };
+    var MATERIAL_NAMES = {
+        0: "PLA",
+        1: "PETG",
+        2: "ASA",
+        3: "ABS",
+        4: "TPU",
+        5: "Nylon",
+        6: "High-temp",
+        7: "Unknown"
+    };
 
     function statusText(map, value, fallback) {
         var key = parseInt(value, 10);
@@ -36,11 +63,49 @@ $(function () {
         return Math.floor(seconds / 60) + "m " + ("0" + (seconds % 60)).slice(-2) + "s";
     }
 
+    // One command, always the same shape: a promise whose done() gets the parsed
+    // JSON body and whose fail() gets the jqXHR. Both the tab and the settings
+    // page go through here so the two cannot drift apart again.
+    function command(name, payload) {
+        return OctoPrint.simpleApiCommand(PLUGIN, name, payload || {});
+    }
+
+    // The plugin answers a refused command with HTTP 400 and {error: "..."};
+    // jQuery rejects, so the message lives in responseJSON, not in the body.
+    function failureText(xhr, fallback) {
+        if (xhr && xhr.responseJSON && xhr.responseJSON.error) {
+            return xhr.responseJSON.error;
+        }
+        if (xhr && xhr.status === 0) {
+            return "Could not reach OctoPrint - the connection dropped.";
+        }
+        if (xhr && xhr.status === 403) {
+            return "OctoPrint refused the request. Log in again and reload the page.";
+        }
+        if (xhr && xhr.status) {
+            return "OctoPrint answered HTTP " + xhr.status +
+                (xhr.statusText ? " (" + xhr.statusText + ")" : "") + ".";
+        }
+        return fallback || "The request did not complete.";
+    }
+
+    function notify(text, type) {
+        // OctoPrint 1.11 ships PNotify 4 with the constructor form. PNotify.notify
+        // does not exist on it, and calling it would throw inside the success
+        // handler - after the write had already been applied on the board.
+        new PNotify({
+            title: "Enclosure fan control",
+            text: text,
+            type: type
+        });
+    }
+
     function EnclosureFanViewModel(parameters) {
         var self = this;
 
-        self.settings = parameters[0];       // settingsViewModel
-        self.loginState = parameters[1];     // loginStateViewModel
+        // Named for the template binding, not for taste - see the header note.
+        self.settingsViewModel = parameters[0];
+        self.loginState = parameters[1];
 
         // Observable state. Everything the template binds to.
         self.connected = ko.observable(false);
@@ -94,24 +159,26 @@ $(function () {
         self.manualFan = ko.observable(0);
         self.manualBusy = ko.observable(false);
 
+        // Settings-page connection test.
+        self.testBusy = ko.observable(false);
+        self.testOk = ko.observable(false);
+        self.testResult = ko.observable("");
+
         // ------------------------------------------------------------------ //
         // Polling
         // ------------------------------------------------------------------ //
 
         var timer = null;
 
-        // Reads the plugin's cache. Never rejects on a network failure - that is
-        // the whole point of the cache - so the only error path is a malformed
-        // response, which is treated as "not connected" rather than thrown.
+        // Reads the plugin's cache. A network failure here means OctoPrint itself
+        // is unreachable, not the board - the board's state arrives as ok=false
+        // inside the payload.
         function poll() {
-            OctoPrint.simpleApiCommand(PLUGIN, "status", {}, function (response) {
-                var payload = response && response.response ? response.response : response;
-                if (!payload) {
-                    self.connected(false);
-                    self.errorText("No response from OctoPrint.");
-                    return;
-                }
-                apply(payload);
+            command("status").done(function (payload) {
+                apply(payload || { ok: false, error: "OctoPrint returned an empty answer." });
+            }).fail(function (xhr) {
+                self.connected(false);
+                self.errorText(failureText(xhr, "No response from OctoPrint."));
             });
         }
 
@@ -205,14 +272,22 @@ $(function () {
         // Writes
         // ------------------------------------------------------------------ //
 
-        function fail(response) {
-            var text = "The enclosure board did not accept that.";
-            try {
-                var payload = response && response.response ? response.response : response;
-                if (payload && payload.error) text = payload.error;
-            } catch (e) { /* fall through to the generic message */ }
+        // Shared by every write: report the failure where the user is looking,
+        // keep the message the server chose (the CYD gate's explanation is the
+        // whole point of that 400), and refresh from the board's own answer.
+        function reportFailure(xhr) {
+            var text = failureText(xhr, "The enclosure board did not accept that.");
             self.writeError(text);
-            PNotify.notify(text, "error");
+            notify(text, "error");
+        }
+
+        function write(name, payload, successText) {
+            return command(name, payload).done(function (response) {
+                self.writeError("");
+                var body = response || {};
+                if (body.status) apply(body);
+                if (successText) notify(successText, "success");
+            }).fail(reportFailure);
         }
 
         self.applyPid = function () {
@@ -222,41 +297,29 @@ $(function () {
                 return;
             }
             self.pidSaving(true);
-            OctoPrint.simpleApiCommand(PLUGIN, "setpid", { kp: kp, ki: ki, kd: kd }, function (response) {
-                self.pidSaving(false);
-                self.writeError("");
-                self.pidDirty(false);
-                if (response && response.error) { fail(response); return; }
-                var payload = response && response.response ? response.response : response;
-                if (payload && payload.status) apply(payload);
-                PNotify.notify("PID gains applied", "success");
-            });
+            write("setpid", { kp: kp, ki: ki, kd: kd }, "PID gains applied")
+                .always(function () {
+                    self.pidSaving(false);
+                    self.pidDirty(false);
+                });
         };
 
         self.savePid = function () {
             self.pidSaving(true);
-            OctoPrint.simpleApiCommand(PLUGIN, "savepid", {}, function (response) {
-                self.pidSaving(false);
-                self.writeError("");
-                self.pidDirty(false);
-                if (response && response.error) { fail(response); return; }
-                var payload = response && response.response ? response.response : response;
-                if (payload && payload.status) apply(payload);
-                PNotify.notify("PID gains saved to the board", "success");
-            });
+            write("savepid", {}, "PID gains saved to the board")
+                .always(function () {
+                    self.pidSaving(false);
+                    self.pidDirty(false);
+                });
         };
 
         self.defaultPid = function () {
             self.pidSaving(true);
-            OctoPrint.simpleApiCommand(PLUGIN, "defaultpid", {}, function (response) {
-                self.pidSaving(false);
-                self.writeError("");
-                self.pidDirty(false);
-                if (response && response.error) { fail(response); return; }
-                var payload = response && response.response ? response.response : response;
-                if (payload && payload.status) apply(payload);
-                PNotify.notify("PID gains reset to the board's defaults", "success");
-            });
+            write("defaultpid", {}, "PID gains reset to the board's defaults")
+                .always(function () {
+                    self.pidSaving(false);
+                    self.pidDirty(false);
+                });
         };
 
         // Mode and the two outputs always travel together: the board's /api/manual
@@ -264,14 +327,10 @@ $(function () {
         // changing the mode without also restating the outputs.
         function sendManual(mode, louvre, fan) {
             self.manualBusy(true);
-            OctoPrint.simpleApiCommand(PLUGIN, "setmanual",
-                { mode: mode, louvre: louvre, fan: fan }, function (response) {
+            write("setmanual", { mode: mode, louvre: louvre, fan: fan })
+                .always(function () {
                     self.manualBusy(false);
-                    self.writeError("");
                     self.manualDirty(false);
-                    if (response && response.error) { fail(response); return; }
-                    var payload = response && response.response ? response.response : response;
-                    if (payload && payload.status) apply(payload);
                 });
         }
 
@@ -282,6 +341,53 @@ $(function () {
         self.pushManual = function () {
             if (!self.manualMode()) return;
             sendManual(1, parseInt(self.manualLouvre(), 10), parseInt(self.manualFan(), 10));
+        };
+
+        // ------------------------------------------------------------------ //
+        // Settings: test connection
+        // ------------------------------------------------------------------ //
+
+        function enteredSettings() {
+            // Optional chaining is not used here: OctoPrint 1.11 still ships a
+            // JavaScript toolchain that chokes on it in plugin assets.
+            var svm = self.settingsViewModel;
+            var settings = svm ? svm.settings : undefined;
+            var plugins = settings ? settings.plugins : undefined;
+            return plugins ? plugins.enclosure_fan : undefined;
+        }
+
+        self.testConnection = function () {
+            var form = enteredSettings();
+            var payload = {};
+
+            if (form && form.host) payload.host = form.host() || "";
+            if (form && form.port) payload.port = form.port();
+            // An empty box means "keep the saved token": the server never sends a
+            // token back, so the form has nothing to echo. Sending null lets it
+            // fall back to the stored value.
+            payload.token = (form && form.token && form.token()) || null;
+
+            self.testBusy(true);
+            self.testResult("Contacting the board...");
+            self.testOk(false);
+
+            command("test", payload).done(function (result) {
+                var body = result || {};
+                self.testOk(!!body.ok);
+                if (body.ok) {
+                    self.testResult(body.message || "Connected.");
+                } else {
+                    self.testResult(
+                        (body.error || "Could not reach the board.") +
+                        (body.hint ? " " + body.hint : "")
+                    );
+                }
+            }).fail(function (xhr) {
+                self.testOk(false);
+                self.testResult(failureText(xhr, "The test could not be run."));
+            }).always(function () {
+                self.testBusy(false);
+            });
         };
     }
 

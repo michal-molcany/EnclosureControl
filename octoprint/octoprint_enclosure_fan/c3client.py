@@ -43,11 +43,29 @@ class C3Error(Exception):
     said no" (400 on a bad gain) from "the board did not answer" (timeout, refused
     connection, wrong host). Those need different words shown to the user: one is
     a mistake to correct, the other is a network problem.
+
+    `kind` is the machine-readable half of the same distinction, because the
+    settings dialog's "Test connection" button has to pick a remedy, not just
+    print a message:
+
+        auth         the board answered, but rejected the credentials (401)
+        http         the board answered with some other HTTP error
+        refused      nothing is listening on that host/port
+        dns          the host name does not resolve
+        unreachable  some other socket-level failure
+        timeout      the board did not answer in time
+        empty        something answered, but with no body
+        not_json     something answered, but not with JSON
+        not_object   JSON, but not the status document's object
+
+    Accessing a port that serves something else is the common case for 8080 and
+    8081, and "empty"/"not_json" is how it usually presents.
     """
 
-    def __init__(self, message, status=None):
+    def __init__(self, message, status=None, kind="error"):
         super().__init__(message)
         self.status = status
+        self.kind = kind
 
 
 class C3Client:
@@ -128,25 +146,38 @@ class C3Client:
             if err.code == 401:
                 raise C3Error(
                     "C3 rejected the credentials - check the API token "
-                    "(username must be 'Enclosure').", status=401)
+                    "(username must be 'Enclosure').", status=401, kind="auth")
             raise C3Error("C3 returned HTTP {0}{1}".format(
-                err.code, ": " + detail if detail else ""), status=err.code)
+                err.code, ": " + detail if detail else ""), status=err.code,
+                kind="http")
         except urllib.error.URLError as err:
             # Covers refused connections and DNS failures. socket.timeout also
             # surfaces here on most builds, but is caught separately below because
             # a timeout is the common case on a board that has just rebooted.
-            raise C3Error("C3 not reachable at {0} - {1}".format(self.host, err.reason))
+            reason = err.reason
+            if isinstance(reason, socket.timeout):
+                raise C3Error("C3 did not answer within {0:.0f}s".format(self.timeout),
+                              kind="timeout")
+            if isinstance(reason, socket.gaierror):
+                raise C3Error("Could not resolve '{0}'".format(self.host), kind="dns")
+            if isinstance(reason, ConnectionRefusedError) or "refused" in str(reason):
+                raise C3Error("Nothing is listening at {0}:{1}".format(
+                    self.host, self.port), kind="refused")
+            raise C3Error("C3 not reachable at {0} - {1}".format(self.host, reason),
+                          kind="unreachable")
         except socket.timeout:
-            raise C3Error("C3 did not answer within {0:.0f}s".format(self.timeout))
+            raise C3Error("C3 did not answer within {0:.0f}s".format(self.timeout),
+                          kind="timeout")
 
         if not body:
-            raise C3Error("C3 returned an empty body")
+            raise C3Error("C3 returned an empty body", kind="empty")
         try:
             document = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as err:
-            raise C3Error("C3 returned a body that is not JSON: {0}".format(err))
+            raise C3Error("C3 returned a body that is not JSON: {0}".format(err),
+                          kind="not_json")
         if not isinstance(document, dict):
-            raise C3Error("C3 returned JSON that is not an object")
+            raise C3Error("C3 returned JSON that is not an object", kind="not_object")
         return document
 
     # -- reads ------------------------------------------------------------

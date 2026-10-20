@@ -9,6 +9,7 @@ The point is to prove the two things that matter and cannot be checked by readin
 Run:  python tools/selftest_plugin.py
 """
 
+import logging
 import os
 import sys
 import threading
@@ -108,6 +109,11 @@ class FakePlugin(EnclosureFanPlugin):
     def __init__(self, client):
         EnclosureFanPlugin.__init__(self)
         self._client = client
+        # _logger is injected by OctoPrint's plugin manager, so the plain class
+        # does not have one. on_settings_save() logs deliberately, so the stub
+        # has to provide the attribute or the test would fail on the harness
+        # rather than on the behaviour.
+        self._logger = logging.getLogger("selftest")
         self._settings = FakeSettings({"host": C3, "port": 8082, "token": TOKEN,
                                    "poll": True})
 
@@ -255,6 +261,168 @@ check("poll defaults to on",
       p._settings.get(["poll"]) is not False)
 
 print()
+print("== settings save (the token must survive a save it is not part of) ==")
+
+# The settings dialog posts the whole plugin subtree back on every save. The
+# token is masked to None on read, so it arrives as None unless it was retyped -
+# and the parent implementation MERGES, which means None overwrites the stored
+# token. Capture what is actually handed to the parent.
+saved = {}
+_original_parent_save = init.octoprint.plugin.SettingsPlugin.on_settings_save
+init.octoprint.plugin.SettingsPlugin.on_settings_save = lambda self, data: saved.update(data)
+
+p = FakePlugin(make_client()[0])
+p._settings = FakeSettings({"host": "10.0.0.9", "port": 8082, "token": "stored",
+                            "poll": True})
+
+p.on_settings_save({"host": " 10.0.0.9 ", "port": "8082", "token": None, "poll": True})
+check("a masked (None) token is not written back", "token" not in saved, str(saved))
+check("a string port is normalised to int", saved.get("port") == 8082, str(saved))
+check("the host is trimmed", saved.get("host") == "10.0.0.9", repr(saved.get("host")))
+check("the client is rebuilt from settings after a save", p._client.port == 8082)
+
+saved.clear()
+p.on_settings_save({"token": ""})
+check("an empty token does not clear the stored one", "token" not in saved, str(saved))
+
+saved.clear()
+p.on_settings_save({"token": "retyped"})
+check("a retyped token is persisted", saved.get("token") == "retyped", str(saved))
+
+saved.clear()
+p.on_settings_save({"port": "not-a-number"})
+check("a non-numeric port is dropped, not persisted as a string",
+      "port" not in saved, str(saved))
+
+init.octoprint.plugin.SettingsPlugin.on_settings_save = _original_parent_save
+
+print()
+print("== test connection ==")
+
+# on_test builds a C3Client directly, so swap the class for the duration of the
+# test to prove what it SENDS (host/port/token fallback) and how it classifies
+# the answer.
+_transport_calls = []
+
+
+class FakeTransport:
+    def __init__(self, host, port=8082, token="", user="Enclosure", timeout=4.0):
+        self.host = host
+        self.port = port
+        self.token = token
+        _transport_calls.append(self)
+
+    def get_status(self):
+        return {"ok": True, "fw": "0.4.1", "ip": "10.201.93.245", "chamber": 240,
+                "chamberValid": True, "remote": True, "pid": {}}
+
+
+_init_client = init.C3Client
+init.C3Client = FakeTransport
+
+p = FakePlugin(make_client()[0])
+p._settings = FakeSettings({"host": "saved.local", "port": 8082,
+                            "token": "saved-token", "poll": True})
+
+_transport_calls.clear()
+res = call(p, "test", {"host": "10.201.93.245", "port": "8082", "token": None})
+check("test succeeds against a good answer", res.get("ok") is True, str(res))
+check("test reports the firmware version", res.get("fw") == "0.4.1", str(res))
+check("test reports the CYD link", res.get("cydLinked") is True, str(res))
+check("test falls back to the stored token when the field is masked",
+      _transport_calls and _transport_calls[-1].token == "saved-token",
+      str(_transport_calls and _transport_calls[-1].token))
+check("test uses the entered host, not the saved one",
+      _transport_calls and _transport_calls[-1].host == "10.201.93.245")
+
+_transport_calls.clear()
+call(p, "test", {"host": "", "port": None, "token": None})
+check("blank fields fall back to the saved settings",
+      _transport_calls and _transport_calls[-1].host == "saved.local"
+      and _transport_calls[-1].port == 8082, str(_transport_calls))
+
+# A refused command comes back as (body, status) - a 400, not a 200 with ok=false.
+bad = p.on_api_command("test", {"host": "h", "port": "not-a-number"})
+check("a non-numeric port is refused before any request", isinstance(bad, tuple) and bad[1] == 400, str(bad))
+
+init.C3Client = _init_client
+
+# Hints are the whole point of the feature: they name the remedy, and 8081 in
+# particular has to be called out, because it answers and looks like a bad token.
+p = FakePlugin(make_client()[0])
+check("a wrong port 8081 hint names 8082",
+      "8082" in p._test_hint("refused", "h", 8081, True),
+      p._test_hint("refused", "h", 8081, True))
+check("auth on 8081 is blamed on the port, not the token",
+      "8082" in p._test_hint("auth", "h", 8081, True),
+      p._test_hint("auth", "h", 8081, True))
+check("a 404 (the right token on 8081) still names 8082",
+      "8082" in p._test_hint("http", "h", 8081, True, status=404),
+      p._test_hint("http", "h", 8081, True, status=404))
+check("auth on 8082 points at ENC_API_TOKEN",
+      "ENC_API_TOKEN" in p._test_hint("auth", "h", 8082, True),
+      p._test_hint("auth", "h", 8082, True))
+check("a missing token is reported as missing",
+      "No API token" in p._test_hint("auth", "h", 8082, False),
+      p._test_hint("auth", "h", 8082, False))
+check("a DNS failure suggests the IP address",
+      "IP" in p._test_hint("dns", "name.local", 8082, True),
+      p._test_hint("dns", "name.local", 8082, True))
+
+print()
+print("== page wiring (the two mistakes that made the page look dead) ==")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PKG_DIR = os.path.dirname(HERE)
+with open(os.path.join(PKG_DIR, "octoprint_enclosure_fan", "templates",
+                       "enclosure_fan_settings.html"), encoding="utf-8") as handle:
+    settings_html = handle.read()
+with open(os.path.join(PKG_DIR, "octoprint_enclosure_fan", "static", "js",
+                       "enclosure_fan.js"), encoding="utf-8") as handle:
+    client_js = handle.read()
+
+
+def code_only(source):
+    """Strip // and /* */ comments.
+
+    The comments in this file TALK about simpleApiCommand and PNotify.notify, so
+    a naive substring count measures documentation rather than behaviour.
+    """
+    out = []
+    in_block = False
+    for line in source.splitlines():
+        stripped = line.strip()
+        if in_block:
+            if "*/" in stripped:
+                in_block = False
+            continue
+        if stripped.startswith("/*"):
+            if "*/" not in stripped:
+                in_block = True
+            continue
+        if stripped.startswith("//"):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+client_code = code_only(client_js)
+
+check("settings template binds through the settings view model",
+      "settingsViewModel.settings.plugins.enclosure_fan.host" in settings_html)
+check("settings template has no bare settings.plugins binding",
+      "value: settings.plugins" not in settings_html)
+check("view model exposes the dependency under that name",
+      "self.settingsViewModel = parameters[0]" in client_code)
+check("simpleApiCommand is only called through the promise wrapper",
+      client_code.count("simpleApiCommand(") == 1,
+      str(client_code.count("simpleApiCommand(")))
+check("no PNotify.notify (does not exist in OctoPrint 1.11)",
+      "PNotify.notify" not in client_code)
+check("the test button is wired", "testConnection" in settings_html
+      and "self.testConnection" in client_code)
+
+print()
 print("== live board (skipped unless ENC_API_TOKEN is set) ==")
 if not TOKEN:
     print("  SKIP  ENC_API_TOKEN not set - not running against real hardware")
@@ -269,7 +437,7 @@ else:
         # on_status() reads the CACHE, so populate it the way the poller thread
         # would. Testing it without a poll would only prove the cache starts empty.
         p._refresh()
-        snap = p.on_status()
+        snap = p.on_status({})
         check("live status cached", snap["ok"] is True)
         check("live remote flag present", "remote" in snap["status"],
               str(snap["status"].keys()))
