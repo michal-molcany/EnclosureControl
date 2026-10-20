@@ -107,7 +107,10 @@ tools/build_package.py      # builds dist/OctoPrint-EnclosureFan-<v>.zip
 
 `selftest_plugin.py` covers the CYD-link gate, input validation, poller recovery
 from transient failures, behaviour against a dead board, the token round-trip
-through a settings save, the connection-test classifications, and the two
-front-end wiring mistakes that once made the page look dead — plus a live check
+through a settings save, the connection-test classifications, and the three
+front-end bugs that once made the page look dead: a settings template bound
+against the wrong Knockout root, a promise-returning API called with a callback,
+and — the decisive one — the view model registered on a `DOMReady` event that
+OctoPrint never fires, so none of the other work ever ran. Plus a live check
 against the real C3 when one is reachable. It needs no OctoPrint installed: it
 stubs `octoprint.plugin` and drives the real plugin class.

@@ -279,7 +279,7 @@ board whose stored tuning has been cleared.
 #### The web UI (easiest)
 
 Open **`http://enclosure-fan-control.local:8082/`** from any browser on the network.
-Log in with **any username** and `ENC_API_TOKEN` as the password. The page shows
+Log in as user **`Enclosure`** with `ENC_API_TOKEN` as the password. The page shows
 the live gains, the chamber temperature, and whether what is running still
 matches what is in NVS - so it is obvious when a tuning is one reboot away from
 being lost. See `lib/EnclosureUi/README.md`.
@@ -287,12 +287,14 @@ being lost. See `lib/EnclosureUi/README.md`.
 #### Over HTTP
 
 Both the page and the API use HTTP Basic auth with `ENC_API_TOKEN` as the
-password (username ignored). The routes below live on **both** ports: 8081 is the
-enclosure API, 8082 the UI's own server.
+password. The username is **not** ignored - it is part of the credential, and it
+differs by port: **`Enclosure`** on 8082 (the UI's own server) and **`cyd`** on
+8081 (the enclosure API the CYD falls back to). The PID routes below exist on
+**both** ports.
 
 ```bash
 C3="http://<c3-host>:8081"
-AUTH="cyd:$ENC_API_TOKEN"
+AUTH="cyd:$ENC_API_TOKEN"               # port 8081: the CYD's username
 JSON='Content-Type: application/json'   # required - see the note below
 
 curl -u "$AUTH" $C3/api/pid                                     # current gains

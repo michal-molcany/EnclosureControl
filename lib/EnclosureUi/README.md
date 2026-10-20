@@ -4,17 +4,20 @@ A browser page served by the EnclosureFanControl (C3): live status, PID gain
 tuning, and manual fan/louvre control.
 
 Open **`http://enclosure-fan-control.local:8082/`** (or the board's IP). The
-browser asks for credentials: username **`cyd`**, password **`ENC_API_TOKEN`** from
-`include/enclosure_api.h` — the same secret the enclosure API uses. The browser
-then attaches those credentials to every request on its own, which is why the
-token never appears in the page's JavaScript, in a URL, or in browser storage.
+browser asks for credentials: username **`Enclosure`**, password
+**`ENC_API_TOKEN`** from `include/enclosure_api.h` — the same secret the
+enclosure API on port 8081 uses, but *not* the same username (8081 wants `cyd`).
+The browser then attaches those credentials to every request on its own, which is
+why the token never appears in the page's JavaScript, in a URL, or in browser
+storage.
 
-> The username is **`cyd`** and must match exactly. `WebServer::authenticate()`
-> base64-encodes `"<user>:<password>"` and compares the whole header, so the
-> username is part of the credential — any other username is rejected even with
-> the right password. (`cyd` is a leftover from when the CYD was the only
-> client; it is no longer descriptive, but changing it would lock out every
-> deployed browser and both firmwares' clients.)
+> The username is **`Enclosure`** and must match exactly.
+> `WebServer::authenticate()` base64-encodes `"<user>:<password>"` and compares
+> the whole header, so the username is part of the credential — any other
+> username is rejected even with the right password. It was `cyd` while the CYD
+> was the only client; the OctoPrint plugin fixes its username at `Enclosure`,
+> which is why the two ports now differ. Changing it again would lock out the
+> plugin and every deployed browser client.
 
 ## Why a page
 

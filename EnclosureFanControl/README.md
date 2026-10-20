@@ -30,10 +30,11 @@ CYD <-> C3 packet layout, timing and fallback rules are in
 ## Web UI
 
 Open **`http://enclosure-fan-control.local:8082/`** from any browser on the same
-network. Log in as user **`cyd`** with `ENC_API_TOKEN` as the password — the same
-secret the enclosure API on 8081 uses. The username must be exactly `cyd`:
-`WebServer` compares the whole `user:password` credential, so any other username
-is rejected even with the right token.
+network. Log in as user **`Enclosure`** with `ENC_API_TOKEN` as the password — the
+same secret the enclosure API on 8081 uses, though that port wants the username
+`cyd`. The username must be exactly `Enclosure` here: `WebServer` compares the
+whole `user:password` credential, so any other username is rejected even with the
+right token.
 
 The page shows what the board is doing (chamber temperature, state, louvre and
 fan, material, setpoint, whether the CYD is linked), and lets you:
@@ -62,7 +63,7 @@ The **OctoPrint address** card in the web UI, or:
 
 ```bash
 C3=http://<c3-host>:8082
-AUTH=cyd:$ENC_API_TOKEN
+AUTH=Enclosure:$ENC_API_TOKEN           # 8082 is the "Enclosure" user; 8081 is "cyd"
 JSON='Content-Type: application/json'   # required on POSTs with a body
 
 curl -u "$AUTH" $C3/api/status                      # current address + whether it is overridden
