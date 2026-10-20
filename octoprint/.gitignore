@@ -1,0 +1,7 @@
+# Build output from tools/build_package.py - the zip is reproducible from source.
+dist/
+
+# Compiled Python. Deliberately never shipped inside the archive: a stale .pyc
+# beside a plugin is a classic cause of a plugin that appears to load old code.
+__pycache__/
+*.py[cod]

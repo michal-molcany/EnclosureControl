@@ -1,0 +1,91 @@
+/* Fan Control tab - deliberately minimal styling.
+ *
+ * OctoPrint 1.x ships Bootstrap 2, whose .progress bars are fixed-height and
+ * whose responsive units (.span6 inside .row-fluid) already do the layout. This
+ * file only adds the handful of things Bootstrap has no class for: the meter
+ * blocks, the PID gain inputs sitting inline, and disabled-state emphasis.
+ */
+
+#tab_enclosure_fan h1 {
+    margin-bottom: 12px;
+}
+
+#tab_enclosure_fan h3 {
+    margin-top: 4px;
+    margin-bottom: 8px;
+}
+
+#tab_enclosure_fan h4 {
+    margin-top: 16px;
+    margin-bottom: 6px;
+}
+
+.ef-banner {
+    margin-bottom: 12px;
+}
+
+.ef-table td {
+    border-top: none;
+    padding: 3px 0;
+}
+
+.ef-table td:first-child {
+    width: 130px;
+    color: #777;
+}
+
+/* Output meters. The bar colour tracks the value so an unexpectedly open louvre
+ * reads at a glance, without needing the number. */
+.ef-meter {
+    margin-bottom: 12px;
+}
+
+.ef-meter label {
+    display: block;
+    margin-bottom: 3px;
+}
+
+.ef-meter-value {
+    font-weight: bold;
+}
+
+.ef-meter .progress {
+    height: 18px;
+    margin-bottom: 0;
+}
+
+.ef-meter .bar {
+    background-color: #468847;
+    transition: width 0.3s ease;
+}
+
+.ef-meter input[type="range"] {
+    width: 100%;
+    margin: 0;
+}
+
+.ef-pid .ef-gain {
+    margin-right: 12px;
+}
+
+.ef-pid .ef-gain input {
+    width: 70px;
+}
+
+.ef-modes {
+    margin-bottom: 12px;
+}
+
+.ef-help {
+    color: #777;
+    font-size: 12px;
+    margin-top: 6px;
+}
+
+/* Anything disabled by the CYD-link gate should look disabled at a glance, not
+ * just refuse clicks - the gate is the whole point of those controls. */
+#tab_enclosure_fan .disabled,
+#tab_enclosure_fan input[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

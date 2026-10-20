@@ -1,0 +1,56 @@
+<form class="form-horizontal">
+  <h4>Enclosure fan control (C3)</h4>
+
+  <div class="control-group">
+    <label class="control-label">Board address</label>
+    <div class="controls">
+      <input type="text" class="input-block-level" data-bind="value: settings.plugins.enclosure_fan.host">
+      <span class="help-block">
+        The mDNS name <code>enclosure-fan-control.local</code> survives the board taking a
+        new DHCP lease. A plain IP address works too, and is the fallback where mDNS is
+        blocked on the network.
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <label class="control-label">Port</label>
+    <div class="controls">
+      <input type="number" class="input-mini" data-bind="value: settings.plugins.enclosure_fan.port">
+      <span class="help-block">
+        8082 is the board's status/PID API and is the only port that reports whether a CYD
+        is linked. 8080 is the OTA endpoint and 8081 is the CYD's machine channel &mdash;
+        do not use either here.
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <label class="control-label">API token</label>
+    <div class="controls">
+      <input type="password" class="input-block-level" data-bind="value: settings.plugins.enclosure_fan.token, valueUpdate: 'blur'">
+      <span class="help-block">
+        The shared secret from the firmware's <code>ENC_API_TOKEN</code>, in
+        <code>include/enclosure_api.h</code>. The board requires HTTP Basic auth with the
+        username <code>Enclosure</code> and this as the password; the username is part of
+        the credential and is fixed by the plugin.
+        <br><br>
+        Stored in OctoPrint's <code>config.yaml</code>, which is not in version control.
+        Leave it empty only on a network where you have chosen to disable auth on the board.
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <div class="controls">
+      <label class="checkbox">
+        <input type="checkbox" data-bind="checked: settings.plugins.enclosure_fan.poll">
+        Poll the board for live status
+      </label>
+      <span class="help-block">
+        Off freezes the tab on the last known values. Useful when you are debugging
+        something else on the network and do not want the traffic.
+      </span>
+    </div>
+  </div>
+</form>
