@@ -405,11 +405,24 @@ $(function () {
     // `elements` is what actually binds the view model to the DOM: main.js takes
     // viewModel.elements as its bind targets, so omitting it constructs the view
     // model and then attaches it to nothing - a blank tab.
-    $(document).on("DOMReady", function () {
-        OCTOPRINT_VIEWMODELS.push({
-            construct: EnclosureFanViewModel,
-            dependencies: ["settingsViewModel", "loginStateViewModel"],
-            elements: ["#tab_plugin_enclosure_fan", "#settings_plugin_enclosure_fan"]
-        });
+    //
+    // THIS PUSH MUST HAPPEN IN A jQuery READY CALLBACK, and that callback must be
+    // registered before main.js's own. Plugin JS is packed into packed_plugins.js,
+    // which index.html loads BEFORE packed_core.js, and jQuery runs ready callbacks
+    // in registration order - so this runs while OCTOPRINT_VIEWMODELS is still
+    // being collected and before main.js resolves dependencies.
+    //
+    // Earlier versions wrapped this in $(document).on("DOMReady", ...). There is no
+    // such event: "DOMReady" appears exactly once in the entire bundled JavaScript,
+    // in this very line, because OctoPrint 1.x never fires it. The handler was
+    // never called, OCTOPRINT_VIEWMODELS stayed empty, and the plugin was never
+    // constructed at all - so the tab showed nothing and every data-bind in the
+    // settings page (including its test button) sat there completely inert. That
+    // looked identical to a broken plugin and could not be diagnosed from the
+    // Python side, which was answering every request correctly.
+    OCTOPRINT_VIEWMODELS.push({
+        construct: EnclosureFanViewModel,
+        dependencies: ["settingsViewModel", "loginStateViewModel"],
+        elements: ["#tab_plugin_enclosure_fan", "#settings_plugin_enclosure_fan"]
     });
 });

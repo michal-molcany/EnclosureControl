@@ -422,6 +422,16 @@ check("no PNotify.notify (does not exist in OctoPrint 1.11)",
 check("the test button is wired", "testConnection" in settings_html
       and "self.testConnection" in client_code)
 
+# The registration that makes any of the above reachable. OctoPrint 1.x has no
+# "DOMReady" event - waiting for one means the view model is never constructed,
+# nothing is ever bound, and the whole page is inert while looking fine.
+check("the view model is registered with OCTOPRINT_VIEWMODELS",
+      "OCTOPRINT_VIEWMODELS.push(" in client_code)
+check("registration does not wait for a DOMReady event (OctoPrint never fires one)",
+      "DOMReady" not in client_code)
+check("registration happens inside the single jQuery ready callback",
+      client_code.count("$(function") == 1)
+
 print()
 print("== live board (skipped unless ENC_API_TOKEN is set) ==")
 if not TOKEN:
