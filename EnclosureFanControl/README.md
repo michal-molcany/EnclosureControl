@@ -242,10 +242,10 @@ The link prints a status line every 5 s and a discovery summary every 10 s:
 
 ```text
 [LINK] own MAC: 7C:9E:BD:12:34:56
-[LINK] ap ERNI Device Network ch 6 peer AC:EB:E6:4B:46:1C
+[LINK] ap ExampleNet ch 6 peer AA:BB:CC:DD:EE:FF
 [LINK] peer added on channel 6
 [LINK] discovery hellosRx=0 we=ch6 NO PEER HEARD - check both boards are on the same AP and channel
-[LINK] discovery: peer learned AC:EB:E6:4B:46:1C
+[LINK] discovery: peer learned AA:BB:CC:DD:EE:FF
 [LINK] ch=6 rx=14 tx=61/0 drop=0 last=- age=1002ms
 ```
 
