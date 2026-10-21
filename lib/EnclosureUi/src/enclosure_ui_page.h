@@ -54,6 +54,7 @@ h1{font-size:18px;margin:0}
 .meta{color:var(--dim);font-size:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px}
 .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 10px}
+.subhead{display:flex;align-items:center;gap:8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:16px 0 6px;padding-top:12px;border-top:1px solid var(--line)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px 14px}
 .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
 .v{font-size:18px;font-variant-numeric:tabular-nums}
@@ -137,6 +138,13 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
   <div class="note">Apply changes the gains the regulator is running on. That is RAM only &mdash; they are lost on
     reboot until you press <em>Save</em>, which writes them to the board's NVS.</div>
   <div class="msg" id="pidmsg"></div>
+
+  <div class="subhead">PID calibration <span class="badge" id="calbadge">idle</span></div>
+  <div class="note">Runs a relay-feedback auto-tune (the method ESPHome uses). It heats the bed to 90&nbsp;&deg;C,
+    oscillates the louvre and fan around a 40&nbsp;&deg;C chamber setpoint, measures the ultimate gain and period,
+    then offers new Ziegler&ndash;Nichols gains. The printer must be idle and the run takes up to 20&nbsp;minutes.</div>
+  <div class="btns"><button class="primary" id="calstart">Calibrate</button></div>
+  <div class="msg" id="calmsg"></div>
 </div>
 
 <div class="card">
@@ -172,15 +180,6 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
   <div class="note" id="cydwarn">The CYD re-sends its own mode every 2&nbsp;s while it is linked, so a manual change made
     here only holds while the display is unlinked.</div>
   <div class="msg" id="manmsg"></div>
-</div>
-
-<div class="card">
-  <h2>PID calibration <span class="badge" id="calbadge">idle</span></h2>
-  <div class="note">Runs a relay-feedback auto-tune (the method ESPHome uses). It heats the bed to 90&nbsp;&deg;C,
-    oscillates the louvre and fan around a 40&nbsp;&deg;C chamber setpoint, measures the ultimate gain and period,
-    then offers new Ziegler&ndash;Nichols gains. The printer must be idle and the run takes up to 20&nbsp;minutes.</div>
-  <div class="btns"><button class="primary" id="calstart">Calibrate</button></div>
-  <div class="msg" id="calmsg"></div>
 </div>
 
 </div>
@@ -335,7 +334,7 @@ function renderCal(s) {
     badge.textContent = 'idle';
     badge.className = 'badge';
   }
-  $('calstart').disabled = !!(c.active || c.hasResult || c.aborted);
+  $('calstart').disabled = !!(c.active || c.hasResult || c.aborted || s.job);
 
   // The relay owns the outputs for the duration, so the board ignores manual
   // commands. Disable the same controls here rather than letting the page claim
@@ -349,8 +348,14 @@ function renderCal(s) {
     if (el) { el.disabled = busy; }
   });
 
-  if (calConfirm && !c.active && !c.hasResult) { showModal('calconfirm'); }
-  else { hideModal('calconfirm'); }
+  // A job starting mid-confirmation closes the dialog: the button is disabled
+  // from the next poll, and there is no point leaving a Start button that the
+  // board would refuse anyway.
+  if (calConfirm && !c.active && !c.hasResult && !s.job) { showModal('calconfirm'); }
+  else {
+    hideModal('calconfirm');
+    if (s.job) { calConfirm = false; }
+  }
 
   if (c.active) {
     hideModal('calresult');
@@ -405,7 +410,9 @@ function renderCal(s) {
   } else {
     hideModal('calprogress');
     hideModal('calresult');
-    $('calmsg').textContent = '';
+    $('calmsg').textContent = s.job
+      ? 'Calibration is disabled while the printer is busy.'
+      : '';
   }
 }
 

@@ -84,7 +84,7 @@ What it does, in order:
 Safety and limits:
 
 - The printer must be **idle** (no print, no pause) and the chamber below 45 °C
-  at the start.
+  at the start. The **Calibrate** button is disabled while a job is active.
 - The run aborts after **20 minutes**, above **50 °C** chamber, if the bed is not
   at temperature within 5 minutes, if OctoPrint data goes stale for 30 s, if a
   print starts while it runs, or on **Cancel**.

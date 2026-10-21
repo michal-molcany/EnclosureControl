@@ -189,7 +189,8 @@ confirm, progress and result dialogs from it; the confirmation itself is
 browser-only, so the board is not asked to do anything until **Start** is
 pressed.
 
-While a run is active the page disables **Calibrate**, shows the phase, chamber,
+**Calibrate** is also disabled while a job is active, with a note under the
+button. While a run is active the page disables it, shows the phase, chamber,
 bed, elapsed time and relay phase count, and offers **Cancel**. The result dialog
 shows old versus new gains, `Ku`, `Tu`, the measured amplitude, the relay
 half-span `d`, and warnings for clamped gains or a failed quality gate. **Calibrate** stays
