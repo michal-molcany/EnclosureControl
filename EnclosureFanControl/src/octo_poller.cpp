@@ -2,6 +2,7 @@
 
 #include <WiFi.h>
 #include <OctoPrinter.h>
+#include <atomic>
 #include <string.h>
 
 #include "const.h"
@@ -16,6 +17,11 @@ namespace
     OctoSnapshot shared;
     volatile bool hasData = false;
     volatile bool cancelRequested = false;
+    // -1 = no request. Atomic, not a plain int: the regulator task publishes a
+    // target while the poll task does an exchange(), and a read-then-clear on a
+    // plain int could lose a bed-off request that landed between the two.
+    // exchange() makes last-write-wins exact.
+    std::atomic<int> pendingBedTarget(-1);
 
     // Pending endpoint change, published by octoPollerSetEndpoint() from the
     // main/web-UI task and consumed by pollTask(). `pending` is the guard: the
@@ -128,6 +134,15 @@ namespace
                     const int status = api.cancelJob();
                     Serial.printf("[octoPoll] cancel job HTTP %d\n", status);
                 }
+                // Bed target for the calibration. Read-and-clear before the
+                // request: a request arriving while this one is in flight is a
+                // newer target and must win, not be consumed by this pass.
+                const int bedTarget = pendingBedTarget.exchange(-1);
+                if (bedTarget >= 0)
+                {
+                    const int status = api.preheatBed(bedTarget);
+                    Serial.printf("[octoPoll] bed target %d C HTTP %d\n", bedTarget, status);
+                }
                 api.update();
                 publishSnapshot();
             }
@@ -163,6 +178,11 @@ bool octoPollerHasData()
 void octoPollerRequestCancel()
 {
     cancelRequested = true;
+}
+
+void octoPollerRequestBed(int targetC)
+{
+    pendingBedTarget.store(targetC < 0 ? 0 : targetC);
 }
 
 void octoPollerSetEndpoint(IPAddress host, uint16_t port)

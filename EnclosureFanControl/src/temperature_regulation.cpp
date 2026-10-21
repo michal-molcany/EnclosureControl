@@ -2,6 +2,8 @@
 #include "const.h"
 #include "servo_louver.h"
 
+#include <string.h>
+
 static void fanPwmInit()
 {
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -165,6 +167,21 @@ void TemperatureRegulation::update(const OctoSnapshot &snap)
         }
         effective = lastSnap;
         haveData = true;
+    }
+
+    // A calibration run owns the outputs and bypasses the material/cooldown
+    // machine entirely. The emergency check still goes first: it is the one
+    // path that must never be behind an experiment, especially with a 90 C bed
+    // heating the chamber.
+    if (calibrationRunning())
+    {
+        if (haveData && updateEmergency(effective.chamberActual))
+        {
+            finishCalibration(false, "emergency: chamber reached 55 C");
+            return;
+        }
+        updateCalibration(effective, haveData, now);
+        return;
     }
 
     const bool useRemote = remoteLinkAlive();
@@ -439,6 +456,20 @@ void TemperatureRegulation::applyCommand(const EnclosureCommand &cmd, bool fromR
                   static_cast<unsigned>(cmd.fanPct));
 #endif
 
+    // The relay needs the outputs to itself. A linked CYD keeps refreshing the
+    // link liveness above - so the board still reports it as connected - but its
+    // mode and material are ignored until the run ends. Otherwise its 2 s
+    // heartbeat would fight the relay every other second, which is exactly the
+    // kind of interference that makes the measured amplitude meaningless.
+    if (calibrationRunning())
+    {
+#if SERIAL_DEBUG
+        Serial.printf("[CAL] %s command ignored while calibration runs\n",
+                      fromRemote ? "CYD" : "web UI");
+#endif
+        return;
+    }
+
     if (validRemoteMaterial(cmd.material))
     {
         remoteMaterial = cmd.material;
@@ -461,6 +492,365 @@ void TemperatureRegulation::applyCommand(const EnclosureCommand &cmd, bool fromR
             remoteSetpoint = cmd.setpoint;
             hasRemoteSetpoint = true;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PID calibration
+// ---------------------------------------------------------------------------
+
+bool TemperatureRegulation::calibrationRunning() const
+{
+    return calPhase == PidCalibration::Phase::Preheating ||
+           calPhase == PidCalibration::Phase::Settling ||
+           calPhase == PidCalibration::Phase::Relay;
+}
+
+bool TemperatureRegulation::startCalibration(String &reason)
+{
+    reason = "";
+
+    if (calibrationRunning())
+    {
+        reason = "calibration is already running";
+        return false;
+    }
+    if (calPhase == PidCalibration::Phase::Done)
+    {
+        reason = "apply or discard the previous calibration result first";
+        return false;
+    }
+    if (emergencyActive)
+    {
+        reason = "emergency cooling is active";
+        return false;
+    }
+    // The bed is driven through OctoPrint, so without a valid snapshot there is
+    // no way to preheat it and no way to watch the chamber. Refuse rather than
+    // start an experiment blind.
+    if (!hasGoodData || !isDataValid(lastSnap))
+    {
+        reason = "no valid OctoPrint data - the bed cannot be controlled";
+        return false;
+    }
+    // The relay needs the chamber to itself. A print would both move the
+    // temperature and compete for the same printer.
+    if (lastSnap.printing || lastSnap.paused || jobWasActive)
+    {
+        reason = "the printer is not idle (printing, paused, or still cooling down)";
+        return false;
+    }
+    if (!isfinite(lastSnap.chamberActual) || !isfinite(lastSnap.bedActual))
+    {
+        reason = "the printer's temperature readings are not usable";
+        return false;
+    }
+    // Starting from an already-warm chamber would spend the preheat phase
+    // climbing towards the 50 C abort instead of preparing the experiment. The
+    // run is recoverable, but refusing up front is clearer than failing later.
+    if (lastSnap.chamberActual >= CAL_PREHEAT_COOL_C)
+    {
+        reason = "the chamber is already above 45 C - let it cool before calibrating";
+        return false;
+    }
+
+    calOldGains = gains();
+    calResult = PidCalibration::Result();
+    calError = "";
+    calResultApplied = false;
+    calPhase = PidCalibration::Phase::Preheating;
+    calStartedMs = millis();
+    calPhaseStartedMs = calStartedMs;
+    calFinishedMs = 0;
+    calLastSampleMs = lastSnap.updatedMs;
+    calLastSampleAtMs = calStartedMs;
+
+    // Zero the detectors now, not at relay start: the progress dialog shows the
+    // phase count from the first second, and a count left over from a previous
+    // run would look like the new one was already oscillating.
+    calAutotuner.begin(CAL_RELAY_LOW, CAL_RELAY_HIGH, CAL_NOISEBAND_C);
+
+    // The run owns the outputs; leave the normal controller in AUTO so the
+    // state it resumes into is deterministic, and drop any integral wound up by
+    // the previous mode.
+    controlMode = ENC_MODE_AUTO;
+    pidController.reset();
+    lastDemand = 0.0f;
+
+    octoPollerRequestBed(CAL_BED_TARGET_C);
+
+    Serial.printf("[CAL] starting: bed %d C, setpoint %.1f C, relay %.0f-%.0f, noiseband %.2f C\n",
+                  CAL_BED_TARGET_C, (double)CAL_SETPOINT_C, (double)CAL_RELAY_LOW,
+                  (double)CAL_RELAY_HIGH, (double)CAL_NOISEBAND_C);
+    return true;
+}
+
+void TemperatureRegulation::cancelCalibration()
+{
+    if (calibrationRunning())
+        finishCalibration(false, "cancelled from the web page");
+}
+
+bool TemperatureRegulation::applyCalibrationResult(String &reason)
+{
+    reason = "";
+    if (calPhase != PidCalibration::Phase::Done || !calResult.valid)
+    {
+        reason = "no calibration result to apply";
+        return false;
+    }
+    if (!pidController.setGains(calResult.gains))
+    {
+        reason = "the calculated gains are outside the accepted range";
+        return false;
+    }
+
+    calResultApplied = true;
+    const PidGains g = calResult.gains;
+    // Consume the result: the gains are now the running gains, and the page's
+    // PID card shows them. Leaving the dialog armed would only invite a second
+    // apply of the same numbers.
+    calPhase = PidCalibration::Phase::None;
+    Serial.printf("[CAL] applied kp=%.3f ki=%.3f kd=%.3f\n",
+                  (double)g.kp, (double)g.ki, (double)g.kd);
+    return true;
+}
+
+void TemperatureRegulation::discardCalibrationResult()
+{
+    // A dismissal is not a cancel. Refusing while the relay is running keeps
+    // the only two ways out of a run explicit: it finishes, or it is cancelled.
+    if (calibrationRunning())
+        return;
+
+    calPhase = PidCalibration::Phase::None;
+    calError = "";
+    calResult = PidCalibration::Result();
+    calResultApplied = false;
+}
+
+PidCalibration::Info TemperatureRegulation::calibrationInfo() const
+{
+    PidCalibration::Info info;
+    info.phase = calPhase;
+    info.running = calibrationRunning();
+    info.hasResult = (calPhase == PidCalibration::Phase::Done) && calResult.valid;
+    info.aborted = (calPhase == PidCalibration::Phase::Aborted);
+
+    if (calStartedMs == 0)
+        info.elapsedMs = 0;
+    else if (calibrationRunning())
+        info.elapsedMs = (uint32_t)(millis() - calStartedMs);
+    else
+        info.elapsedMs = (uint32_t)(calFinishedMs - calStartedMs);
+
+    info.cycles = calAutotuner.phaseCount();
+    info.ku = calResult.ku;
+    info.pu = calResult.pu;
+    info.amplitude = calResult.amplitude;
+    info.relayDelta = calResult.relayDelta;
+    info.oldGains = calOldGains;
+    info.newGains = calResult.gains;
+    info.clamped = calResult.clamped;
+    info.applied = calResultApplied;
+    info.zcSymmetrical = calResult.zcSymmetrical;
+    info.amplitudeConvergent = calResult.amplitudeConvergent;
+    info.proceededWithWarning = calResult.proceededWithWarning;
+    info.bedTargetC = (float)CAL_BED_TARGET_C;
+    info.setpointC = CAL_SETPOINT_C;
+
+    strncpy(info.error, calError.c_str(), sizeof(info.error) - 1);
+    info.error[sizeof(info.error) - 1] = '\0';
+    return info;
+}
+
+void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool haveData,
+                                              unsigned long now)
+{
+    if (!haveData)
+    {
+        finishCalibration(false, "lost valid OctoPrint data");
+        return;
+    }
+
+    if (now - calStartedMs > CAL_MAX_DURATION_MS)
+    {
+        finishCalibration(false, "timed out after 20 minutes");
+        return;
+    }
+
+    // The normal regulator deliberately keeps running on the last-good snapshot
+    // through a short poll outage. The relay cannot afford that: it is actively
+    // driving the temperature, so an outage means the next relay decision would
+    // be based on a reading that may no longer be true.
+    if (snap.updatedMs != calLastSampleMs)
+    {
+        calLastSampleMs = snap.updatedMs;
+        calLastSampleAtMs = now;
+    }
+    else if (now - calLastSampleAtMs > CAL_DATA_STALE_MS)
+    {
+        finishCalibration(false, "OctoPrint data went stale (link lost?)");
+        return;
+    }
+
+    // A print starting mid-run changes the chamber's heat load and would fight
+    // the relay for the fan and louvre. The start check refuses a busy printer;
+    // this keeps that promise if one starts afterwards.
+    if (snap.printing || snap.paused)
+    {
+        finishCalibration(false, "a print started during calibration");
+        return;
+    }
+
+    const float chamber = (float)snap.chamberActual;
+    if (!isfinite(chamber))
+    {
+        finishCalibration(false, "the chamber reading is not usable");
+        return;
+    }
+    // Below the 55 C emergency trigger and above the 40 C setpoint, so the
+    // no-cooling half of the relay has headroom without approaching the point
+    // where the board would cancel a print.
+    if (chamber > CAL_ABORT_CHAMBER_C)
+    {
+        finishCalibration(false, "chamber exceeded the 50 C abort limit");
+        return;
+    }
+
+    switch (calPhase)
+    {
+    case PidCalibration::Phase::Preheating:
+        // Let the bed heat the chamber, but do not let the chamber drift into
+        // the abort limit on the way there. Opening the louvre is passive; the
+        // fan stays off so it does not cool the bed's heat source.
+        if (chamber >= CAL_PREHEAT_COOL_C)
+        {
+            setLouvrePercent(100);
+            forceFanOff();
+        }
+        else
+        {
+            closeOutputs();
+        }
+
+        if (snap.bedActual >= CAL_BED_TARGET_C - CAL_BED_TOLERANCE_C)
+        {
+            calPhase = PidCalibration::Phase::Settling;
+            calPhaseStartedMs = now;
+            Serial.println("[CAL] bed at target - settling");
+        }
+        else if (now - calPhaseStartedMs > CAL_PREHEAT_TIMEOUT_MS)
+        {
+            finishCalibration(false, "the bed did not reach 90 C within 5 minutes");
+        }
+        break;
+
+    case PidCalibration::Phase::Settling:
+        // Short confirmation that the bed is holding target. Keep the same
+        // preheat strategy so the chamber does not climb while we wait.
+        if (chamber >= CAL_PREHEAT_COOL_C)
+        {
+            setLouvrePercent(100);
+            forceFanOff();
+        }
+        else
+        {
+            closeOutputs();
+        }
+
+        if (now - calPhaseStartedMs >= CAL_SETTLE_MS)
+        {
+            calAutotuner.begin(CAL_RELAY_LOW, CAL_RELAY_HIGH, CAL_NOISEBAND_C);
+            calPhase = PidCalibration::Phase::Relay;
+            calPhaseStartedMs = now;
+            Serial.printf("[CAL] relay autotune started at %.1f C (chamber %.1f C)\n",
+                          (double)CAL_SETPOINT_C, (double)chamber);
+        }
+        break;
+
+    case PidCalibration::Phase::Relay:
+    {
+        bool finished = false;
+        const float output = calAutotuner.update(chamber - CAL_SETPOINT_C,
+                                                 (uint32_t)now, finished, calResult);
+        applyRawDemand(output);
+        if (finished)
+            finishCalibration(true, nullptr);
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+
+void TemperatureRegulation::finishCalibration(bool success, const char *reason)
+{
+    const bool wasRunning = calibrationRunning();
+
+    // The bed goes off on success AND on every abort. Leaving a 90 C bed behind
+    // after a failed experiment is the one outcome that must never happen.
+    octoPollerRequestBed(0);
+
+    calFinishedMs = millis();
+    calResultApplied = false;
+    pidController.reset();
+    lastDemand = 0.0f;
+
+    if (success)
+    {
+        calPhase = PidCalibration::Phase::Done;
+        calError = "";
+        Serial.printf("[CAL] done: ku=%.2f pu=%.1f s amp=%.2f C kp=%.3f ki=%.3f kd=%.3f%s\n",
+                      (double)calResult.ku, (double)calResult.pu,
+                      (double)calResult.amplitude, (double)calResult.gains.kp,
+                      (double)calResult.gains.ki, (double)calResult.gains.kd,
+                      calResult.clamped ? " (clamped)" : "");
+    }
+    else
+    {
+        calPhase = PidCalibration::Phase::Aborted;
+        calError = reason ? reason : "aborted";
+        calResult = PidCalibration::Result();
+        Serial.printf("[CAL] aborted: %s\n", calError.c_str());
+    }
+
+    if (wasRunning)
+    {
+        // Full cooling until the chamber is back at the normal cooldown end,
+        // then the normal state machine closes the outputs and returns to IDLE.
+        // This is also the safe path for an abort at 50 C: the louvre and fan
+        // stay open rather than shutting a hot chamber in.
+        transitionToState(COOLING_FAN);
+    }
+}
+
+void TemperatureRegulation::applyRawDemand(float demand)
+{
+    if (!isfinite(demand))
+        demand = 0.0f;
+    if (demand < 0.0f)
+        demand = 0.0f;
+    if (demand > 200.0f)
+        demand = 200.0f;
+
+    const uint8_t louvre = demand >= 100.0f ? 100 : (uint8_t)lroundf(demand);
+    setLouvrePercent(louvre);
+
+    if (demand > 100.0f)
+    {
+        const uint8_t fan = (uint8_t)constrain(lroundf(demand) - 100, 0, 100);
+        if (fan > 0)
+            setFanPercent(fan);
+        else
+            forceFanOff();
+    }
+    else
+    {
+        // Immediate stop. setFanPercent(0) would honour FAN_MIN_ON_MS and
+        // stretch the cooling phase, biasing the measured period.
+        forceFanOff();
     }
 }
 
@@ -670,6 +1060,9 @@ String TemperatureRegulation::getCurrentState() const
 {
     if (emergencyActive)
         return "EMERGENCY";
+
+    if (calibrationRunning())
+        return "CAL";
 
     switch (currentState)
     {

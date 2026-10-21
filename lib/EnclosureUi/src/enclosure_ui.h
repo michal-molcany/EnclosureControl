@@ -38,6 +38,35 @@
 
 namespace EnclosureUi
 {
+    // PID calibration, as the page renders it.
+    //
+    // The numeric phase codes match PidCalibration::Phase in the programme; this
+    // library only passes them through, deliberately, so the UI does not have to
+    // depend on a header owned by the board firmware.
+    struct CalibrationStatus
+    {
+        bool active = false;   // a run is in progress
+        bool hasResult = false; // finished with a result waiting for apply/discard
+        bool aborted = false;   // stopped without a result
+        uint8_t phase = 0;
+        unsigned long elapsedMs = 0;
+        uint16_t cycles = 0;
+        float ku = 0.0f;
+        float pu = 0.0f;
+        float amplitude = 0.0f;
+        float relayDelta = 0.0f;
+        PidGains oldGains = {0.0f, 0.0f, 0.0f};
+        PidGains newGains = {0.0f, 0.0f, 0.0f};
+        bool clamped = false;
+        bool applied = false;
+        bool zcSymmetrical = false;
+        bool amplitudeConvergent = false;
+        bool proceededWithWarning = false;
+        float bedTargetC = 0.0f;
+        float setpointC = 0.0f;
+        String error;
+    };
+
     // Snapshot the page renders. Filled by the programme at request time, so this
     // library knows nothing about TemperatureRegulation, the OLED, or ESP-NOW.
     struct Status
@@ -45,6 +74,9 @@ namespace EnclosureUi
         // Chamber temperature in 0.1 C. ENC_CHAMBER_INVALID means "no reading",
         // which the page must show as unavailable rather than as -3276.8 C.
         int16_t chamberCx10 = ENC_CHAMBER_INVALID;
+        // Bed temperature in 0.1 C, same encoding. Shown by the calibration
+        // progress dialog so the preheat phase is observable.
+        int16_t bedCx10 = ENC_CHAMBER_INVALID;
         // ENC_STATE_* / ENC_MODE_* from enclosure_proto.h, passed through as
         // codes so this header stays the single source of those enumerations.
         uint8_t state = ENC_STATE_IDLE;
@@ -70,6 +102,9 @@ namespace EnclosureUi
         // True when the NVS copy of the gains still matches the running ones,
         // i.e. nothing applied through the UI is one reboot away from being lost.
         bool gainsSaved = true;
+
+        // PID calibration state. Empty/inactive for a board that never runs one.
+        CalibrationStatus calibration;
 
         // The OctoPrint address this board is polling, and whether it came from
         // a stored override rather than the compiled-in header. The page shows
@@ -111,6 +146,14 @@ namespace EnclosureUi
     // rather than pretending to have saved.
     using PidPersist = void (*)();
 
+    // Runs one calibration action: "start", "cancel", "apply" or "discard".
+    //
+    // Returns false with a human-readable `reason` when the board refuses - a
+    // print is running, there is no result to apply, a run is already active.
+    // The server turns that into a 409 and the page shows the text verbatim,
+    // which is more useful than a generic "conflict".
+    using CalibrationHandler = bool (*)(const char *action, String &reason);
+
     // Receives a decoded EnclosureCommand from POST /api/manual. This is a LOCAL
     // command, not one from the CYD, so the handler must apply it WITHOUT
     // refreshing the remote-link liveness - otherwise a browser click would make
@@ -144,7 +187,10 @@ namespace EnclosureUi
 
     // Drops every stored override - address AND key - returning both to their
     // compiled-in defaults. One button, because they are configured as a pair.
-    using EndpointReset = void (*)();
+    // Returns false with a reason when the reset is not safe right now (the
+    // programme refuses it during a PID calibration, where the final bed-off
+    // still has to reach the server the run started with).
+    using EndpointReset = bool (*)(String &reason);
 
     struct Config
     {
@@ -159,6 +205,7 @@ namespace EnclosureUi
         PidSetter setPid = nullptr;
         PidPersist savePid = nullptr;
         PidPersist restoreDefaultPid = nullptr;
+        CalibrationHandler calibrate = nullptr;
         ManualHandler manual = nullptr;
         EndpointSetter setEndpoint = nullptr;
         EndpointReset clearEndpoint = nullptr;
@@ -167,10 +214,11 @@ namespace EnclosureUi
     // Starts its own WebServer on cfg.port. Call once after Wi-Fi is up.
     //
     // Every callback is optional. Without status there is no /api/status; without
-    // the PID callbacks the /api/pid routes answer 501; without manual there is
-    // no /api/manual; without setEndpoint there is no /api/octoprint. A board that
-    // wires up only part of this still serves the page, with the missing sections
-    // reporting why rather than failing silently.
+    // the PID callbacks the /api/pid routes answer 501; without calibrate the
+    // /api/calibrate route answers 501; without manual there is no /api/manual;
+    // without setEndpoint there is no /api/octoprint. A board that wires up only
+    // part of this still serves the page, with the missing sections reporting why
+    // rather than failing silently.
     void begin(const Config &cfg);
 
     // Handles one pending request. Call from loop(); returns immediately.

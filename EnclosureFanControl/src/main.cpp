@@ -195,6 +195,8 @@ static EnclosureUi::Status provideEnclosureUiStatus()
 {
   EnclosureUi::Status s;
   s.chamberCx10 = g_chamberValid ? (int16_t)(g_chamberTemp * 10.0) : ENC_CHAMBER_INVALID;
+  const double bedC = tempRegulation.bedActual();
+  s.bedCx10 = (g_chamberValid && isfinite(bedC)) ? (int16_t)(bedC * 10.0) : ENC_CHAMBER_INVALID;
   s.state = tempRegulation.stateCode();
   s.mode = tempRegulation.controlModeCode();
   s.louvrePct = tempRegulation.louvrePercent();
@@ -217,6 +219,31 @@ static EnclosureUi::Status provideEnclosureUiStatus()
   // Reported as "the CYD is being told", never as "the CYD has it": telemetry
   // is one-way, so this board cannot know what the far end stored.
   s.octoSentToCyd = espnowLinkHasPeer();
+
+  // Calibration: a straight copy of what the regulator reports. The phase code
+  // is PidCalibration::Phase, passed through as a number so the UI library does
+  // not need the board's header.
+  const PidCalibration::Info cal = tempRegulation.calibrationInfo();
+  s.calibration.active = cal.running;
+  s.calibration.hasResult = cal.hasResult;
+  s.calibration.aborted = cal.aborted;
+  s.calibration.phase = (uint8_t)cal.phase;
+  s.calibration.elapsedMs = cal.elapsedMs;
+  s.calibration.cycles = cal.cycles;
+  s.calibration.ku = cal.ku;
+  s.calibration.pu = cal.pu;
+  s.calibration.amplitude = cal.amplitude;
+  s.calibration.relayDelta = cal.relayDelta;
+  s.calibration.oldGains = cal.oldGains;
+  s.calibration.newGains = cal.newGains;
+  s.calibration.clamped = cal.clamped;
+  s.calibration.applied = cal.applied;
+  s.calibration.zcSymmetrical = cal.zcSymmetrical;
+  s.calibration.amplitudeConvergent = cal.amplitudeConvergent;
+  s.calibration.proceededWithWarning = cal.proceededWithWarning;
+  s.calibration.bedTargetC = cal.bedTargetC;
+  s.calibration.setpointC = cal.setpointC;
+  s.calibration.error = String(cal.error);
   return s;
 }
 
@@ -227,6 +254,31 @@ static EnclosureUi::Status provideEnclosureUiStatus()
 static void applyEnclosureUiManual(const EnclosureCommand &cmd)
 {
   tempRegulation.applyLocalCommand(cmd);
+}
+
+// One entry point for the calibration lifecycle. The regulator owns every
+// decision - whether a run may start, whether one is still legal, what the
+// result is - and this only maps the wire action onto it. Returning the reason
+// string is what lets the page say "the printer is not idle" instead of just
+// "HTTP 409".
+static bool handleEnclosureUiCalibration(const char *action, String &reason)
+{
+  if (strcmp(action, "start") == 0)
+    return tempRegulation.startCalibration(reason);
+  if (strcmp(action, "cancel") == 0)
+  {
+    tempRegulation.cancelCalibration();
+    return true;
+  }
+  if (strcmp(action, "apply") == 0)
+    return tempRegulation.applyCalibrationResult(reason);
+  if (strcmp(action, "discard") == 0)
+  {
+    tempRegulation.discardCalibrationResult();
+    return true;
+  }
+  reason = "unknown calibration action";
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +300,14 @@ static bool applyEnclosureUiEndpoint(IPAddress ip, uint16_t port, const char *ke
                                      String &reason)
 {
   reason = "";
+  // The calibration's final bed-off goes through the address in force when it
+  // finishes. Moving the target mid-run would leave the first printer's bed at
+  // 90 C, so refuse until the run is over.
+  if (tempRegulation.calibrationInfo().running)
+  {
+    reason = "a PID calibration is running - change the address after it finishes";
+    return false;
+  }
   // A pasted key is the candidate; a blank field means "keep the one in force".
   // Either way the probe runs against the CANDIDATE ADDRESS with the CANDIDATE
   // KEY, which is the only combination that answers the question being asked.
@@ -270,10 +330,17 @@ static bool applyEnclosureUiEndpoint(IPAddress ip, uint16_t port, const char *ke
 // that is known to have worked. Both are cleared together because the page sets
 // them as a pair - see applyEnclosureUiEndpoint() for why they cannot be set
 // independently.
-static void resetEnclosureUiEndpoint()
+static bool resetEnclosureUiEndpoint(String &reason)
 {
+  reason = "";
+  if (tempRegulation.calibrationInfo().running)
+  {
+    reason = "a PID calibration is running - reset the address after it finishes";
+    return false;
+  }
   octoEndpointClear();
   octoEndpointClearApiKey();
+  return true;
 }
 
 // Suppresses the normal chamber repaint so the OLED shows OTA progress (and
@@ -475,6 +542,7 @@ void setup()
   ui.setPid = applyEnclosurePid;
   ui.savePid = pidWrite;
   ui.restoreDefaultPid = pidRestoreDefaults;
+  ui.calibrate = handleEnclosureUiCalibration;
   ui.manual = applyEnclosureUiManual;
   ui.setEndpoint = applyEnclosureUiEndpoint;
   ui.clearEndpoint = resetEnclosureUiEndpoint;

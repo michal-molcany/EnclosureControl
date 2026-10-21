@@ -94,6 +94,52 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 // nowhere it can be edited by accident.
 #define PID_UPDATE_INTERVAL 1000 // 1 second
 
+// ---------------------------------------------------------------------------
+// PID calibration (web UI "Calibrate" button)
+//
+// The experiment is a relay-feedback auto-tune: the bed is heated to 90 C to
+// turn the enclosure into a repeatable heat load, then the louvre/fan are
+// switched between full cooling (200) and no cooling (0) around a 40 C chamber
+// setpoint. The resulting oscillation gives the ultimate gain and period, from
+// which Ziegler-Nichols produces the gains.
+//
+// 40 C is deliberately BELOW the 50 C abort and the 55 C emergency trigger: the
+// no-cooling half of the relay lets the chamber rise, so the setpoint has to
+// leave headroom for that overshoot. Do not raise it without re-checking those
+// two limits.
+// ---------------------------------------------------------------------------
+#define CAL_BED_TARGET_C 90
+// How close the bed has to get before the relay is allowed to start. The
+// sensor is a 1 Hz sample and the bed overshoots slightly; 2 C is inside that.
+#define CAL_BED_TOLERANCE_C 2.0f
+// A cold enclosure takes several minutes to reach a 90 C bed. Past this the
+// run is aborted rather than left heating indefinitely.
+#define CAL_PREHEAT_TIMEOUT_MS (5UL * 60UL * 1000UL)
+// Hard ceiling on the whole run, including preheat. Ziegler-Nichols needs a
+// handful of oscillation periods; if that has not happened by now the process
+// is not oscillating the way the method assumes.
+#define CAL_MAX_DURATION_MS (20UL * 60UL * 1000UL)
+// New OctoPrint data arrives every OCTO_POLL_INTERVAL_MS. If the timestamp
+// stops moving for this long the link is gone (or OctoPrint is stuck), and
+// continuing to drive the outputs on stale readings would be guesswork.
+#define CAL_DATA_STALE_MS 30000UL
+// Short confirmation that the bed is holding target before the relay starts.
+#define CAL_SETTLE_MS 5000UL
+// During preheat the chamber is only heated by the bed; if it gets this warm
+// the louvre/fan are opened to keep it away from the abort limit.
+#define CAL_PREHEAT_COOL_C 45.0f
+// Abort before the 55 C emergency trigger. The emergency path itself stays
+// armed and wins regardless.
+#define CAL_ABORT_CHAMBER_C 50.0f
+#define CAL_SETPOINT_C 40.0f
+// Relay hysteresis in C. Above the chamber sensor's noise, below the
+// oscillation amplitude the relay is meant to produce.
+#define CAL_NOISEBAND_C 0.5f
+// The two relay levels, in the regulator's 0-200 span: 0 = louvre closed and fan
+// off, 200 = louvre 100% and fan 100%.
+#define CAL_RELAY_LOW 0.0f
+#define CAL_RELAY_HIGH 200.0f
+
 // OctoPrint background poll interval (FreeRTOS task, CYD-style). Loop only
 // copies the latest snapshot and never blocks on the network.
 #define OCTO_POLL_INTERVAL_MS 5000 // 5 seconds

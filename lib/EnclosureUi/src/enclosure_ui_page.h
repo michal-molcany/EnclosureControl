@@ -80,6 +80,21 @@ button:disabled{opacity:.5;cursor:default}
 .msg.err{color:var(--bad)}
 .msg.ok{color:var(--ok)}
 .hide{display:none}
+.modal{position:fixed;inset:0;background:rgba(4,7,11,.72);display:flex;align-items:center;justify-content:center;padding:16px;z-index:20}
+.modal.hide{display:none}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;width:100%;max-width:560px;max-height:88vh;overflow:auto}
+.panel h2{font-size:16px;margin:0 0 10px}
+.panel ul{margin:8px 0 0 18px;padding:0}
+.panel li{margin:3px 0}
+table.gains{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;margin-top:4px}
+table.gains th{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:400;padding:4px 6px;text-align:right}
+table.gains th:first-child{text-align:left}
+table.gains td{padding:4px 6px;border-top:1px solid var(--line);text-align:right}
+table.gains td:first-child{text-align:left;color:var(--dim)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px;margin-top:10px}
+.kv .k{text-transform:none;letter-spacing:0}
+.kv .v{font-size:14px}
+.warnbox{border:1px solid var(--warn);color:var(--warn);border-radius:6px;padding:8px 10px;margin-top:10px;font-size:12px;line-height:1.4}
 </style>
 </head>
 <body>
@@ -159,6 +174,77 @@ button:disabled{opacity:.5;cursor:default}
   <div class="msg" id="manmsg"></div>
 </div>
 
+<div class="card">
+  <h2>PID calibration <span class="badge" id="calbadge">idle</span></h2>
+  <div class="note">Runs a relay-feedback auto-tune (the method ESPHome uses). It heats the bed to 90&nbsp;&deg;C,
+    oscillates the louvre and fan around a 40&nbsp;&deg;C chamber setpoint, measures the ultimate gain and period,
+    then offers new Ziegler&ndash;Nichols gains. The printer must be idle and the run takes up to 20&nbsp;minutes.</div>
+  <div class="btns"><button class="primary" id="calstart">Calibrate</button></div>
+  <div class="msg" id="calmsg"></div>
+</div>
+
+</div>
+
+<div class="modal hide" id="calconfirm">
+  <div class="panel">
+    <h2>Start PID calibration?</h2>
+    <ul>
+      <li>The printer must be <strong>idle</strong> &mdash; no print or paused job.</li>
+      <li>The bed will be heated to <strong>90&nbsp;&deg;C</strong> and switched off when the run ends.</li>
+      <li>The louvre and fan will run for up to <strong>20&nbsp;minutes</strong>.</li>
+      <li>The chamber is held near 40&nbsp;&deg;C; the run aborts if it exceeds 50&nbsp;&deg;C.</li>
+      <li>Commands from the CYD are <strong>ignored</strong> for the duration.</li>
+    </ul>
+    <label class="chk" style="margin-top:12px"><input type="checkbox" id="calack"> I understand and want to proceed</label>
+    <div class="msg err" id="calerr"></div>
+    <div class="btns">
+      <button class="primary" id="calgo" disabled>Start</button>
+      <button id="calclose">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal hide" id="calprogress">
+  <div class="panel">
+    <h2 id="calptitle">Calibrating&hellip;</h2>
+    <div class="kv">
+      <div class="k">Phase</div><div class="v" id="calpphase">&ndash;</div>
+      <div class="k">Chamber</div><div class="v" id="calpchamber">&ndash;</div>
+      <div class="k">Bed</div><div class="v" id="calpbed">&ndash;</div>
+      <div class="k">Elapsed</div><div class="v" id="calptime">&ndash;</div>
+      <div class="k">Relay phases</div><div class="v" id="calpcycles">&ndash;</div>
+    </div>
+    <div class="warnbox hide" id="calpwarn"></div>
+    <div class="btns">
+      <button id="calpcancel">Cancel calibration</button>
+      <button id="calpdismiss" class="hide">Dismiss</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal hide" id="calresult">
+  <div class="panel">
+    <h2>New PID gains</h2>
+    <table class="gains">
+      <tr><th></th><th>old</th><th>new</th></tr>
+      <tr><td>kp</td><td id="calroldkp">&ndash;</td><td id="calrnewkp">&ndash;</td></tr>
+      <tr><td>ki</td><td id="calroldki">&ndash;</td><td id="calrnewki">&ndash;</td></tr>
+      <tr><td>kd</td><td id="calroldkd">&ndash;</td><td id="calrnewkd">&ndash;</td></tr>
+    </table>
+    <div class="kv">
+      <div class="k">Ku</div><div class="v" id="calrku">&ndash;</div>
+      <div class="k">Tu</div><div class="v" id="calrtu">&ndash;</div>
+      <div class="k">Amplitude</div><div class="v" id="calramp">&ndash;</div>
+      <div class="k">Relay half-span (d)</div><div class="v" id="calrdelta">&ndash;</div>
+    </div>
+    <div class="warnbox hide" id="calrwarn"></div>
+    <div class="btns">
+      <button class="primary" id="calrapply">Apply</button>
+      <button id="calrapplysafe">Apply + save to NVS</button>
+      <button id="calrdiscard">Discard</button>
+    </div>
+    <div class="msg" id="calrmsg"></div>
+  </div>
 </div>
 <script>
 var $ = function (id) { return document.getElementById(id); };
@@ -174,6 +260,13 @@ var octoFilled = false;
 var octoBusy = false;
 // Set by a successful save; consumed by the next render() to blank the field.
 var keyJustSaved = false;
+// Latest status document, so a local UI action (opening the confirm dialog) can
+// repaint the modal without waiting for the next poll.
+var lastStatus = null;
+// True while the client-side confirmation dialog is open. Purely a view state:
+// the board knows nothing about it until Start is pressed.
+var calConfirm = false;
+var CAL_PHASES = ['', 'preheating bed', 'settling', 'relay autotune', 'done', 'aborted'];
 
 function say(el, text, cls) {
   el.textContent = text;
@@ -207,7 +300,117 @@ function post(path, body) {
 
 function pct(v) { return Math.max(0, Math.min(100, v | 0)); }
 
+function fmt1(v) {
+  if (v === undefined || v === null || isNaN(v)) { return '\u2013'; }
+  return (Math.round(v * 10) / 10).toFixed(1);
+}
+function fmt2(v) {
+  if (v === undefined || v === null || isNaN(v)) { return '\u2013'; }
+  return (Math.round(v * 100) / 100).toFixed(2);
+}
+function fmt3(v) {
+  if (v === undefined || v === null || isNaN(v)) { return '\u2013'; }
+  return (Math.round(v * 1000) / 1000).toFixed(3);
+}
+function showModal(id) { $(id).classList.remove('hide'); }
+function hideModal(id) { $(id).classList.add('hide'); }
+
+// The calibration modal is driven entirely by the board's status document,
+// except for the first screen: the confirmation exists only in the browser,
+// because the board must not be asked to do anything until the user has
+// acknowledged the 90 C bed and the 20-minute run.
+function renderCal(s) {
+  var c = s.cal || {};
+  var badge = $('calbadge');
+  if (c.active) {
+    badge.textContent = CAL_PHASES[c.phase] || 'running';
+    badge.className = 'badge warn';
+  } else if (c.hasResult) {
+    badge.textContent = 'result ready';
+    badge.className = 'badge ok';
+  } else if (c.aborted) {
+    badge.textContent = 'stopped';
+    badge.className = 'badge bad';
+  } else {
+    badge.textContent = 'idle';
+    badge.className = 'badge';
+  }
+  $('calstart').disabled = !!(c.active || c.hasResult || c.aborted);
+
+  // The relay owns the outputs for the duration, so the board ignores manual
+  // commands. Disable the same controls here rather than letting the page claim
+  // a change took effect. PID writes and an OctoPrint address change are also
+  // held off: the bed-off at the end is sent through the address in force now.
+  var busy = !!c.active;
+  ['apply', 'save', 'defaults', 'kp', 'ki', 'kd',
+   'octoip', 'octoport', 'octokey', 'octosave', 'octoreset',
+   'manualmode', 'louvres', 'fanres', 'sendmanual'].forEach(function (id) {
+    var el = $(id);
+    if (el) { el.disabled = busy; }
+  });
+
+  if (calConfirm && !c.active && !c.hasResult) { showModal('calconfirm'); }
+  else { hideModal('calconfirm'); }
+
+  if (c.active) {
+    hideModal('calresult');
+    showModal('calprogress');
+    $('calptitle').textContent = 'Calibrating\u2026';
+    $('calpphase').textContent = CAL_PHASES[c.phase] || '?';
+    $('calpchamber').textContent = s.chamberValid ? (s.chamber / 10).toFixed(1) + ' \u00b0C' : 'no data';
+    $('calpbed').textContent = s.bedValid ? (s.bed / 10).toFixed(1) + ' \u00b0C (target ' + fmt1(c.bedTarget) + ' \u00b0C)' : 'no data';
+    $('calptime').textContent = Math.floor((c.elapsed || 0) / 1000) + ' s';
+    $('calpcycles').textContent = c.cycles || 0;
+    $('calpcancel').classList.remove('hide');
+    $('calpdismiss').classList.add('hide');
+    $('calmsg').textContent = 'Calibration running \u2014 manual and CYD commands are ignored.';
+  } else if (c.aborted) {
+    hideModal('calresult');
+    showModal('calprogress');
+    $('calptitle').textContent = 'Calibration stopped';
+    $('calpphase').textContent = 'aborted';
+    $('calpchamber').textContent = s.chamberValid ? (s.chamber / 10).toFixed(1) + ' \u00b0C' : 'no data';
+    $('calpbed').textContent = s.bedValid ? (s.bed / 10).toFixed(1) + ' \u00b0C' : 'no data';
+    $('calptime').textContent = Math.floor((c.elapsed || 0) / 1000) + ' s';
+    $('calpcycles').textContent = c.cycles || 0;
+    $('calpwarn').textContent = c.error || 'The calibration did not finish.';
+    $('calpwarn').classList.remove('hide');
+    $('calpcancel').classList.add('hide');
+    $('calpdismiss').classList.remove('hide');
+    $('calmsg').textContent = '';
+  } else if (c.hasResult) {
+    hideModal('calprogress');
+    showModal('calresult');
+    $('calroldkp').textContent = fmt3(c.oldKp);
+    $('calroldki').textContent = fmt3(c.oldKi);
+    $('calroldkd').textContent = fmt3(c.oldKd);
+    $('calrnewkp').textContent = fmt3(c.kp);
+    $('calrnewki').textContent = fmt3(c.ki);
+    $('calrnewkd').textContent = fmt3(c.kd);
+    $('calrku').textContent = fmt2(c.ku) + ' output/\u00b0C';
+    $('calrtu').textContent = fmt1(c.tu) + ' s';
+    $('calramp').textContent = fmt2(c.amp) + ' \u00b0C';
+    $('calrdelta').textContent = fmt1(c.delta) + ' output units';
+    var warnings = [];
+    if (c.clamped) { warnings.push('One or more gains were clamped to the accepted range (kp \u2264 50, ki \u2264 5, kd \u2264 50).'); }
+    if (!c.zcSym) { warnings.push('The oscillation was not symmetrical; the result may be inaccurate.'); }
+    if (!c.ampConv) { warnings.push('The oscillation had not fully settled; the result may be inaccurate.'); }
+    if (warnings.length) {
+      $('calrwarn').textContent = warnings.join(' ');
+      $('calrwarn').classList.remove('hide');
+    } else {
+      $('calrwarn').classList.add('hide');
+    }
+    $('calmsg').textContent = '';
+  } else {
+    hideModal('calprogress');
+    hideModal('calresult');
+    $('calmsg').textContent = '';
+  }
+}
+
 function render(s) {
+  lastStatus = s;
   $('offline').style.display = 'none';
 
   // ENC_CHAMBER_INVALID is INT16_MIN. Showing it as a number would be a lie by
@@ -291,6 +494,8 @@ function render(s) {
   $('sliders').className = (s.mode === 1) ? '' : 'hide';
   if (document.activeElement !== $('louvres')) { $('louvres').value = s.manualLouvre; $('louvrev').textContent = s.manualLouvre; }
   if (document.activeElement !== $('fanres')) { $('fanres').value = s.manualFan; $('fanrev').textContent = s.manualFan; }
+
+  renderCal(s);
 }
 
 function fillPid(p) {
@@ -419,6 +624,92 @@ function sendManual(on) {
     say($('manmsg'), err.message, 'err');
   });
 }
+
+// --- PID calibration -------------------------------------------------------
+
+$('calstart').onclick = function () {
+  $('calack').checked = false;
+  $('calgo').disabled = true;
+  say($('calerr'), '', '');
+  // A new run starts with a clean progress/result message, so a failure from
+  // the previous run cannot be mistaken for this one's.
+  $('calpwarn').classList.add('hide');
+  say($('calrmsg'), '', '');
+  calConfirm = true;
+  renderCal(lastStatus || {});
+};
+
+$('calack').onchange = function () { $('calgo').disabled = !this.checked; };
+$('calclose').onclick = function () { calConfirm = false; hideModal('calconfirm'); };
+
+$('calgo').onclick = function () {
+  if (!$('calack').checked) { return; }
+  $('calgo').disabled = true;
+  say($('calerr'), 'starting\u2026', '');
+  post('api/calibrate', { action: 'start' }).then(function (s) {
+    calConfirm = false;
+    $('calpwarn').classList.add('hide');
+    if (s) { render(s); }
+  }).catch(function (err) {
+    // The board's refusal is the useful text ("the printer is not idle", ...),
+    // so it is shown as-is and the dialog stays open for the user to fix it.
+    say($('calerr'), err.message, 'err');
+    $('calgo').disabled = false;
+  });
+};
+
+$('calpcancel').onclick = function () {
+  post('api/calibrate', { action: 'cancel' }).then(function (s) {
+    if (s) { render(s); }
+  }).catch(function (err) {
+    // Keep the warnbox class: assigning textContent rather than using say()
+    // avoids turning the box into a bare .msg line.
+    $('calpwarn').textContent = err.message;
+    $('calpwarn').classList.remove('hide');
+  });
+};
+
+$('calpdismiss').onclick = function () {
+  post('api/calibrate', { action: 'discard' }).then(function (s) {
+    if (s) { render(s); }
+  }).catch(function (err) {
+    say($('calmsg'), err.message, 'err');
+  });
+};
+
+function applyCalibration(save) {
+  say($('calrmsg'), save ? 'applying and saving\u2026' : 'applying\u2026', '');
+  post('api/calibrate', { action: 'apply' }).then(function (s) {
+    // force the PID card to pick up the gains the board now reports
+    pidFilled = false;
+    if (s) { render(s); }
+    if (!save) {
+      say($('pidmsg'), 'Calibration gains applied (RAM only \u2014 use Save to NVS to keep them).', 'ok');
+      return;
+    }
+    // Separate chain: apply has consumed the result dialog, so a save failure
+    // has to be reported in the PID card or it would never be seen.
+    post('api/pid/save').then(function (s2) {
+      pidFilled = false;
+      if (s2) { render(s2); }
+      say($('pidmsg'), 'Calibration gains applied and saved to NVS.', 'ok');
+    }).catch(function (err) {
+      say($('pidmsg'), 'Gains applied, but saving to NVS failed: ' + err.message, 'err');
+    });
+  }).catch(function (err) {
+    say($('calrmsg'), err.message, 'err');
+  });
+}
+
+$('calrapply').onclick = function () { applyCalibration(false); };
+$('calrapplysafe').onclick = function () { applyCalibration(true); };
+$('calrdiscard').onclick = function () {
+  post('api/calibrate', { action: 'discard' }).then(function (s) {
+    if (s) { render(s); }
+  }).catch(function (err) {
+    say($('calrmsg'), err.message, 'err');
+  });
+};
 
 poll();
 </script>

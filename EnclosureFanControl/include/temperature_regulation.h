@@ -5,6 +5,7 @@
 #include <enclosure_proto.h>
 #include <enclosure_pid.h>
 #include "octo_poller.h"
+#include "pid_calibration.h"
 
 // Forward declaration
 class ServoLouver;
@@ -82,6 +83,30 @@ private:
     int lastAppliedSetpoint = -1;
     uint8_t lastLouvrePct = 0;
 
+    // -----------------------------------------------------------------------
+    // PID calibration (the web UI's Calibrate button).
+    //
+    // The state machine lives HERE rather than in a separate class because this
+    // is the only object allowed to drive the louvre and fan. A second owner
+    // would be the exact "two things fighting over one actuator" bug the single
+    // owner rule exists to prevent.
+    //
+    // While a run is active, update() hands control to updateCalibration() and
+    // returns: the normal material/cooldown machine is bypassed, but the
+    // emergency check still runs first and can abort the run.
+    // -----------------------------------------------------------------------
+    PidCalibration::Phase calPhase = PidCalibration::Phase::None;
+    PidCalibration::Autotuner calAutotuner;
+    PidCalibration::Result calResult;
+    String calError;
+    PidGains calOldGains = {0.0f, 0.0f, 0.0f};
+    unsigned long calStartedMs = 0;
+    unsigned long calPhaseStartedMs = 0;
+    unsigned long calFinishedMs = 0;
+    unsigned long calLastSampleMs = 0;
+    unsigned long calLastSampleAtMs = 0;
+    bool calResultApplied = false;
+
     enum MaterialState
     {
         IDLE,
@@ -118,6 +143,15 @@ private:
     void applyFanSpeed(uint8_t speed);
     void closeOutputs();
 
+    bool calibrationRunning() const;
+    void updateCalibration(const OctoSnapshot &snap, bool haveData, unsigned long now);
+    void finishCalibration(bool success, const char *reason);
+    // Applies a 0-200 cooling demand directly, bypassing the fan duty floor and
+    // FAN_MIN_ON_MS. The relay's two levels are 0 and 200, so the fan must be
+    // able to stop the instant the relay flips; the anti-chatter hold would
+    // stretch the cooling phase and bias the measured period.
+    void applyRawDemand(float demand);
+
 public:
     explicit TemperatureRegulation(ServoLouver *servoLouver);
 
@@ -137,6 +171,33 @@ public:
 
     // Control functions
     void stopFan();
+
+    // -----------------------------------------------------------------------
+    // PID calibration
+    // -----------------------------------------------------------------------
+
+    // Starts the bed preheat + relay experiment. Returns false with `reason`
+    // filled when the board is not in a state to run it (printer busy, no valid
+    // OctoPrint data, a run already active, or an unacknowledged result from a
+    // previous run that must be applied or discarded first).
+    bool startCalibration(String &reason);
+
+    // Aborts a run. Does nothing when no run is active. The bed is switched off
+    // and the outputs enter the normal full-cooling path.
+    void cancelCalibration();
+
+    // Applies the measured gains to RAM and consumes the result. Persisting is
+    // deliberately NOT done here: the UI calls its existing /api/pid/save for
+    // that, so "apply" and "apply and save" share one board-side write path.
+    bool applyCalibrationResult(String &reason);
+
+    // Drops the result without touching the running gains. No-op while a run is
+    // active - cancel it first, so a dismissal can never leave the relay driving
+    // the outputs with nothing left to finish it.
+    void discardCalibrationResult();
+
+    // Snapshot for the web UI. Safe at any time.
+    PidCalibration::Info calibrationInfo() const;
 
     // Runtime PID gains. Returns false (leaving the regulator untouched) when
     // the values are out of range or non-finite. Takes effect on the next
@@ -168,6 +229,9 @@ public:
     uint8_t louvrePercent() const; // 0-100
     bool remoteLinkAlive() const;
     bool jobIsActive() const { return jobWasActive; }
+    // Bed actual from the last good OctoPrint snapshot. Used by the calibration
+    // progress dialog and the preheat wait; meaningless until hasGoodData.
+    double bedActual() const { return lastSnap.bedActual; }
 
     // Read-only extras for the web UI (lib/EnclosureUi), which renders what the
     // regulator is actually doing rather than what was last requested.

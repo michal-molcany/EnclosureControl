@@ -41,6 +41,18 @@ bool octoPollerCopy(OctoSnapshot &out);
 bool octoPollerHasData();
 void octoPollerRequestCancel();
 
+// Asks the poll task to set the bed target, in whole degrees C (0 turns the bed
+// off). Non-blocking and safe to call from any task.
+//
+// The OctoPrinter instance belongs to the poll task and is mid-request most of
+// the time, so this only records the value; the task sends it at the top of its
+// next pass. Last write wins - there is only ever one correct target, and a
+// queue of superseded preheat commands would just heat the bed late.
+//
+// This exists for PID calibration, which needs to preheat and then switch the
+// bed off without blocking loop() on an HTTP request.
+void octoPollerRequestBed(int targetC);
+
 // Repoints the poll task at a different OctoPrint server.
 //
 // Non-blocking and safe to call from any task: it only records the value. The

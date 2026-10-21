@@ -14,6 +14,8 @@
 //                            which case the running gains are left untouched
 //   POST /api/pid/save     -> persists the running gains to NVS
 //   POST /api/pid/defaults -> restores the compiled-in defaults and persists them
+//   POST /api/calibrate    <- {"action":"start"|"cancel"|"apply"|"discard"}
+//                            409 when the board refuses, with the reason
 //   POST /api/manual       <- {"mode":0|1,"louvre":0-100,"fan":0-100}
 //   POST /api/octoprint     <- {"ip":"...","port":80[,"key":"..."]}
 //                            Address and API key together, PROBED together: they
@@ -66,6 +68,7 @@ namespace
     EnclosureUi::PidSetter applyPid = nullptr;
     EnclosureUi::PidPersist persistPid = nullptr;
     EnclosureUi::PidPersist restoreDefaultPid = nullptr;
+    EnclosureUi::CalibrationHandler handleCalibration = nullptr;
     EnclosureUi::ManualHandler handleManual = nullptr;
     EnclosureUi::EndpointSetter applyEndpoint = nullptr;
     EnclosureUi::EndpointReset clearEndpointFn = nullptr;
@@ -137,6 +140,8 @@ namespace
         // "no data". This flag says so explicitly rather than making the page
         // compare against INT16_MIN and get the encoding wrong.
         doc["chamberValid"] = (s.chamberCx10 != ENC_CHAMBER_INVALID);
+        doc["bed"] = s.bedCx10;
+        doc["bedValid"] = (s.bedCx10 != ENC_CHAMBER_INVALID);
         doc["state"] = s.state;
         doc["mode"] = s.mode;
         doc["louvre"] = s.louvrePct;
@@ -159,6 +164,37 @@ namespace
         doc["octoKeyOverridden"] = s.octoKeyOverridden;
 
         writePidBlock(doc, providePid ? providePid() : pidDefaultGains());
+
+        // Calibration state. Always present so the page never has to guess: an
+        // all-default block means "no run, no result", which is also what a
+        // board without calibration support reports.
+        JsonObject cal = doc["cal"].to<JsonObject>();
+        cal["active"] = s.calibration.active;
+        cal["hasResult"] = s.calibration.hasResult;
+        cal["aborted"] = s.calibration.aborted;
+        cal["phase"] = s.calibration.phase;
+        cal["elapsed"] = s.calibration.elapsedMs;
+        cal["cycles"] = s.calibration.cycles;
+        cal["ku"] = s.calibration.ku;
+        // "tu" on the wire, not "pu": the page and the ZN literature both call
+        // the ultimate period Tu, and only ESPHome's code calls it pu.
+        cal["tu"] = s.calibration.pu;
+        cal["amp"] = s.calibration.amplitude;
+        cal["delta"] = s.calibration.relayDelta;
+        cal["kp"] = s.calibration.newGains.kp;
+        cal["ki"] = s.calibration.newGains.ki;
+        cal["kd"] = s.calibration.newGains.kd;
+        cal["oldKp"] = s.calibration.oldGains.kp;
+        cal["oldKi"] = s.calibration.oldGains.ki;
+        cal["oldKd"] = s.calibration.oldGains.kd;
+        cal["clamped"] = s.calibration.clamped;
+        cal["applied"] = s.calibration.applied;
+        cal["zcSym"] = s.calibration.zcSymmetrical;
+        cal["ampConv"] = s.calibration.amplitudeConvergent;
+        cal["warned"] = s.calibration.proceededWithWarning;
+        cal["bedTarget"] = s.calibration.bedTargetC;
+        cal["setpoint"] = s.calibration.setpointC;
+        cal["error"] = s.calibration.error;
 
         // Board facts the library can answer without asking the programme. The
         // heap figure is the reason this page is served from flash: a dropped
@@ -252,6 +288,60 @@ namespace
             return;
         }
         restoreDefaultPid();
+        sendStatus();
+    }
+
+    // POST /api/calibrate - {"action":"start"|"cancel"|"apply"|"discard"}
+    //
+    // One route for the whole lifecycle because the actions are steps in a
+    // single state machine, and splitting them into /start, /cancel, ... would
+    // scatter the "which action is legal now" question across four handlers.
+    // The programme owns that question and answers it with the reason text.
+    //
+    // 409 rather than 400 for a refusal: the request is well-formed and the
+    // board's state says no (a print is running, there is no result to apply).
+    // The page shows the reason verbatim.
+    void receiveCalibration()
+    {
+        if (!handleCalibration)
+        {
+            server->send(501, "text/plain", "calibration not supported on this build");
+            return;
+        }
+        JsonDocument doc;
+        if (!requestBody(doc))
+        {
+            return;
+        }
+
+        // An explicit action is REQUIRED. Defaulting to "start" would turn a
+        // hand-written POST with an empty object into a 20-minute bed preheat,
+        // which is not a thing an omitted field should ever be able to do.
+        //
+        // Copied into a String rather than used through `doc["action"] | ""`:
+        // with a bare string literal ArduinoJson's operator| selects the array
+        // overload and hands back something that is not a usable string. Same
+        // trap documented in receiveEndpoint().
+        JsonVariantConst actionValue = doc["action"];
+        if (!actionValue.is<const char *>())
+        {
+            server->send(400, "text/plain", "action is required (start, cancel, apply or discard)");
+            return;
+        }
+        const String action = String(actionValue.as<const char *>());
+
+        if (action != "start" && action != "cancel" && action != "apply" && action != "discard")
+        {
+            server->send(400, "text/plain", "action must be start, cancel, apply or discard");
+            return;
+        }
+
+        String reason;
+        if (!handleCalibration(action.c_str(), reason))
+        {
+            server->send(409, "text/plain", reason.length() ? reason : "calibration refused");
+            return;
+        }
         sendStatus();
     }
 
@@ -413,7 +503,13 @@ namespace
             server->send(501, "text/plain", "octoprint address not supported on this build");
             return;
         }
-        clearEndpointFn();
+        String reason;
+        if (!clearEndpointFn(reason))
+        {
+            server->send(409, "text/plain",
+                         reason.length() ? reason.c_str() : "octoprint endpoint reset refused");
+            return;
+        }
         sendStatus();
     }
 
@@ -434,6 +530,7 @@ namespace EnclosureUi
         applyPid = cfg.setPid;
         persistPid = cfg.savePid;
         restoreDefaultPid = cfg.restoreDefaultPid;
+        handleCalibration = cfg.calibrate;
         handleManual = cfg.manual;
         applyEndpoint = cfg.setEndpoint;
         clearEndpointFn = cfg.clearEndpoint;
@@ -467,6 +564,11 @@ namespace EnclosureUi
         server->on("/api/pid/defaults", HTTP_POST, []() {
             if (authorized())
                 defaultPid();
+        });
+
+        server->on("/api/calibrate", HTTP_POST, []() {
+            if (authorized())
+                receiveCalibration();
         });
 
         server->on("/api/manual", HTTP_POST, []() {
