@@ -5,7 +5,8 @@ plugin. They work together, but none of them depends on the others to boot.
 
 - **EnclosureFanControl (C3)** - firmware for the ABRobot ESP32-C3 enclosure
   board. PID chamber regulation with a servo louvre and a PWM fan, a small OLED,
-  and a web UI plus JSON API on port **8082**.
+  and a web UI plus JSON API on port **8082** (live status, runtime PID tuning,
+  and a relay-feedback PID auto-calibration).
 - **PrinterDisplay (CYD)** - firmware for a "Cheap Yellow Display" (ESP32 + 2.8"
   TFT). Shows printer status from OctoPrint, offers enclosure controls, and keeps
   its own copy of the enclosure state so it stays useful when OctoPrint is down.
@@ -127,6 +128,10 @@ plugin's settings and stored in OctoPrint's `config.yaml`, never in this repo.
   can put the boards on different radios; the HTTP fallback covers it.
 - **mDNS is not guaranteed.** `enclosure-fan-control.local` works on most home
   networks; an IP address always works.
+- **PID calibration needs an idle printer and takes up to 20 minutes.** The C3
+  preheats the bed to 90 °C, ignores manual and CYD commands while the relay
+  runs, and switches the bed off at the end. See
+  [`EnclosureFanControl/README.md`](EnclosureFanControl/README.md#pid-calibration).
 - **The two boards do not need matching firmware versions.** Nothing depends on
   them being equal.
 

@@ -64,6 +64,7 @@ with `send_P()` (streams from flash) rather than `send()` (builds a `String`).
 | `/api/pid` | POST | apply gains (RAM only) |
 | `/api/pid/save` | POST | persist the running gains to NVS |
 | `/api/pid/defaults` | POST | restore compiled-in defaults and persist |
+| `/api/calibrate` | POST | `{action: start / cancel / apply / discard}` — 409 with the reason when refused |
 | `/api/manual` | POST | `{mode, louvre, fan}` |
 | `/api/octoprint` | POST | `{ip, port[, key]}` — **probes first**, stores only on success |
 | `/api/octoprint/defaults` | POST | drop **both** stored overrides, return to the compiled-in ones |
@@ -165,6 +166,43 @@ unlinked: the display re-sends its own mode every 2 s, and that wins. The page
 shows live link state and says so, rather than letting the override vanish
 quietly.
 
+## PID calibration
+
+`POST /api/calibrate` takes `{"action":"start"|"cancel"|"apply"|"discard"}`:
+
+- `start` runs the bed preheat + relay experiment. It is refused with a **409**
+  and a human-readable body when the printer is busy, no valid OctoPrint data is
+  available, the chamber is already above 45 °C, a run is active, or a previous
+  result has not been applied or discarded.
+- `cancel` aborts a run: bed off, outputs into full cooling.
+- `apply` writes the measured gains to RAM and consumes the result. Persisting is
+  separate, through `/api/pid/save` — the page's **Apply + save to NVS** calls
+  both.
+- `discard` drops the result without touching the running gains.
+
+`/api/status` includes a `cal` object: `active`, `hasResult`, `aborted`, `phase`
+(0 none, 1 preheating, 2 settling, 3 relay, 4 done, 5 aborted), `elapsed` (ms),
+`cycles` (relay phases, each a half-cycle), `ku`, `tu`, `amp`, `delta`, the new
+`kp`/`ki`/`kd`, the old `oldKp`/`oldKi`/`oldKd`, `clamped`, `applied`, `zcSym`,
+`ampConv`, `warned`, `bedTarget`, `setpoint`, and `error`. The page derives the
+confirm, progress and result dialogs from it; the confirmation itself is
+browser-only, so the board is not asked to do anything until **Start** is
+pressed.
+
+While a run is active the page disables **Calibrate**, shows the phase, chamber,
+bed, elapsed time and relay phase count, and offers **Cancel**. The result dialog
+shows old versus new gains, `Ku`, `Tu`, the measured amplitude, the relay
+half-span `d`, and warnings for clamped gains or a failed quality gate. **Calibrate** stays
+disabled while a result is waiting and after an abort (dismiss it first).
+
+Manual commands from the page and the CYD are ignored for the duration, because
+the relay owns the outputs; the CYD link is still refreshed and reported as
+live. A PID write through `/api/pid` still changes the running gains, but the
+calibration result replaces them on **Apply** anyway. The OctoPrint address and
+key controls are disabled too, and `/api/octoprint` and
+`/api/octoprint/defaults` answer **409** during a run: the final bed-off has to
+reach the server the run started with.
+
 ## Files
 
 | File | Provides |
@@ -175,4 +213,4 @@ quietly.
 Callback-based and project-agnostic, like `lib/EnclosureApi`: the library knows
 nothing about `TemperatureRegulation`, the OLED or ESP-NOW. Every callback is
 optional — without the PID callbacks `/api/pid` answers 501 rather than failing
-silently.
+silently, and without the calibration callback `/api/calibrate` does the same.

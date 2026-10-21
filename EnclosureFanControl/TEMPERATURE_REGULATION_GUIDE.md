@@ -321,6 +321,74 @@ excursion (0-15 C), not the full span. `kd` defaults to 0 because the controller
 samples on a zero-order hold from a 5 s OctoPrint poll, where a derivative term
 amplifies sensor noise rather than adding damping.
 
+#### PID auto-calibration
+
+The web UI's **Calibrate** button derives the three gains from an experiment
+instead of guesswork. It is a relay-feedback auto-tuner, ported from ESPHome's
+`PIDAutotuner` (`esphome/components/pid/pid_autotuner.cpp`), with the control
+direction adapted to a cooling-only actuator.
+
+Why a relay: replace the PID with a two-state controller that switches between
+`output_positive = 200` (full cooling) and `output_negative = 0` (no cooling)
+when the chamber error crosses `±noiseband` (0.5 °C). A stable limit cycle
+appears; its amplitude `a` and period `Tu` are the process's describing-function
+data at that operating point. The ultimate gain is
+
+    Ku = 4d / (pi * a),   d = (200 - 0) / 2 = 100
+
+and Ziegler-Nichols gives
+
+    kp = 0.6 * Ku
+    ki = 1.2 * Ku / Tu
+    kd = 0.075 * Ku * Tu
+
+The detector details that matter:
+
+- **Zero crossings** use a band of `noiseband / 4` (0.125 °C), so sensor noise
+  does not create extra crossings. The period is twice the mean interval between
+  crossings.
+- **Amplitude** is measured per relay phase (the peak-to-peak of the chamber
+  error during that phase), the first phase is discarded, and the newest seven
+  phases are averaged. A phase is recorded when the relay changes state, because
+  the process lags the actuator.
+- **Quality gates**: the half-periods must be within a factor of 1.5 of each
+  other (symmetry), and the mean amplitude is compared with the global envelope
+  (convergence). The symmetry gate is the meaningful one. The convergence test is
+  ported exactly as ESPHome writes it - `(mean - global) / global < 0.05` - and
+  because the mean of a subset of the phase extremes cannot exceed the global
+  envelope, it does not fail in practice. A failed gate does not abort or retry:
+  the result is computed anyway and carries a warning, which the result dialog
+  shows. (ESPHome's six-phase grace is unreachable in its source too: the first
+  failure sets the phase and falls through to the calculation.)
+- The relay and the detectors run on the 1 Hz regulator tick, but the chamber
+  value is held for the 5 s OctoPrint poll interval. That quantisation is much
+  smaller than the oscillation period and amplitude the experiment produces.
+
+Operating point: the bed is preheated to 90 °C to make the heat load repeatable,
+and the chamber setpoint is **40 °C**. That is deliberately below the 50 °C
+abort and the 55 °C emergency trigger, because the no-cooling half of the relay
+lets the chamber rise. The relay span is the full 0-200 output: louvre 0 / fan
+off, versus louvre 100 / fan 100. The run is capped at 20 minutes and aborted
+above 50 °C, on bed timeout, on stale OctoPrint data, if a print starts, or on
+cancel; the bed is switched off and the normal full-cooling state is entered on
+every exit path.
+
+`kd` from the formula is usually 300-1500, well above `PID_KD_MAX = 50`, so it
+is clamped and the result dialog warns. `kp` can clamp too when the measured
+amplitude is small, and `ki` can approach `PID_KI_MAX` on a fast oscillation.
+The clamped values are still the tuner's result within the accepted ranges, not
+arbitrary substitutes. Given the derivative-noise caveat above, treat a
+calibration result as a starting point: **Apply**, then compare it with a
+`kd = 0` run before **Save to NVS**.
+
+The algorithm lives in `include/pid_calibration.h` / `src/pid_calibration.cpp`;
+the state machine (preheat, settle, relay, abort, apply) is in
+`TemperatureRegulation`. `test/pid_calibration_sim.py` models the tuner against
+first-order processes with transport delay and checks the measured period and
+amplitude against the simulated process, the ZN formulas, and the clamp ranges.
+It does not execute the C++ (there is no host C++ toolchain here); the firmware
+build covers compilation.
+
 ### Changing Fan Pin
 
 ```cpp

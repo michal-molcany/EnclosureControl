@@ -26,6 +26,9 @@ CYD <-> C3 packet layout, timing and fallback rules are in
   progress shown on the OLED
 - **Web UI on port 8082** — live status, PID tuning and manual fan/louvre control
   from any browser on the network
+- **Relay-feedback PID auto-calibration** — preheat the bed, measure the
+  chamber's ultimate gain and period, and get Ziegler-Nichols gains from the web
+  UI instead of guessing
 
 ## Web UI
 
@@ -42,6 +45,7 @@ fan, material, setpoint, whether the CYD is linked), and lets you:
 - read and change the PID gains, then **Save** them to NVS or restore the
   compiled-in defaults. The header shows whether the running gains still match
   what is stored, so an unsaved tuning cannot quietly disappear on reboot;
+- run a **PID calibration** (see below);
 - take manual control of the fan and louvre.
 
 Two things worth knowing before using it:
@@ -56,6 +60,50 @@ Two things worth knowing before using it:
 
 Ports on this board: 80 WiFiManager portal, 8080 OTA, 8081 enclosure API, 8082 web
 UI. See [`../lib/EnclosureUi/README.md`](../lib/EnclosureUi/README.md).
+
+## PID calibration
+
+The **Calibrate** button in the web UI runs a relay-feedback auto-tune — the
+method ESPHome uses — and turns the measurement into Ziegler-Nichols gains.
+
+What it does, in order:
+
+1. Asks for confirmation, then preheats the bed to **90 °C** through OctoPrint.
+2. Waits for the bed to reach 88 °C (5-minute timeout), then lets it settle
+   briefly.
+3. Drives the louvre and fan between **no cooling** and **full cooling** (output
+   0 and 200) with a 0.5 °C hysteresis, around a fixed **40 °C** chamber
+   setpoint.
+4. Measures the resulting oscillation: the ultimate gain `Ku = 4d / (pi*a)` and
+   the period `Tu`, then computes `kp = 0.6*Ku`, `ki = 1.2*Ku/Tu`,
+   `kd = 0.075*Ku*Tu`.
+5. Switches the bed off and shows the old and new gains, `Ku`, `Tu`, the measured
+   amplitude, and any quality warnings.
+6. Offers **Apply** (RAM only), **Apply + save to NVS**, or **Discard**.
+
+Safety and limits:
+
+- The printer must be **idle** (no print, no pause) and the chamber below 45 °C
+  at the start.
+- The run aborts after **20 minutes**, above **50 °C** chamber, if the bed is not
+  at temperature within 5 minutes, if OctoPrint data goes stale for 30 s, if a
+  print starts while it runs, or on **Cancel**.
+- Every exit path switches the bed off and enters the normal full-cooling state.
+  The 55 °C emergency path stays armed and wins.
+- While a run is active, manual controls and the CYD's 2-second command stream
+  are **ignored** (the CYD link is still reported as live); they resume when the
+  run ends. The OctoPrint address, key and reset controls are also locked,
+  because the bed-off has to reach the server the run started with.
+- The computed `kd` is usually larger than `PID_KD_MAX` (50) and is clamped; `kp`
+  can clamp too on a small oscillation. The result dialog says so.
+- The bed-off is sent through OctoPrint like the preheat. If the link is down at
+  that moment, the request is queued and sent when it returns. If the **board
+  loses power** mid-run, OctoPrint keeps the last bed target it received; check
+  the printer when the board comes back.
+
+The derivation, the quality gates and a host-side simulation are in
+[`TEMPERATURE_REGULATION_GUIDE.md`](TEMPERATURE_REGULATION_GUIDE.md#pid-auto-calibration)
+and `test/pid_calibration_sim.py`.
 
 ## Changing the OctoPrint address
 

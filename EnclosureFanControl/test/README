@@ -9,3 +9,24 @@ in the development cycle.
 
 More information about PlatformIO Unit Testing:
 - https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+
+## Host-side PID calibration simulation
+
+`pid_calibration_sim.py` is a standalone Python model of the relay autotuner in
+`src/pid_calibration.cpp`. It needs no toolchain and no hardware:
+
+```
+python test/pid_calibration_sim.py
+```
+
+It drives the tuner with first-order thermal processes (fast, medium, slow, and
+one that never crosses the setpoint), and checks:
+
+- the measured period and amplitude against the simulated process;
+- the Ziegler-Nichols formulas for `Ku`, `kp`, `ki` and `kd`;
+- that the clamped gains are inside the ranges in `enclosure_pid.h`;
+- that the chamber stays below the 50 C abort in the simulated runs.
+
+It is a model of the algorithm, not a compiled copy of it: there is no host C++
+toolchain in this development environment. The firmware build covers compilation;
+if the model and the C++ ever disagree, the C++ is the source of truth.
