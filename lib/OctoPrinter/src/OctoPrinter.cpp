@@ -10,6 +10,12 @@
 // deadline, so the IDLE tasks always run no matter how silent the server is.
 #define OCTOPRINTER_CONNECT_TIMEOUT_MS 3000
 #define OCTOPRINTER_REQUEST_TIMEOUT_MS 8000
+// File operations are one bulk listing plus, on demand, one entry's details.
+// The listing is still ~484 KB from the live server even when only the lightweight
+// fields are kept: the filter shrinks the parsed document, not the wire body, so
+// this needs a longer deadline than a status poll. Kept separate so a slow or
+// dead file fetch cannot make every status poll wait the same 25 s.
+#define OCTOPRINTER_FILES_TIMEOUT_MS 25000
 #define OCTOPRINTER_READ_TIMEOUT_S 2
 
 // Reads one LF-terminated line (CR/LF stripped), yielding while waiting.
@@ -1010,6 +1016,97 @@ static void insertFileSorted(OctoFile *out, size_t capacity, size_t &found,
   }
 }
 
+// The lightweight fields every listing entry needs. Returns false for folders
+// and non-printable entries, which the list skips.
+static bool fillCommonFileFields(JsonObject obj, OctoFile &entry)
+{
+  const char *type = obj["type"] | "";
+  if (strcmp(type, "machinecode") != 0)
+    return false;
+  const char *path = obj["path"] | "";
+  if (!path || !*path)
+    return false;
+
+  entry = {};
+  strncpy(entry.path, path, sizeof(entry.path) - 1);
+  const char *name = obj["name"] | "";
+  strncpy(entry.name, (name && *name) ? name : path, sizeof(entry.name) - 1);
+  entry.date = obj["date"] | 0;
+  entry.size = obj["size"] | 0;
+  return true;
+}
+
+// The heavy blocks: gcodeAnalysis, statistics and prints. Only parsed for the
+// one file whose info panel is open, never for the whole list.
+static void parseFileDetails(JsonObject obj, OctoFile &entry)
+{
+  // Each block is guarded because a file sliced by something other than
+  // PrusaSlicer/Orca has no analysis at all, and one absent field must not lose
+  // the rest.
+  JsonObject analysis = obj["gcodeAnalysis"].as<JsonObject>();
+  if (!analysis.isNull())
+  {
+    entry.estimatedPrintTime = analysis["estimatedPrintTime"] | 0.0;
+    const char *mat = analysis["firstFilament"] | "";
+    if (mat && *mat)
+      strncpy(entry.material, mat, sizeof(entry.material) - 1);
+
+    JsonObject dims = analysis["dimensions"].as<JsonObject>();
+    if (!dims.isNull())
+    {
+      entry.dimX = dims["X"] | 0.0f;
+      entry.dimY = dims["Y"] | 0.0f;
+      entry.dimZ = dims["Z"] | 0.0f;
+    }
+
+    // filament is keyed per tool; the enclosure is single-extruder and the
+    // display has room for one total, so tools are summed rather than tool0
+    // being picked - a two-tool file would otherwise under-report by half.
+    // The single-file endpoint returns every tool, unlike the filtered list.
+    JsonObject fil = analysis["filament"].as<JsonObject>();
+    if (!fil.isNull())
+    {
+      for (JsonPair kv : fil)
+      {
+        JsonObject tool = kv.value().as<JsonObject>();
+        if (tool.isNull())
+          continue;
+        entry.filamentLengthMm += tool["length"] | 0.0;
+        entry.filamentVolumeCm3 += tool["volume"] | 0.0;
+      }
+    }
+  }
+
+  JsonObject stats = obj["statistics"].as<JsonObject>();
+  if (!stats.isNull())
+  {
+    JsonObject avg = stats["averagePrintTime"].as<JsonObject>();
+    if (!avg.isNull())
+      entry.averagePrintTime = avg["_default"] | 0.0;
+  }
+  JsonObject prints = obj["prints"].as<JsonObject>();
+  if (!prints.isNull())
+  {
+    entry.printsSuccess = prints["success"] | 0;
+    entry.printsFailure = prints["failure"] | 0;
+  }
+}
+
+// Parses one object into an entry. The list passes withDetails=false because it
+// never displays these fields; the info fetch passes true.
+static bool parseFileObject(JsonObject obj, OctoFile &entry, bool withDetails)
+{
+  if (!fillCommonFileFields(obj, entry))
+    return false;
+  if (withDetails)
+    parseFileDetails(obj, entry);
+
+  // Name-derived hints LAST, and only as a fallback: real slicer metadata wins,
+  // this is a guess from a naming convention.
+  parseNameHints(entry.name, entry);
+  return true;
+}
+
 // Walks one files[] level (top level or a folder's children), recursing into
 // folders and collecting printable machinecode entries.
 static void collectFiles(JsonArray level, OctoFile *out, size_t capacity, size_t &found)
@@ -1027,74 +1124,10 @@ static void collectFiles(JsonArray level, OctoFile *out, size_t capacity, size_t
         collectFiles(children, out, capacity, found);
       continue;
     }
-    if (strcmp(type, "machinecode") != 0)
-      continue;
-    const char *path = obj["path"] | "";
-    if (!path || !*path)
-      continue;
 
-    OctoFile entry = {};
-    strncpy(entry.path, path, sizeof(entry.path) - 1);
-    const char *name = obj["name"] | "";
-    strncpy(entry.name, (name && *name) ? name : path, sizeof(entry.name) - 1);
-    entry.date = obj["date"] | 0;
-    entry.size = obj["size"] | 0;
-
-    // Details, all already present in this listing entry. Each is guarded
-    // because a file sliced by something other than PrusaSlicer/Orca has no
-    // analysis block at all, and one absent field must not lose the rest.
-    JsonObject analysis = obj["gcodeAnalysis"].as<JsonObject>();
-    if (!analysis.isNull())
-    {
-      entry.estimatedPrintTime = analysis["estimatedPrintTime"] | 0.0;
-      const char *mat = analysis["firstFilament"] | "";
-      if (mat && *mat)
-        strncpy(entry.material, mat, sizeof(entry.material) - 1);
-
-      JsonObject dims = analysis["dimensions"].as<JsonObject>();
-      if (!dims.isNull())
-      {
-        entry.dimX = dims["X"] | 0.0f;
-        entry.dimY = dims["Y"] | 0.0f;
-        entry.dimZ = dims["Z"] | 0.0f;
-      }
-
-      // filament is keyed per tool; the enclosure is single-extruder and the
-      // display has room for one total, so tools are summed rather than tool0
-      // being picked - a two-tool file would otherwise under-report by half.
-      JsonObject fil = analysis["filament"].as<JsonObject>();
-      if (!fil.isNull())
-      {
-        for (JsonPair kv : fil)
-        {
-          JsonObject tool = kv.value().as<JsonObject>();
-          if (tool.isNull())
-            continue;
-          entry.filamentLengthMm += tool["length"] | 0.0;
-          entry.filamentVolumeCm3 += tool["volume"] | 0.0;
-        }
-      }
-    }
-
-    JsonObject stats = obj["statistics"].as<JsonObject>();
-    if (!stats.isNull())
-    {
-      JsonObject avg = stats["averagePrintTime"].as<JsonObject>();
-      if (!avg.isNull())
-        entry.averagePrintTime = avg["_default"] | 0.0;
-    }
-    JsonObject prints = obj["prints"].as<JsonObject>();
-    if (!prints.isNull())
-    {
-      entry.printsSuccess = prints["success"] | 0;
-      entry.printsFailure = prints["failure"] | 0;
-    }
-
-    // Name-derived hints LAST, and only as a fallback: the slicer metadata above
-    // is real data, this is a guess from a naming convention.
-    parseNameHints(entry.name, entry);
-
-    insertFileSorted(out, capacity, found, entry);
+    OctoFile entry;
+    if (parseFileObject(obj, entry, false))
+      insertFileSorted(out, capacity, found, entry);
   }
 }
 
@@ -1105,11 +1138,13 @@ int OctoPrinter::fetchFiles(OctoFile *out, size_t capacity, FetchDiag &diag, uin
   if (!out || capacity == 0)
     return -1;
 
-  // The full recursive listing is ~75 KB for a handful of files
-  // (gcodeAnalysis, thumbnails, refs, statistics per file) - far beyond what
-  // fits in a String plus a full JsonDocument on this heap. So the body is
-  // deserialized straight from the socket through a field filter keeping only
-  // what collectFiles() reads; the document stays around 1-2 KB.
+  // The full recursive listing is ~484 KB on the live server (gcodeAnalysis,
+  // thumbnails, refs, statistics per file) - far beyond what fits in a String
+  // plus a full JsonDocument on this heap. So the body is deserialized straight
+  // from the socket through a field filter keeping only what the lightweight
+  // display fields need; the parsed document stays around 11 KB even for a
+  // hundred files. The transfer is unchanged, which is why the fetch has its own
+  // longer deadline.
   //
   // The [0] element templates every array item (see parseArray). Children
   // nesting is written out to 4 levels; anything deeper is skipped by the
@@ -1128,36 +1163,6 @@ int OctoPrinter::fetchFiles(OctoFile *out, size_t capacity, FetchDiag &diag, uin
     level["name"] = true;
     level["date"] = true;
     level["size"] = true;
-
-    // Details for the info view, kept in the SAME listing pass - no second
-    // per-file request. Every nested object is built through a handle to real
-    // storage (see the warning above): assigning an intermediate proxy to a
-    // JsonVariant first yields a detached handle whose writes go nowhere, and a
-    // filter that silently holds nothing parses the whole reply down to {}.
-    //
-    // Only tool0 is templated even though the collector sums every tool. The
-    // filter has to name keys to keep them, and OctoPrint's tool count is not
-    // known until after the parse - so a second tool's numbers simply do not
-    // survive the filter. One enclosure has one extruder, so this is not a real
-    // loss; the summing in collectFiles is what makes it correct if it ever is.
-    JsonObject analysis = level["gcodeAnalysis"].to<JsonObject>();
-    analysis["estimatedPrintTime"] = true;
-    analysis["firstFilament"] = true;
-    JsonObject dims = analysis["dimensions"].to<JsonObject>();
-    dims["X"] = true;
-    dims["Y"] = true;
-    dims["Z"] = true;
-    JsonObject filament = analysis["filament"].to<JsonObject>();
-    JsonObject tool0 = filament["tool0"].to<JsonObject>();
-    tool0["length"] = true;
-    tool0["volume"] = true;
-    JsonObject statistics = level["statistics"].to<JsonObject>();
-    JsonObject average = statistics["averagePrintTime"].to<JsonObject>();
-    average["_default"] = true;
-    JsonObject prints = level["prints"].to<JsonObject>();
-    prints["success"] = true;
-    prints["failure"] = true;
-
     level = level["children"].to<JsonArray>().add<JsonVariant>();
   }
   if (filter["files"].isNull())
@@ -1168,7 +1173,7 @@ int OctoPrinter::fetchFiles(OctoFile *out, size_t capacity, FetchDiag &diag, uin
   }
 
   _client.setTimeout(OCTOPRINTER_READ_TIMEOUT_S);
-  const uint32_t deadlineMs = millis() + OCTOPRINTER_REQUEST_TIMEOUT_MS;
+  const uint32_t deadlineMs = millis() + OCTOPRINTER_FILES_TIMEOUT_MS;
   if (!_client.connect(_host, _port, OCTOPRINTER_CONNECT_TIMEOUT_MS))
   {
     Serial.println(F("[FILES] connect failed"));
@@ -1231,6 +1236,102 @@ int OctoPrinter::fetchFiles(OctoFile *out, size_t capacity, FetchDiag &diag, uin
   }
   _client.stop();
   return found;
+}
+
+int OctoPrinter::fetchFileInfo(const char *path, OctoFile &out,
+                               FetchDiag &diag, uint8_t &parseCode)
+{
+  diag = FETCH_NOFILES;
+  parseCode = 0;
+  if (!path || !*path)
+    return -1;
+
+  // One entry's details, still filtered: the response also carries thumbnails
+  // and refs, which the info panel never reads.
+  JsonDocument filter;
+  filter["type"] = true;
+  filter["path"] = true;
+  filter["name"] = true;
+  filter["date"] = true;
+  filter["size"] = true;
+  JsonObject analysis = filter["gcodeAnalysis"].to<JsonObject>();
+  analysis["estimatedPrintTime"] = true;
+  analysis["firstFilament"] = true;
+  analysis["dimensions"] = true;
+  // true keeps the whole object, so every tool survives. The list filter cannot
+  // do this because it does not know the tool count; one file is cheap enough.
+  analysis["filament"] = true;
+  JsonObject statistics = filter["statistics"].to<JsonObject>();
+  JsonObject average = statistics["averagePrintTime"].to<JsonObject>();
+  average["_default"] = true;
+  JsonObject prints = filter["prints"].to<JsonObject>();
+  prints["success"] = true;
+  prints["failure"] = true;
+
+  _client.setTimeout(OCTOPRINTER_READ_TIMEOUT_S);
+  const uint32_t deadlineMs = millis() + OCTOPRINTER_FILES_TIMEOUT_MS;
+  if (!_client.connect(_host, _port, OCTOPRINTER_CONNECT_TIMEOUT_MS))
+  {
+    Serial.println(F("[INFO] connect failed"));
+    diag = FETCH_CONN;
+    return -1;
+  }
+  _client.println("GET /api/files/local/" + urlEncodePath(path) + " HTTP/1.1");
+  _client.println("Host: " + _hostAddress);
+  _client.println("Cache-Control: no-cache");
+  _client.println("Connection: close");
+  _client.println("X-Api-Key: " + _apiKey);
+  _client.println("");
+
+  String line;
+  bool headersComplete = false;
+  while (readLineYielding(_client, deadlineMs, line))
+  {
+    if (line.length() == 0)
+    {
+      headersComplete = true;
+      break;
+    }
+  }
+
+  int result = -1;
+  if (headersComplete)
+  {
+    DeadlineStream body(_client, deadlineMs);
+    JsonDocument doc;
+    DeserializationError err =
+        deserializeJson(doc, body, DeserializationOption::Filter(filter));
+    if (err)
+    {
+      parseCode = static_cast<uint8_t>(err.code());
+      diag = FETCH_PARSE;
+      Serial.printf("[INFO] parse fail %s heap=%u\n", err.c_str(),
+                    ESP.getFreeHeap());
+    }
+    else
+    {
+      JsonObject obj = doc.as<JsonObject>();
+      OctoFile entry;
+      if (!obj.isNull() && parseFileObject(obj, entry, true))
+      {
+        out = entry;
+        diag = FETCH_OK;
+        result = 1;
+      }
+      else
+      {
+        diag = FETCH_NOFILES;
+        Serial.println(F("[INFO] no file object"));
+      }
+    }
+  }
+  else
+  {
+    diag = FETCH_HDRS;
+    Serial.println(F("[INFO] headers incomplete"));
+  }
+  _client.stop();
+  return result;
 }
 
 int OctoPrinter::selectAndPrint(const char *path)

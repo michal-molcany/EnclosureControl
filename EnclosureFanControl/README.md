@@ -93,10 +93,15 @@ Safety and limits:
   for 30 s, if a print starts while it runs, or on **Cancel**.
 - Every exit path switches the bed off and enters the normal full-cooling state.
   The 55 °C emergency path stays armed and wins.
+- The CYD latches a modal calibration screen as soon as it sees an active run.
+  It shows live chamber/bed readings, phase, elapsed time and cycles, blocks
+  navigation, and offers one confirmed **Cancel calibration** action. This works
+  over ESP-NOW and the HTTP fallback alike.
 - While a run is active, manual controls and the CYD's 2-second command stream
-  are **ignored** (the CYD link is still reported as live); they resume when the
-  run ends. The OctoPrint address, key and reset controls are also locked,
-  because the bed-off has to reach the server the run started with.
+  are **ignored** (the CYD link is still reported as live), except for that
+  dedicated cancel action; they resume when the run ends. The OctoPrint address,
+  key and reset controls are also locked, because the bed-off has to reach the
+  server the run started with.
 - The computed `kd` is usually larger than `PID_KD_MAX` (50) and is clamped; `kp`
   can clamp too on a small oscillation. The result dialog says so.
 - The bed-off is sent through OctoPrint like the preheat. If the link is down at
@@ -132,8 +137,8 @@ curl -u "$AUTH" -X POST $C3/api/octoprint/defaults  # back to include/octoprint_
 - **Pushed to the CYD**, which stores it in its own NVS and repoints its poller.
   Telemetry carries the address every second, so a CYD that was off during the
   change catches up within a second. Clearing the override here clears it there
-  too. Both boards must be flashed together — see
-  [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 2*.
+  too. Both boards must be flashed together when the protocol revision changes -
+  see [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 4*.
 - An IPv4 address only, not a hostname: the OctoPrint client connects to an
   `IPAddress`, so a name would need DNS resolution added first.
 

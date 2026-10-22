@@ -161,10 +161,11 @@ Two consequences:
   value cleared on the C3 clears it here too — the all-zero `octoIp` in telemetry
   means "I have no override", not "address zero".
 - **Both boards must be flashed together.** Telemetry grew from 10 to 16 bytes in
-  revision 2, and from 16 to 82 in revision 3; a mismatched pair drops every frame.
-  It is not fatal — this board falls back to the HTTP API and keeps working, it
-  just does not receive the endpoint or key hand-off until both are flashed. See
-  [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 3*.
+  revision 2, from 16 to 82 in revision 3, and from 82 to 92 in revision 4; a
+  mismatched pair drops every frame. It is not fatal — this board falls back to
+  the HTTP API and keeps working, it just does not receive the endpoint, key, or
+  calibration hand-off until both are flashed. See
+  [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 4*.
 
 > WARNING: Rotate your WiFi password and OctoPrint API key if they were ever committed.
 

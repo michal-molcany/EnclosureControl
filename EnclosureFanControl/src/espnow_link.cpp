@@ -7,6 +7,7 @@
 
 #include <WiFi.h>
 #include <esp_now.h>
+#include <math.h>
 #include <string.h>
 
 namespace
@@ -554,8 +555,18 @@ void espnowLinkPoll(TemperatureRegulation &reg, double chamberTemp, bool chamber
         tele.louvrePct = reg.louvrePercent();
         tele.fanPct = reg.fanPercent();
         tele.chamberCx10 = chamberValid ? (int16_t)(chamberTemp * 10.0) : ENC_CHAMBER_INVALID;
+        const double bedC = reg.bedActual();
+        tele.bedCx10 = (chamberValid && isfinite(bedC)) ? (int16_t)(bedC * 10.0)
+                                                         : ENC_CHAMBER_INVALID;
         tele.state = reg.stateCode();
         tele.mode = reg.controlModeCode();
+        const PidCalibration::Info cal = reg.calibrationInfo();
+        tele.calPhase = (uint8_t)cal.phase;
+        tele.calElapsedSec = (uint16_t)(cal.elapsedMs / 1000UL);
+        tele.calCycles = cal.cycles;
+        tele.calBedTargetC = (uint8_t)cal.bedTargetC;
+        tele.calSetpointC = (uint8_t)cal.setpointC;
+        tele.calErrorCode = reg.calibrationErrorCode();
         // The address we are polling, so the CYD can use the same one. Sent
         // every frame; the CYD stores it and repoints its own poller. All-zero
         // means "no override here", which tells the CYD to fall back to its own

@@ -46,6 +46,38 @@ enum EnclosureMaterial : uint8_t
     ENC_MATERIAL_UNKNOWN = 7
 };
 
+// PID calibration lifecycle, mirrored from PidCalibration::Phase on the C3.
+// The numeric values are part of the wire format: PidCalibration::Phase is
+// appended to for the same reason, so a CYD can render a phase it does not
+// understand as "running" rather than falling back to idle.
+enum EnclosureCalPhase : uint8_t
+{
+    ENC_CAL_PHASE_NONE = 0,
+    ENC_CAL_PHASE_PREHEATING = 1,
+    ENC_CAL_PHASE_SETTLING = 2,
+    ENC_CAL_PHASE_RELAY = 3,
+    ENC_CAL_PHASE_DONE = 4,
+    ENC_CAL_PHASE_ABORTED = 5
+};
+
+// Why a calibration stopped. The C3 keeps the full sentence locally for its web
+// UI; this compact code is what the CYD needs to show a cause without carrying a
+// 96-byte string in every telemetry frame.
+enum EnclosureCalError : uint8_t
+{
+    ENC_CAL_ERR_NONE = 0,
+    ENC_CAL_ERR_CANCELLED = 1,
+    ENC_CAL_ERR_EMERGENCY = 2,
+    ENC_CAL_ERR_CHAMBER_HIGH = 3,
+    ENC_CAL_ERR_BED_TIMEOUT = 4,
+    ENC_CAL_ERR_OCTO_LOST = 5,
+    ENC_CAL_ERR_DATA_STALE = 6,
+    ENC_CAL_ERR_PRINT_STARTED = 7,
+    ENC_CAL_ERR_TIMEOUT = 8,
+    ENC_CAL_ERR_BAD_READING = 9,
+    ENC_CAL_ERR_OTHER = 10
+};
+
 // Max OctoPrint API key length, including the NUL. OctoPrint issues 32-character
 // keys, so this is deliberately double that: it costs 33 bytes in a frame that is
 // nowhere near the 127-byte ESP-NOW payload limit, and a future longer key must
@@ -102,6 +134,20 @@ struct EnclosureTelemetry
     // override" reading makes this field unusable on a mostly-silent wire.
     char octoKey[ENC_OCTO_KEY_MAX];
     uint8_t octoKeyFlags;
+
+    // Bed temperature, same 0.1 C encoding and invalid sentinel as chamberCx10.
+    // The CYD needs it only for the modal calibration screen, but it is cheap
+    // and keeping it here means the same field is available over both
+    // transports without a second request.
+    int16_t bedCx10;
+    // Calibration progress. `calPhase` is EnclosureCalPhase; ETA is app-side,
+    // so the wire only carries elapsed time and completed relay cycles.
+    uint16_t calElapsedSec;
+    uint16_t calCycles;
+    uint8_t calPhase;
+    uint8_t calBedTargetC;
+    uint8_t calSetpointC;
+    uint8_t calErrorCode; // EnclosureCalError, meaningful when calPhase == ABORTED
 };
 
 // Whether octoKey carries a value, and whether the receiver should act on it.
@@ -143,6 +189,12 @@ struct EnclosureCommand
     uint8_t fanPct;      // 0-100, used in MANUAL
     uint8_t material;
     uint8_t jobActive;
+    // One-shot calibration action: 0 = none, nonzero = "cancel the active run".
+    // The C3 acts only when this value CHANGES, so the 2 s heartbeat repeats it
+    // harmlessly. A CYD that reboots sends 0 first, which resets the C3's
+    // remembered value; the next confirmed cancel therefore works even after a
+    // collision with a pre-reboot action number.
+    uint8_t calAction;
 };
 
 #define ENC_TELEMETRY_INTERVAL_MS 1000UL
@@ -170,7 +222,7 @@ enum EnclosureRxDrop : uint8_t
 // mismatch - which shows up only as "the link is dead" - into a build error.
 // ESP32 (CYD) and ESP32-C3 (fan control) are both 32-bit little-endian with
 // 2-byte alignment on uint16_t/int16_t, so the two layouts must agree.
-static_assert(sizeof(EnclosureTelemetry) == 82, "EnclosureTelemetry must stay 82 bytes on the wire");
+static_assert(sizeof(EnclosureTelemetry) == 92, "EnclosureTelemetry must stay 92 bytes on the wire");
 static_assert(offsetof(EnclosureTelemetry, magic) == 0, "telemetry magic offset");
 static_assert(offsetof(EnclosureTelemetry, seq) == 2, "telemetry seq offset");
 static_assert(offsetof(EnclosureTelemetry, louvrePct) == 3, "telemetry louvrePct offset");
@@ -182,6 +234,13 @@ static_assert(offsetof(EnclosureTelemetry, octoIp) == 10, "telemetry octoIp offs
 static_assert(offsetof(EnclosureTelemetry, octoPort) == 14, "telemetry octoPort offset");
 static_assert(offsetof(EnclosureTelemetry, octoKey) == 16, "telemetry octoKey offset");
 static_assert(offsetof(EnclosureTelemetry, octoKeyFlags) == 81, "telemetry octoKeyFlags offset");
+static_assert(offsetof(EnclosureTelemetry, bedCx10) == 82, "telemetry bedCx10 offset");
+static_assert(offsetof(EnclosureTelemetry, calElapsedSec) == 84, "telemetry calElapsedSec offset");
+static_assert(offsetof(EnclosureTelemetry, calCycles) == 86, "telemetry calCycles offset");
+static_assert(offsetof(EnclosureTelemetry, calPhase) == 88, "telemetry calPhase offset");
+static_assert(offsetof(EnclosureTelemetry, calBedTargetC) == 89, "telemetry calBedTargetC offset");
+static_assert(offsetof(EnclosureTelemetry, calSetpointC) == 90, "telemetry calSetpointC offset");
+static_assert(offsetof(EnclosureTelemetry, calErrorCode) == 91, "telemetry calErrorCode offset");
 static_assert(sizeof(EnclosureTelemetry) < 127, "ESP-NOW payload limit");
 
 static_assert(sizeof(EnclosureCommand) == 10, "EnclosureCommand must stay 10 bytes on the wire");
@@ -193,5 +252,6 @@ static_assert(offsetof(EnclosureCommand, louvrePct) == 5, "command louvrePct off
 static_assert(offsetof(EnclosureCommand, fanPct) == 6, "command fanPct offset");
 static_assert(offsetof(EnclosureCommand, material) == 7, "command material offset");
 static_assert(offsetof(EnclosureCommand, jobActive) == 8, "command jobActive offset");
+static_assert(offsetof(EnclosureCommand, calAction) == 9, "command calAction reuses the old trailing pad byte");
 
 #endif // ENCLOSURE_PROTO_H

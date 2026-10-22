@@ -161,9 +161,11 @@ struct PrintFile
     char name[PRINT_FILE_NAME_LEN];
     uint32_t date = 0;
     uint32_t size = 0;
-    // File-info view. Mirrors OctoPrinter::OctoFile and comes from the same
-    // listing pass - nothing here costs an extra request. Zeros mean OctoPrint
-    // has no value, which the view must show as unknown, not as a real 0.
+    // File-info view. The list leaves these zero; FILE_INFO fills them from a
+    // single /api/files/local/<path> request when the panel opens. Zeros mean
+    // OctoPrint has no value, which the view must show as unknown, not as a real
+    // 0. layerHeightMm/nozzleMm still come from the filename and are available
+    // immediately.
     char material[16] = {};
     double estimatedPrintTime = 0;   // seconds
     double filamentLengthMm = 0;     // mm
@@ -182,13 +184,30 @@ struct PrintFile
 // busy (skip the frame and try again next loop iteration).
 bool pollerFilesMeta(uint8_t &count, uint32_t &version, bool &busy, bool &error);
 
+// True when the list should be fetched now: empty never fetched, past the TTL,
+// or a failed attempt old enough to retry. Never true while a fetch is running.
+bool pollerFilesShouldRefresh(uint32_t ttlMs, uint32_t retryMs);
+
 // Copies a single cached entry (0-based). Returns false on a bad index, a
 // missing cache, or a busy mutex.
 bool pollerCopyFile(int index, PrintFile &out);
 
+// Copies an entry by OctoPrint path. The info panel uses this so a list refresh
+// completing while it is open cannot invalidate the index it is displaying.
+bool pollerCopyFileByPath(const char *path, PrintFile &out);
+
+// One-entry detail cache for the info panel. busy/ready/error describe the
+// request; version advances when a fetch finishes (success or failure), so the
+// UI can repaint exactly once.
+bool pollerCopyFileInfo(PrintFile &out, uint32_t &version, bool &busy,
+                        bool &ready, bool &error);
+
 // Asks the poll task to re-fetch the file list (sets busy immediately when
 // the mutex is free so the view shows "Loading..." without waiting a cycle).
 void pollerRequestFilesRefresh();
+
+// Stages a path and asks the poll task to fetch that file's detail fields.
+void pollerRequestFileInfo(const char *path);
 
 // Stages a path and asks the poll task to select-and-print it. Ignored when
 // empty or when a job is already active (the poll task is the authority).

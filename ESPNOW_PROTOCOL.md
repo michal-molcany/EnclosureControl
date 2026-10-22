@@ -9,7 +9,7 @@ The PrinterDisplay CYD and EnclosureFanControl C3 use ESP-NOW for low-latency en
 
 The shared C/C++ definitions are in [`lib/EnclosureProto/src/enclosure_proto.h`](lib/EnclosureProto/src/enclosure_proto.h).
 
-Actual temperatures are **not** transferred over ESP-NOW. Both boards poll OctoPrint independently; CYD forwards its control mode, setpoint, material classification, and active-job state.
+Both boards still poll OctoPrint independently for their own displays, but telemetry carries the C3's current chamber and bed readings so the CYD can show the same numbers during PID calibration. CYD forwards its control mode, setpoint, material classification, active-job state, and a one-shot calibration cancel action.
 
 ## Transport and pairing
 
@@ -145,15 +145,19 @@ The C3 serves these on `ENC_API_PORT` (8081), deliberately separate from
 socket. Both require HTTP Basic auth with `ENC_API_TOKEN` as the password.
 
 ```text
-GET  /api/enclosure  ->  {"louvre":0-100,"fan":0-100,"chamber":int16,"state":u8,"mode":u8,"seq":u8}
-POST /api/enclosure  <-  {"mode":u8,"setpoint":0-60,"louvre":0-100,"fan":0-100,"material":u8,"job":0|1}
+GET  /api/enclosure  ->  {"louvre":0-100,"fan":0-100,"chamber":int16,"bed":int16,
+                          "state":u8,"mode":u8,"seq":u8,
+                          "calPhase":u8,"calElapsed":seconds,"calCycles":u16,
+                          "calBedTarget":C,"calSetpoint":C,"calError":u8}
+POST /api/enclosure  <-  {"mode":u8,"setpoint":0-60,"louvre":0-100,"fan":0-100,
+                          "material":u8,"job":0|1,"calAction":0|nonzero}
 ```
 
-`chamber` is in 0.1 °C units and uses `ENC_CHAMBER_INVALID` (`INT16_MIN`) when
-unknown, exactly as the struct does. Field names and meanings mirror
-`EnclosureTelemetry` / `EnclosureCommand`; `seq` is a per-request counter on this
-transport, independent of the ESP-NOW one, since the two packet streams are not
-comparable.
+`chamber` and `bed` are in 0.1 °C units and use `ENC_CHAMBER_INVALID`
+(`INT16_MIN`) when unknown, exactly as the struct does. Field names and meanings
+mirror `EnclosureTelemetry` / `EnclosureCommand`; `seq` is a per-request counter
+on this transport, independent of the ESP-NOW one, since the two packet streams
+are not comparable.
 
 `GET /api/enclosure` also carries `octoIp`, `octoPort`, `octoKeyFlags`, and —
 only when the flags are set — `octoKey`, with exactly the meanings given in
@@ -217,9 +221,11 @@ The structs are not packed. Alignment padding is included in the transmitted pac
 | 6 | 1 | `fanPct` | Desired fan output 0–100%, used in MANUAL |
 | 7 | 1 | `material` | `EnclosureMaterial` classification used for automatic strategy and cooldown |
 | 8 | 1 | `jobActive` | Printing or paused job is active |
-| 9 | 1 | padding | Struct tail padding; normally zero |
+| 9 | 1 | `calAction` | One-shot PID-calibration cancel: `0` = none, nonzero = cancel; C3 acts only when the value changes |
 
-The CYD sends a complete command every time. Fields that do not apply to the current mode are still present:
+The CYD sends a complete command every time. It keeps the cancel value in the repeated heartbeat until the run ends, then returns the field to `0` and sends that reset immediately; the C3 uses the zero to re-arm its change detector for the next run. A reboot also starts at `0`.
+
+Fields that do not apply to the current mode are still present:
 
 - **Material tab:** `mode = AUTO`, `setpoint = selected material profile temperature`.
 - **Temp tab:** `mode = AUTO`, `setpoint = user-selected chamber temperature`.
@@ -246,7 +252,7 @@ In MANUAL mode, C3 clamps louvre and fan values above 100% to 100%.
 | `fanPct` | `00` |
 | `material` | `00` = PLA |
 | `jobActive` | `01` |
-| padding | `00` |
+| `calAction` | `00` = no calibration action |
 
 ### Example: MANUAL, 40% louvre, 50% fan, sequence 8
 
@@ -259,7 +265,7 @@ The setpoint remains in the packet but is ignored while the mode is MANUAL.
 ## C3 → CYD: `EnclosureTelemetry`
 
 **Direction:** EnclosureFanControl C3 to PrinterDisplay CYD  
-**Size:** 82 bytes (was 16; see *Protocol revision 3* below)  
+**Size:** 92 bytes (was 82; see *Protocol revision 4* below)<br>
 **Sent:** approximately every `ENC_TELEMETRY_INTERVAL_MS` (1 second)
 
 ### Byte layout
@@ -278,6 +284,13 @@ The setpoint remains in the packet but is ignored while the mode is MANUAL.
 | 14 | 2 | `octoPort` | OctoPrint port the C3 is polling |
 | 16 | 65 | `octoKey` | OctoPrint API key, NUL-terminated; meaningful only when `octoKeyFlags` says so |
 | 81 | 1 | `octoKeyFlags` | `ENC_KEYFLAG_*` state of `octoKey` |
+| 82 | 2 | `bedCx10` | Bed temperature in 0.1°C units; same invalid sentinel as `chamberCx10` |
+| 84 | 2 | `calElapsedSec` | Elapsed calibration time in seconds, saturating at 65535 |
+| 86 | 2 | `calCycles` | Completed relay cycles |
+| 88 | 1 | `calPhase` | `EnclosureCalPhase` (`0` none, `1` preheat, `2` settling, `3` relay, `4` done, `5` aborted) |
+| 89 | 1 | `calBedTargetC` | Bed preheat target in whole °C (currently 90) |
+| 90 | 1 | `calSetpointC` | Chamber setpoint in whole °C (currently 35) |
+| 91 | 1 | `calErrorCode` | `EnclosureCalError`, meaningful when `calPhase == 5` |
 
 ### OctoPrint address propagation
 
@@ -379,6 +392,19 @@ Revision 3 grew `EnclosureTelemetry` from 16 to **82** bytes by adding `octoKey`
 (65 bytes) + `octoKeyFlags` (1 byte) — the API key propagation described above.
 Still comfortably inside the 127-byte ESP-NOW payload limit.
 
+### Protocol revision 4
+
+Revision 4 grew `EnclosureTelemetry` from 82 to **92** bytes by adding the bed
+reading and calibration progress (`bedCx10`, `calElapsedSec`, `calCycles`,
+`calPhase`, `calBedTargetC`, `calSetpointC`, `calErrorCode`). The formerly
+reserved tail-padding byte of `EnclosureCommand` became `calAction`, so that
+packet stays 10 bytes. `/api/enclosure` gained the matching JSON keys.
+
+The CYD uses these fields for a modal calibration screen that shows live
+chamber/bed readings and phase, blocks navigation until the run ends, and can
+request a confirmed cancel. All other CYD command fields remain ignored by the
+C3 while the relay owns the outputs.
+
 Both boards validate the packet length against their own `sizeof()`, so a C3 and
 a CYD on mismatched builds **drop every frame** — the link goes quiet until both
 are flashed, with no error beyond the drop counters. Reflash both when updating.
@@ -422,6 +448,8 @@ The state reflects the material and cooldown phase currently applied by C3, usin
 CYD cannot distinguish Material Automatic from Temperature Automatic over ESP-NOW because both transmit `ENC_MODE_AUTO`. The only difference visible to C3 is the selected setpoint value.
 
 ### Example: 40% louvre, 50% fan, 42.3°C, PLA, AUTO
+
+Only the first ten bytes are shown; the OctoPrint and calibration fields follow.
 
 ```text
 4E 45 09 28 32 00 A7 01 01 00
@@ -617,7 +645,7 @@ The wire format depends on the shared struct definitions, native little-endian b
 
 Recommended safeguards for future protocol revisions:
 
-- ~~Add explicit static assertions for struct sizes and field offsets.~~ Done — `enclosure_proto.h` pins `EnclosureTelemetry` to 82 bytes and `EnclosureCommand` to 10, with every offset asserted, including the padding byte.
+- ~~Add explicit static assertions for struct sizes and field offsets.~~ Done — `enclosure_proto.h` pins `EnclosureTelemetry` to 92 bytes and `EnclosureCommand` to 10, with every offset asserted, including the byte that is now `calAction`.
 - ~~Add sender-MAC validation.~~ Done — both receive callbacks enforce it once paired.
 - Consider packed wire structs with fixed-width serialization.
 - Use an explicit protocol version field.

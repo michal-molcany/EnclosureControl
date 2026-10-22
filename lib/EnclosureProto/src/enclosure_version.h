@@ -34,7 +34,7 @@
 
 #define ENC_FW_VERSION_MAJOR 0
 #define ENC_FW_VERSION_MINOR 5
-#define ENC_FW_VERSION_PATCH 4
+#define ENC_FW_VERSION_PATCH 7
 
 // Protocol revision, bumped only when the structs in enclosure_proto.h or the
 // JSON keys in lib/EnclosureApi change in a backward-incompatible way.
@@ -46,12 +46,17 @@
 // CYD on mismatched builds drop every frame rather than misreading it - the link
 // goes quiet until both are flashed. Reflash both when this moves.
 //
+// Revision 4 grew EnclosureTelemetry from 82 to 92 bytes with the bed reading
+// and calibration progress (phase, elapsed, cycles, bed/setpoint targets,
+// error), and gave EnclosureCommand its previously-padded byte to calAction.
+// The HTTP fallback's /api/enclosure gained the matching JSON keys.
+//
 // Note this number is a DIAGNOSTIC LABEL, not an enforced handshake: nothing on
 // the link compares it, and the length check does that work implicitly. Its whole
 // value is that "proto vN" on a boot line names the layout, so a reader chasing a
 // dead link can rule a version mismatch in or out immediately. That only helps if
 // it is actually correct.
-#define ENC_PROTO_VERSION 3
+#define ENC_PROTO_VERSION 4
 
 // Stringify the numbers above so the printed line cannot drift from them.
 #define ENC_STR2(x) #x

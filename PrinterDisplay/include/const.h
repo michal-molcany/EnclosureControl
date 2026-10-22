@@ -107,6 +107,16 @@
 // Telemetry older than this counts as stale (greyed out / "--").
 #define ENC_LINK_STALE_MS 5000
 
+// Modal calibration screen timing. The result stays up long enough to see what
+// happened, then returns to the main view rather than trapping the display;
+// the user can also close it immediately.
+#define CAL_RESULT_HOLD_MS 15000UL
+// A C3 link that disappears mid-run cannot be cancelled from the display. The
+// modal holds the screen while the link is only briefly late, then releases it
+// so a powered-off C3 cannot leave the touchscreen permanently unusable. Fresh
+// telemetry reporting an active run forces the modal straight back on.
+#define CAL_LINK_LOST_UNLOCK_MS 20000UL
+
 // HTTP API fallback for the enclosure link (lib/EnclosureApi). ESP-NOW is primary
 // and stays that way; this only engages once telemetry has been stale for
 // ENC_LINK_STALE_MS, which is exactly the channel/AP split that kills ESP-NOW
@@ -193,10 +203,22 @@ enum JobCommand
     STOP_JOB,
     RESUME_JOB,
     // File list: REFRESH_FILES re-fetches the newest files into the poller
-    // cache; PRINT_FILE starts the staged path (see pollerRequestFilePrint).
+    // cache; PRINT_FILE starts the staged path; FILE_INFO fetches one file's
+    // details for the info panel (see pollerRequestFilePrint/FileInfo).
     REFRESH_FILES = 4,
-    PRINT_FILE = 5
+    PRINT_FILE = 5,
+    FILE_INFO = 6
 };
+
+// How long a fetched file list stays usable. Opening the view inside this window
+// shows the cache immediately; once it expires the view refreshes in place every
+// five minutes while it is open. There is no background polling: the list is
+// large enough that doing it while the user is elsewhere would just spend Wi-Fi
+// and OctoPrint time for a screen nobody is looking at.
+#define FILES_CACHE_TTL_MS (5UL * 60UL * 1000UL)
+// After a failed fetch, do not hammer the server when the user keeps reopening
+// the view. A later attempt is allowed once this has elapsed.
+#define FILES_RETRY_MS 30000
 
 // Newest-first printable files shown by the files view (opened from the idle
 // no-active-print panel).
@@ -213,10 +235,11 @@ enum JobCommand
 //                        5th newest file one scroll away beats not having it.
 //
 // The count is NOT what makes opening this view expensive - the full recursive
-// listing from OctoPrint is ~75 KB of JSON whatever these say, and that body is
-// what the fetch has to stream and parse. (See the yield-by-byte-count in
-// OctoPrinter::DeadlineStream, which keeps that parse from tripping the task
-// watchdog.)
+// listing from OctoPrint is ~484 KB on the live server whatever these say, and
+// that body still has to cross Wi-Fi even though the client now keeps only the
+// lightweight fields. The parsed document is no longer the bottleneck (see the
+// filter in OctoPrinter::fetchFiles); the cache and the longer file deadline are
+// what keep the wait off the common path.
 //
 // Both are coupled to the row geometry: three 46 px rows at a 48 px pitch is
 // what fills the list on a 320x240 panel while leaving room for the status line

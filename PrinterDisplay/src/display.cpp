@@ -266,6 +266,12 @@ namespace
             activeDisplay->hideJobConfirm();
     }
 
+    void calibrationButtonEvent(lv_event_t *event)
+    {
+        if (lv_event_get_code(event) == LV_EVENT_CLICKED && activeDisplay)
+            activeDisplay->calibrationButtonTapped();
+    }
+
     void toolButtonEvent(lv_event_t *event)
     {
         // Main-view quick preheats: fixed 215 / 230 / off. The nozzle screen
@@ -730,6 +736,89 @@ lv_obj_t *createChamberStepperButton(lv_obj_t *parent, lv_coord_t x, lv_coord_t 
         return result;
     }
 
+    // Pending-overlay code for "cancel PID calibration". Deliberately outside
+    // the JobCommand range (1-6, see const.h) so one _pendingJob slot can serve
+    // both dialogs without retargeting the wrong action.
+    constexpr int CAL_CANCEL = 7;
+
+    bool calPhaseActive(uint8_t phase)
+    {
+        return phase == ENC_CAL_PHASE_PREHEATING || phase == ENC_CAL_PHASE_SETTLING ||
+               phase == ENC_CAL_PHASE_RELAY;
+    }
+
+    const char *calPhaseText(uint8_t phase)
+    {
+        switch (phase)
+        {
+        case ENC_CAL_PHASE_PREHEATING:
+            return "Preheating bed";
+        case ENC_CAL_PHASE_SETTLING:
+            return "Settling";
+        case ENC_CAL_PHASE_RELAY:
+            return "Relay tuning";
+        case ENC_CAL_PHASE_DONE:
+            return "Complete";
+        case ENC_CAL_PHASE_ABORTED:
+            return "Aborted";
+        case ENC_CAL_PHASE_NONE:
+        default:
+            return "Idle";
+        }
+    }
+
+    const char *calErrorText(uint8_t code)
+    {
+        switch (code)
+        {
+        case ENC_CAL_ERR_CANCELLED:
+            return "Cancelled";
+        case ENC_CAL_ERR_EMERGENCY:
+            return "Emergency stop at 55 C";
+        case ENC_CAL_ERR_CHAMBER_HIGH:
+            return "Chamber exceeded 50 C";
+        case ENC_CAL_ERR_BED_TIMEOUT:
+            return "Bed did not reach 90 C";
+        case ENC_CAL_ERR_OCTO_LOST:
+            return "OctoPrint link lost";
+        case ENC_CAL_ERR_DATA_STALE:
+            return "OctoPrint data went stale";
+        case ENC_CAL_ERR_PRINT_STARTED:
+            return "A print started";
+        case ENC_CAL_ERR_TIMEOUT:
+            return "Timed out";
+        case ENC_CAL_ERR_BAD_READING:
+            return "Temperature reading unusable";
+        case ENC_CAL_ERR_OTHER:
+            return "Stopped by the C3";
+        case ENC_CAL_ERR_NONE:
+        default:
+            return "Unknown";
+        }
+    }
+
+    void formatCx10(int16_t value, char *buf, size_t n)
+    {
+        if (value == ENC_CHAMBER_INVALID)
+        {
+            snprintf(buf, n, "--");
+            return;
+        }
+        const int whole = value / 10;
+        const int tenth = abs(value % 10);
+        snprintf(buf, n, "%d.%d C", whole, tenth);
+    }
+
+    void formatCalElapsed(uint16_t seconds, char *buf, size_t n)
+    {
+        const unsigned minutes = seconds / 60U;
+        const unsigned secs = seconds % 60U;
+        if (minutes >= 60U)
+            snprintf(buf, n, "%u:%02u:%02u", minutes / 60U, minutes % 60U, secs);
+        else
+            snprintf(buf, n, "%u:%02u", minutes, secs);
+    }
+
     String trimDuration(const String &value)
     {
         String result = value;
@@ -835,6 +924,13 @@ void Display::hideSplash()
     }
     _splashFrame = 0;
     lv_obj_set_style_bg_color(lv_screen_active(), color565(BACKGROUND), 0);
+    // A calibration modal outranks the view remembered before the splash: an
+    // OTA attempt must not be a way to dismiss the lock screen.
+    if (_calActive || _calShown)
+    {
+        showCalibrationView();
+        return;
+    }
     // Restore whichever view was up before splashScreen() hid it.
     if (_view == View::Chamber)
         showChamberView();
@@ -1095,6 +1191,7 @@ void Display::createLabes()
     createPreheatView(PreheatKind::Bed, "Bed Preheat");
     createFilesView();
     createInfoView();
+    createCalibrationView();
     createJobConfirm();
     showMainView();
     refreshChamberDetail();
@@ -1711,10 +1808,73 @@ void Display::createInfoView()
     lv_obj_add_event_cb(parent, infoTapEvent, LV_EVENT_CLICKED, nullptr);
 }
 
+void Display::createCalibrationView()
+{
+    _calContainer = createViewContainer(true);
+
+    _calTitleLabel = lv_label_create(_calContainer);
+    lv_label_set_text(_calTitleLabel, "PID Calibration");
+    lv_obj_set_style_text_color(_calTitleLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(_calTitleLabel, &lv_font_montserrat_20, 0);
+    lv_obj_align(_calTitleLabel, LV_ALIGN_TOP_MID, 0, 8);
+
+    // ONE label for every reading. There is no reason to allocate a widget per
+    // row here, and this board has boot-looped on pool exhaustion before (see
+    // the info view).
+    _calBodyLabel = lv_label_create(_calContainer);
+    if (_calBodyLabel)
+    {
+        lv_obj_set_pos(_calBodyLabel, 12, 38);
+        lv_obj_set_width(_calBodyLabel, SCREEN_WIDTH - 24);
+        lv_obj_set_style_text_color(_calBodyLabel, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(_calBodyLabel, &lv_font_montserrat_14, 0);
+        lv_label_set_long_mode(_calBodyLabel, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(_calBodyLabel, "");
+    }
+    else
+    {
+        Serial.println("[UI] calibration view: LVGL pool exhausted, label missing");
+    }
+
+    _calButton = lv_button_create(_calContainer);
+    lv_obj_set_size(_calButton, 190, 40);
+    lv_obj_align(_calButton, LV_ALIGN_BOTTOM_MID, 0, -8);
+    styleButton(_calButton, TFT_RED);
+    lv_obj_add_event_cb(_calButton, calibrationButtonEvent, LV_EVENT_CLICKED, nullptr);
+    _calButtonLabel = lv_label_create(_calButton);
+    if (_calButtonLabel)
+    {
+        lv_label_set_text(_calButtonLabel, "Cancel calibration");
+        lv_obj_set_style_text_color(_calButtonLabel, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_remove_flag(_calButtonLabel, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(_calButtonLabel);
+    }
+}
+
+void Display::showCalibrationView()
+{
+    if (!_calContainer)
+        return;
+    _calShown = true;
+    _view = View::Calibration;
+    refreshCalibrationDetail();
+    hideAllViews();
+    lv_obj_clear_flag(_calContainer, LV_OBJ_FLAG_HIDDEN);
+}
+
 void Display::showInfoView()
 {
     if (!_mainContainer || !_infoContainer)
         return;
+    // The calibration modal owns the screen for the duration of the run. This
+    // is a belt-and-braces guard: its container already covers the header, so
+    // no tap should reach here, but every navigation path must agree rather
+    // than rely on what happens to be visible.
+    if (_calActive)
+    {
+        showCalibrationView();
+        return;
+    }
     _view = View::Info;
     infoUpdate();
     hideAllViews();
@@ -1859,6 +2019,8 @@ void Display::hideAllViews()
         lv_obj_add_flag(_filesContainer, LV_OBJ_FLAG_HIDDEN);
     if (_infoContainer)
         lv_obj_add_flag(_infoContainer, LV_OBJ_FLAG_HIDDEN);
+    if (_calContainer)
+        lv_obj_add_flag(_calContainer, LV_OBJ_FLAG_HIDDEN);
     for (size_t slot = 0; slot < kPreheatCount; ++slot)
         if (_preheat[slot].container)
             lv_obj_add_flag(_preheat[slot].container, LV_OBJ_FLAG_HIDDEN);
@@ -1866,6 +2028,11 @@ void Display::hideAllViews()
 
 void Display::showMainView()
 {
+    if (_calActive)
+    {
+        showCalibrationView();
+        return;
+    }
     _view = View::Main;
     hideAllViews();
     if (_mainContainer)
@@ -1884,6 +2051,11 @@ void Display::showBedView()
 
 void Display::showPreheatView(PreheatKind kind)
 {
+    if (_calActive)
+    {
+        showCalibrationView();
+        return;
+    }
     const size_t slot = static_cast<size_t>(kind);
     if (!_mainContainer || !_preheat[slot].container)
         return;
@@ -1895,6 +2067,11 @@ void Display::showPreheatView(PreheatKind kind)
 
 void Display::showChamberView()
 {
+    if (_calActive)
+    {
+        showCalibrationView();
+        return;
+    }
     if (!_mainContainer || !_chamberContainer)
         return;
     _view = View::Chamber;
@@ -2111,6 +2288,24 @@ lv_obj_set_size(_filesPrintButton, 150, 32);
     // Hidden until a row is selected and File info is tapped.
     lv_obj_add_flag(_filesInfoTable, LV_OBJ_FLAG_HIDDEN);
 
+    // First-load indicator. It sits in the middle of the empty list area so the
+    // screen says "working" even before the response arrives, instead of looking
+    // like an empty list with a small "Loading..." line. Created last so it is
+    // above the list and the info table; rotation is advanced by filesUpdate().
+    _filesSpinner = lv_arc_create(parent);
+    lv_obj_set_size(_filesSpinner, 48, 48);
+    lv_obj_set_pos(_filesSpinner, (SCREEN_WIDTH - 48) / 2, 56 + (146 - 48) / 2);
+    lv_arc_set_bg_angles(_filesSpinner, 0, 360);
+    lv_arc_set_angles(_filesSpinner, 0, 90);
+    lv_arc_set_rotation(_filesSpinner, 270);
+    lv_obj_set_style_arc_color(_filesSpinner, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(_filesSpinner, lv_color_hex(0xFFFFFF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(_filesSpinner, 6, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(_filesSpinner, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(_filesSpinner, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_remove_flag(_filesSpinner, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(_filesSpinner, LV_OBJ_FLAG_HIDDEN);
+
     refreshFilesDetail();
 }
 
@@ -2127,6 +2322,11 @@ void Display::filesPanelTouched()
 
 void Display::showFilesView()
 {
+    if (_calActive)
+    {
+        showCalibrationView();
+        return;
+    }
     if (!_mainContainer || !_filesContainer)
         return;
     _view = View::Files;
@@ -2157,6 +2357,11 @@ void Display::showFilesView()
 
 void Display::showFileInfo()
 {
+    if (_calActive)
+    {
+        showCalibrationView();
+        return;
+    }
     if (!_filesInfoTable || _selectedFile < 0 || _selectedFile >= _filesCount)
         return;
 
@@ -2164,16 +2369,73 @@ void Display::showFileInfo()
     if (!pollerCopyFile(_selectedFile, entry))
         return;
 
-    // Everything here came out of the listing already fetched, so this is
-    // instant: no request, no waiting state, nothing to fail.
+    _fileInfoPath = entry.path;
+    PrintFile info;
+    uint32_t infoVersion = 0;
+    bool infoBusy = false;
+    bool infoReady = false;
+    bool infoError = false;
+    const bool haveSnapshot = pollerCopyFileInfo(info, infoVersion, infoBusy,
+                                                 infoReady, infoError);
+    const bool sameReady = haveSnapshot && infoReady &&
+                           strcmp(info.path, _fileInfoPath.c_str()) == 0;
+    _fileInfoVersionSeen = infoVersion;
+    if (!sameReady)
+        pollerRequestFileInfo(entry.path);
+
+    // Swap the list out for the panel first, then paint. The detail fields show
+    // "Loading..." until the poll task's response arrives.
+    _view = View::FileInfo;
+    if (_filesList)
+        lv_obj_add_flag(_filesList, LV_OBJ_FLAG_HIDDEN);
+    if (_filesStatusLabel)
+        lv_obj_add_flag(_filesStatusLabel, LV_OBJ_FLAG_HIDDEN);
+    if (_filesSpinner)
+        lv_obj_add_flag(_filesSpinner, LV_OBJ_FLAG_HIDDEN);
+    if (_filesPrintButton)
+        lv_obj_add_flag(_filesPrintButton, LV_OBJ_FLAG_HIDDEN);
+    if (_filesInfoButton)
+        lv_obj_add_flag(_filesInfoButton, LV_OBJ_FLAG_HIDDEN);
+    // Hide the list's own back button (child 0) now that the panel has its own.
+    lv_obj_t *listBack = lv_obj_get_child(_filesContainer, 0);
+    if (listBack)
+        lv_obj_add_flag(listBack, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(_filesInfoTable, LV_OBJ_FLAG_HIDDEN);
+
+    refreshFileInfoDetail();
+    Serial.printf("[FILES] info shown for index=%d path=%s\n", _selectedFile,
+                  entry.path);
+}
+
+void Display::refreshFileInfoDetail()
+{
+    if (!_filesInfoTable || _fileInfoPath.length() == 0)
+        return;
+
+    PrintFile entry;
+    if (!pollerCopyFileByPath(_fileInfoPath.c_str(), entry))
+        return;
+
+    PrintFile info;
+    uint32_t infoVersion = 0;
+    bool infoBusy = false;
+    bool infoReady = false;
+    bool infoError = false;
+    const bool haveSnapshot =
+        pollerCopyFileInfo(info, infoVersion, infoBusy, infoReady, infoError);
+    const bool haveDetails = haveSnapshot && infoReady &&
+                             strcmp(info.path, entry.path) == 0;
+    const bool loading = !haveDetails && infoBusy;
+    const bool failed = !haveDetails && !infoBusy && infoError;
+    const char *missing = failed ? "unavailable" : "unknown";
+    (void)infoVersion;
+
     char buf[64];
     String value;
 
     // Layer height and nozzle are GUESSED from the file name - OctoPrint exposes
-    // neither, anywhere. Labelled as such in the value rather than presented as
-    // slicer truth.
-    // Row 0 is the file name, not a header row: it is the thing every row
-    // below it is describing.
+    // neither, anywhere. They are already in the list entry, so they do not wait
+    // for the detail request; the label says where they came from.
     lv_table_set_cell_value(_filesInfoTable, 0, 0, "File name");
     lv_table_set_cell_value(_filesInfoTable, 0, 1, entry.name);
 
@@ -2201,95 +2463,105 @@ void Display::showFileInfo()
     lv_table_set_cell_value(_filesInfoTable, 2, 0, "Nozzle");
     lv_table_set_cell_value(_filesInfoTable, 2, 1, value.c_str());
 
+    if (haveDetails && info.material[0])
+        value = info.material;
+    else if (loading)
+        value = "Loading...";
+    else
+        value = missing;
     lv_table_set_cell_value(_filesInfoTable, 3, 0, "Material");
-    lv_table_set_cell_value(_filesInfoTable, 3, 1,
-                            entry.material[0] ? entry.material : "unknown");
+    lv_table_set_cell_value(_filesInfoTable, 3, 1, value.c_str());
 
-    value = formatDuration(entry.estimatedPrintTime);
-    if (entry.averagePrintTime >= 1)
-        value += String("  (avg ") + formatDuration(entry.averagePrintTime) + ")";
+    if (haveDetails && info.estimatedPrintTime > 0)
+    {
+        value = formatDuration(info.estimatedPrintTime);
+        if (info.averagePrintTime >= 1)
+            value += String("  (avg ") + formatDuration(info.averagePrintTime) + ")";
+    }
+    else if (loading)
+        value = "Loading...";
+    else
+        value = missing;
     lv_table_set_cell_value(_filesInfoTable, 4, 0, "Print time");
     lv_table_set_cell_value(_filesInfoTable, 4, 1, value.c_str());
 
-    if (entry.filamentLengthMm > 0)
+    if (haveDetails && info.filamentLengthMm > 0)
     {
         snprintf(buf, sizeof(buf), "%.0f mm  (%.2f cm3)",
-                 entry.filamentLengthMm, entry.filamentVolumeCm3);
+                 info.filamentLengthMm, info.filamentVolumeCm3);
         value = buf;
     }
+    else if (loading)
+        value = "Loading...";
     else
-    {
-        value = "unknown";
-    }
+        value = missing;
     lv_table_set_cell_value(_filesInfoTable, 5, 0, "Filament");
     lv_table_set_cell_value(_filesInfoTable, 5, 1, value.c_str());
 
-    if (entry.dimX > 0 && entry.dimY > 0 && entry.dimZ > 0)
+    if (haveDetails && info.dimX > 0 && info.dimY > 0 && info.dimZ > 0)
     {
-        snprintf(buf, sizeof(buf), "%.0f x %.0f x %.0f mm", entry.dimX, entry.dimY, entry.dimZ);
+        snprintf(buf, sizeof(buf), "%.0f x %.0f x %.0f mm", info.dimX, info.dimY, info.dimZ);
         value = buf;
     }
+    else if (loading)
+        value = "Loading...";
     else
-    {
-        value = "unknown";
-    }
+        value = missing;
     lv_table_set_cell_value(_filesInfoTable, 6, 0, "Model size");
     lv_table_set_cell_value(_filesInfoTable, 6, 1, value.c_str());
 
+    // These two are in the list entry, so they never wait on the request.
     lv_table_set_cell_value(_filesInfoTable, 7, 0, "File size");
     lv_table_set_cell_value(_filesInfoTable, 7, 1, formatBytes(entry.size).c_str());
 
     lv_table_set_cell_value(_filesInfoTable, 8, 0, "Uploaded");
     lv_table_set_cell_value(_filesInfoTable, 8, 1, formatUploadDate(entry.date).c_str());
 
-    if (entry.printsSuccess == 0 && entry.printsFailure == 0)
+    if (haveDetails)
     {
-        value = "never";
-    }
-    else
-    {
-        snprintf(buf, sizeof(buf), "%u ok", (unsigned)entry.printsSuccess);
-        value = buf;
-        if (entry.printsFailure)
+        if (info.printsSuccess == 0 && info.printsFailure == 0)
         {
-            value += ", ";
-            snprintf(buf, sizeof(buf), "%u failed", (unsigned)entry.printsFailure);
-            value += buf;
+            value = "never";
+        }
+        else
+        {
+            snprintf(buf, sizeof(buf), "%u ok", (unsigned)info.printsSuccess);
+            value = buf;
+            if (info.printsFailure)
+            {
+                value += ", ";
+                snprintf(buf, sizeof(buf), "%u failed", (unsigned)info.printsFailure);
+                value += buf;
+            }
         }
     }
+    else if (loading)
+        value = "Loading...";
+    else
+        value = missing;
     lv_table_set_cell_value(_filesInfoTable, 9, 0, "Printed");
     lv_table_set_cell_value(_filesInfoTable, 9, 1, value.c_str());
-
-
-    // Swap the list out for the panel.
-    _view = View::FileInfo;
-    if (_filesList)
-        lv_obj_add_flag(_filesList, LV_OBJ_FLAG_HIDDEN);
-    if (_filesStatusLabel)
-        lv_obj_add_flag(_filesStatusLabel, LV_OBJ_FLAG_HIDDEN);
-    if (_filesPrintButton)
-        lv_obj_add_flag(_filesPrintButton, LV_OBJ_FLAG_HIDDEN);
-    if (_filesInfoButton)
-        lv_obj_add_flag(_filesInfoButton, LV_OBJ_FLAG_HIDDEN);
-    // Hide the list's own back button (child 0) now that the panel has its own.
-    lv_obj_t *listBack = lv_obj_get_child(_filesContainer, 0);
-    if (listBack)
-        lv_obj_add_flag(listBack, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(_filesInfoTable, LV_OBJ_FLAG_HIDDEN);
-    Serial.printf("[FILES] info shown for index=%d layer=%.2f nozzle=%.2f material=%s\n",
-                  _selectedFile, entry.layerHeightMm, entry.nozzleMm,
-                  entry.material[0] ? entry.material : "-");
 }
 
 void Display::openFilesView()
 {
+    if (_calActive)
+    {
+        showCalibrationView();
+        return;
+    }
     // Starting a print mid-job from a second client is rejected by the poll
     // task too; this keeps the entry itself idle-only, matching the panel
     // that carries the "No active print" text.
     if (_jobActive)
         return;
     _selectedFile = -1;
-    if (_filesOpenAction)
+    // Show the cache immediately when it is still fresh. Otherwise fetch, but
+    // keep the old rows visible if there are any; only an empty cache shows
+    // "Loading...". The five-minute timer in filesUpdate() refreshes in place
+    // while the view stays open.
+    if (_filesOpenAction &&
+        pollerFilesShouldRefresh(FILES_CACHE_TTL_MS, FILES_RETRY_MS))
         _filesOpenAction();
     showFilesView();
 }
@@ -2328,6 +2600,45 @@ void Display::filesUpdate()
         if (versionMoved)
             lv_obj_scroll_to_y(_filesList, 0, LV_ANIM_OFF);
     }
+
+    // The detail panel is a snapshot of one entry, so repaint only when the
+    // poller says a detail request finished. The version does not move while
+    // the list refreshes in the background because the panel is not open then.
+    if (_view == View::FileInfo)
+    {
+        PrintFile info;
+        uint32_t infoVersion = 0;
+        bool infoBusy = false;
+        bool infoReady = false;
+        bool infoError = false;
+        if (pollerCopyFileInfo(info, infoVersion, infoBusy, infoReady, infoError) &&
+            infoVersion != _fileInfoVersionSeen)
+        {
+            _fileInfoVersionSeen = infoVersion;
+            refreshFileInfoDetail();
+        }
+    }
+
+    // Advance the first-load wheel only while it is on screen. filesUpdate()
+    // runs at DISPLAY_REFRESH_TIME (250 ms), so 120 ms means one step per tick
+    // with a little slack rather than a rotation that depends on loop speed.
+    if (_filesSpinner && _view == View::Files && _filesBusy && _filesCount == 0)
+    {
+        const uint32_t now = millis();
+        if ((uint32_t)(now - _filesSpinnerTick) >= 120)
+        {
+            _filesSpinnerTick = now;
+            _filesSpinnerFrame = (_filesSpinnerFrame + 1) % 12;
+            lv_arc_set_rotation(_filesSpinner, 270 + _filesSpinnerFrame * 30);
+        }
+    }
+
+    // Five-minute check, only while the user is looking at the list and the
+    // printer is idle. pollerFilesShouldRefresh() also enforces the TTL and
+    // suppresses overlapping fetches, so this is a cheap test on every tick.
+    if (_view == View::Files && !_jobActive && _filesOpenAction &&
+        pollerFilesShouldRefresh(FILES_CACHE_TTL_MS, FILES_RETRY_MS))
+        _filesOpenAction();
 }
 
 void Display::refreshFilesDetail()
@@ -2346,6 +2657,24 @@ void Display::refreshFilesDetail()
         setLabelTextOnce(_filesStatusLabel,
                           String(_filesCount) + (_filesCount == 1 ? " file" : " files") +
                               " - newest first");
+
+    // Only a first load (nothing cached yet) gets the wheel. A background
+    // five-minute refresh keeps its rows on screen, so an animation there would
+    // say "empty" while the list is still usable.
+    if (_filesSpinner)
+    {
+        if (_view == View::Files && _filesBusy && _filesCount == 0)
+        {
+            lv_obj_clear_flag(_filesSpinner, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(_filesSpinner, LV_OBJ_FLAG_HIDDEN);
+            _filesSpinnerFrame = 0;
+            _filesSpinnerTick = 0;
+            lv_arc_set_rotation(_filesSpinner, 270);
+        }
+    }
 
     PrintFile entry;
     for (int index = 0; index < MAX_PRINT_FILES; ++index)
@@ -2537,6 +2866,7 @@ void Display::fillEnclosureCommand(EnclosureCommand &cmd) const
     cmd.fanPct = (uint8_t)constrain(_fanSpeed, 0, 100);
     cmd.material = _commandMaterial;
     cmd.jobActive = _jobActive ? 1 : 0;
+    cmd.calAction = _calAction;
 }
 
 void Display::pushEnclosureCommand()
@@ -2550,8 +2880,235 @@ void Display::enclosureUpdate(const EnclosureSnapshot &snap)
 {
     if (snap.valid)
         _enclosure = snap;
+    calibrationUpdate();
     refreshChamberDetail();
     refreshEnclosureLinkHeader();
+}
+
+void Display::calibrationUpdate()
+{
+    if (!_calContainer)
+        return;
+
+    const unsigned long now = millis();
+    const bool fresh = _enclosure.valid &&
+                       (millis() - _enclosure.rxMs < ENC_LINK_STALE_MS);
+
+    if (fresh)
+    {
+        _calPhase = _enclosure.calPhase;
+        _calLinkLostMs = 0;
+        const bool phaseActive = calPhaseActive(_calPhase);
+
+        // Rising edge: latch the modal before doing anything else, so a run
+        // that starts while the user is in the file list cannot leave that
+        // list on screen with the relay active underneath.
+        if (phaseActive && !_calActive)
+        {
+            _calActive = true;
+            _calCancelSent = false;
+            _calEndedMs = 0;
+            // Re-show the modal if it is not the visible view. `_calShown` can
+            // still be true while something else is on screen (a failed OTA
+            // restored the main view, or a job transition replaced the final
+            // result screen), and a new run must latch the lock either way.
+            // Never paint over an active OTA splash; hideSplash() restores the
+            // modal once the upload has finished or failed.
+            if ((!_calShown || _view != View::Calibration) && !_splashSpinner)
+                showCalibrationView();
+        }
+        // Falling edge: keep the modal up for the result, but release
+        // navigation. This only runs on FRESH telemetry - a stale snapshot
+        // must not be mistaken for "the run ended", or a five-second Wi-Fi
+        // hiccup would silently drop the modal lock.
+        else if (!phaseActive && _calActive)
+        {
+            _calActive = false;
+            _calCancelSent = false;
+            _calEndedMs = now;
+            // The C3 has processed (or never needed) the one-shot. Returning
+            // the field to zero lets the next run start from a defined value;
+            // the C3 uses that zero to re-arm its remembered action. Always
+            // send it, not just when this side still thinks it is nonzero: the
+            // link task repeats lastCmd between UI changes, and a reset that
+            // was queued but never drained would otherwise leave the heartbeat
+            // carrying a stale cancel id.
+            _calAction = 0;
+            pushEnclosureCommand();
+            if (!_calShown && !_splashSpinner)
+                showCalibrationView();
+        }
+    }
+    else if (_calActive)
+    {
+        // No fresh telemetry. Keep the run latched for a short grace period,
+        // then release the screen: the C3 is unreachable, so cancelling from
+        // here is impossible and a powered-off board must not leave the
+        // touchscreen permanently unusable. If telemetry returns with an
+        // active phase, the rising edge above re-latches immediately.
+        if (_calLinkLostMs == 0)
+            _calLinkLostMs = now;
+        if (now - _calLinkLostMs >= CAL_LINK_LOST_UNLOCK_MS)
+        {
+            Serial.println("[CAL] C3 link lost; releasing modal screen");
+            _calActive = false;
+            _calCancelSent = false;
+            // Unconditionally re-send the zero for the same reason as the
+            // normal falling edge above: lastCmd may still hold an older id.
+            _calAction = 0;
+            pushEnclosureCommand();
+            _calEndedMs = now;
+        }
+    }
+
+    if (_calShown)
+        refreshCalibrationDetail();
+
+    // Auto-close only the result screen. While _calActive is true this cannot
+    // fire, which is what makes the screen modal for the whole run.
+    if (_calShown && !_calActive && _calEndedMs != 0 &&
+        now - _calEndedMs >= CAL_RESULT_HOLD_MS)
+    {
+        closeCalibrationView();
+    }
+}
+
+void Display::refreshCalibrationDetail()
+{
+    if (!_calBodyLabel || !_calButton || !_calButtonLabel)
+        return;
+
+    const bool fresh = _enclosure.valid &&
+                       (millis() - _enclosure.rxMs < ENC_LINK_STALE_MS);
+    char chamber[18];
+    char bed[18];
+    char elapsed[18];
+    char body[384];
+    formatCx10(_enclosure.chamberCx10, chamber, sizeof(chamber));
+    formatCx10(_enclosure.bedCx10, bed, sizeof(bed));
+    formatCalElapsed(_enclosure.calElapsedSec, elapsed, sizeof(elapsed));
+
+    if (_calActive)
+    {
+        if (!fresh)
+        {
+            snprintf(body, sizeof(body),
+                     "C3 link lost\n\n"
+                     "Calibration state is unknown.\n"
+                     "The screen will unlock after %lu s if the link does not return.",
+                     (unsigned long)(CAL_LINK_LOST_UNLOCK_MS / 1000UL));
+        }
+        else
+        {
+            snprintf(body, sizeof(body),
+                     "Phase: %s\n"
+                     "Chamber: %s / %u C\n"
+                     "Bed: %s / %u C\n"
+                     "Elapsed: %s\n"
+                     "Cycles: %u\n\n"
+                     "Navigation is locked until the run ends.",
+                     calPhaseText(_calPhase), chamber,
+                     (unsigned)_enclosure.calSetpointC, bed,
+                     (unsigned)_enclosure.calBedTargetC, elapsed,
+                     (unsigned)_enclosure.calCycles);
+        }
+    }
+    else if (_calLinkLostMs != 0)
+    {
+        snprintf(body, sizeof(body),
+                 "C3 link lost\n\n"
+                 "Calibration state is unknown.\n"
+                 "Check the C3; this screen is no longer locked.");
+    }
+    else if (_calPhase == ENC_CAL_PHASE_DONE)
+    {
+        snprintf(body, sizeof(body),
+                 "Phase: %s\n"
+                 "Chamber: %s / %u C\n"
+                 "Bed: %s / %u C\n"
+                 "Elapsed: %s\n"
+                 "Cycles: %u\n\n"
+                 "Result ready. Apply or discard it in the C3 web UI.",
+                 calPhaseText(_calPhase), chamber,
+                 (unsigned)_enclosure.calSetpointC, bed,
+                 (unsigned)_enclosure.calBedTargetC, elapsed,
+                 (unsigned)_enclosure.calCycles);
+    }
+    else if (_calPhase == ENC_CAL_PHASE_ABORTED)
+    {
+        snprintf(body, sizeof(body),
+                 "Phase: %s\n"
+                 "Reason: %s\n"
+                 "Chamber: %s / %u C\n"
+                 "Bed: %s / %u C\n"
+                 "Elapsed: %s\n\n"
+                 "The bed was switched off.",
+                 calPhaseText(_calPhase),
+                 calErrorText(_enclosure.calErrorCode), chamber,
+                 (unsigned)_enclosure.calSetpointC, bed,
+                 (unsigned)_enclosure.calBedTargetC, elapsed);
+    }
+    else
+    {
+        snprintf(body, sizeof(body), "Calibration is not running.");
+    }
+
+    const char *current = lv_label_get_text(_calBodyLabel);
+    if (!current || strcmp(current, body) != 0)
+        lv_label_set_text(_calBodyLabel, body);
+
+    if (_calActive)
+    {
+        setLabelTextOnce(_calButtonLabel, _calCancelSent ? "Cancelling..." : "Cancel calibration");
+        styleButton(_calButton, _calCancelSent ? TFT_DARKGREY : TFT_RED);
+    }
+    else
+    {
+        setLabelTextOnce(_calButtonLabel, "Close");
+        styleButton(_calButton, TFT_DARKGREEN);
+    }
+}
+
+void Display::calibrationButtonTapped()
+{
+    if (!_calActive)
+    {
+        closeCalibrationView();
+        return;
+    }
+    if (_calCancelSent)
+        return;
+    showCalibrationConfirm();
+}
+
+void Display::closeCalibrationView()
+{
+    _calShown = false;
+    _calCancelSent = false;
+    // Unconditionally re-send zero: this also repairs lastCmd if an earlier
+    // reset was queued but dropped, and it resumes the C3's normal command
+    // stream with a known one-shot state.
+    _calAction = 0;
+    pushEnclosureCommand();
+    _calEndedMs = 0;
+    _calLinkLostMs = 0;
+    if (_view == View::Calibration)
+        showMainView();
+}
+
+void Display::showCalibrationConfirm()
+{
+    if (!_confirmOverlay || !_calActive)
+        return;
+    _pendingJob = CAL_CANCEL;
+    setLabelTextOnce(_confirmLabel, "Cancel calibration?");
+    setLabelTextOnce(_confirmSubLabel,
+                     "The bed will be switched off and this run discarded. "
+                     "This cannot be undone.");
+    styleButton(_confirmYesButton, TFT_RED);
+    lv_obj_move_to_index(_confirmOverlay, -1);
+    lv_obj_clear_flag(_confirmOverlay, LV_OBJ_FLAG_HIDDEN);
+    Serial.println("[CAL] cancel confirm shown");
 }
 
 void Display::refreshEnclosureLinkHeader()
@@ -2800,6 +3357,23 @@ void Display::hideJobConfirm()
 void Display::confirmPendingJob()
 {
     const int pending = _pendingJob;
+    if (pending == CAL_CANCEL)
+    {
+        _pendingJob = -1;
+        if (_confirmOverlay)
+            lv_obj_add_flag(_confirmOverlay, LV_OBJ_FLAG_HIDDEN);
+        if (!_calActive || _calCancelSent)
+            return;
+        // Advance the action id so the C3 sees a CHANGE exactly once. The
+        // heartbeat repeats this value; the C3 ignores repeats, so a later run
+        // cannot be cancelled by this stale command.
+        _calAction = (_calAction == 255) ? 1 : (uint8_t)(_calAction + 1);
+        _calCancelSent = true;
+        Serial.printf("[CAL] cancel requested action=%u\n", (unsigned)_calAction);
+        pushEnclosureCommand();
+        refreshCalibrationDetail();
+        return;
+    }
     if (pending == PRINT_FILE)
     {
         _pendingJob = -1;

@@ -110,6 +110,10 @@ private:
     unsigned long calLastSampleMs = 0;
     unsigned long calLastSampleAtMs = 0;
     bool calResultApplied = false;
+    // Last nonzero cancellation action received from the CYD. The CYD repeats
+    // its command every heartbeat; acting only on a CHANGE makes the cancel
+    // one-shot without adding an acknowledgement to the protocol.
+    uint8_t lastCalAction = 0;
 
     enum MaterialState
     {
@@ -202,6 +206,11 @@ public:
 
     // Snapshot for the web UI. Safe at any time.
     PidCalibration::Info calibrationInfo() const;
+
+    // Compact reason code for telemetry, so the CYD can label an abort without
+    // carrying the full sentence in every frame. ENC_CAL_ERR_NONE unless the
+    // current phase is Aborted.
+    uint8_t calibrationErrorCode() const;
 
     // Runtime PID gains. Returns false (leaving the regulator untouched) when
     // the values are out of range or non-finite. Takes effect on the next

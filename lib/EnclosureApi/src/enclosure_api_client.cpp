@@ -149,9 +149,18 @@ namespace EnclosureApi
         out.louvrePct = doc["louvre"] | (uint8_t)0;
         out.fanPct = doc["fan"] | (uint8_t)0;
         out.chamberCx10 = (int16_t)(doc["chamber"] | (int)ENC_CHAMBER_INVALID);
+        out.bedCx10 = (int16_t)(doc["bed"] | (int)ENC_CHAMBER_INVALID);
         out.state = doc["state"] | (uint8_t)ENC_STATE_IDLE;
         out.mode = doc["mode"] | (uint8_t)ENC_MODE_AUTO;
         out.seq = doc["seq"] | (uint8_t)0;
+        // Calibration fields. Absent on an older C3 build, which leaves the
+        // defaults (NONE/0) and therefore looks exactly like "not calibrating".
+        out.calPhase = doc["calPhase"] | (uint8_t)ENC_CAL_PHASE_NONE;
+        out.calElapsedSec = (uint16_t)(doc["calElapsed"] | 0);
+        out.calCycles = (uint16_t)(doc["calCycles"] | 0);
+        out.calBedTargetC = (uint8_t)(doc["calBedTarget"] | 0);
+        out.calSetpointC = (uint8_t)(doc["calSetpoint"] | 0);
+        out.calErrorCode = (uint8_t)(doc["calError"] | (uint8_t)ENC_CAL_ERR_NONE);
         // OctoPrint endpoint, same keys the ESP-NOW telemetry carries. Absent on
         // an older C3 build, which leaves the all-zero "no override" sentinel
         // intact rather than inventing an address.
@@ -208,6 +217,7 @@ namespace EnclosureApi
         doc["fan"] = cmd.fanPct;
         doc["material"] = cmd.material;
         doc["job"] = cmd.jobActive;
+        doc["calAction"] = cmd.calAction;
         String body;
         serializeJson(doc, body);
 

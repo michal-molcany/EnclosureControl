@@ -13,9 +13,16 @@ struct EnclosureSnapshot
     uint8_t louvrePct = 0;
     uint8_t fanPct = 0;
     int16_t chamberCx10 = ENC_CHAMBER_INVALID;
+    int16_t bedCx10 = ENC_CHAMBER_INVALID;
     uint8_t state = ENC_STATE_IDLE;
     uint8_t mode = ENC_MODE_AUTO;
     uint8_t seq = 0;
+    uint16_t calElapsedSec = 0;
+    uint16_t calCycles = 0;
+    uint8_t calPhase = ENC_CAL_PHASE_NONE;
+    uint8_t calBedTargetC = 0;
+    uint8_t calSetpointC = 0;
+    uint8_t calErrorCode = ENC_CAL_ERR_NONE;
     unsigned long rxMs = 0;
     bool valid = false;
     // True when the newest telemetry arrived over the HTTP API fallback rather

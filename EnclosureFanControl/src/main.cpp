@@ -37,8 +37,19 @@ static EnclosureApi::Telemetry provideEnclosureTelemetry()
   t.louvrePct = tempRegulation.louvrePercent();
   t.fanPct = tempRegulation.fanPercent();
   t.chamberCx10 = g_chamberValid ? (int16_t)(g_chamberTemp * 10.0) : ENC_CHAMBER_INVALID;
+  const double bedC = tempRegulation.bedActual();
+  t.bedCx10 = (g_chamberValid && isfinite(bedC)) ? (int16_t)(bedC * 10.0) : ENC_CHAMBER_INVALID;
   t.state = tempRegulation.stateCode();
   t.mode = tempRegulation.controlModeCode();
+  // Calibration progress for the CYD's modal screen. Read once per request so
+  // phase and elapsed time cannot come from two different ticks.
+  const PidCalibration::Info cal = tempRegulation.calibrationInfo();
+  t.calPhase = (uint8_t)cal.phase;
+  t.calElapsedSec = (uint16_t)(cal.elapsedMs / 1000UL);
+  t.calCycles = cal.cycles;
+  t.calBedTargetC = (uint8_t)cal.bedTargetC;
+  t.calSetpointC = (uint8_t)cal.setpointC;
+  t.calErrorCode = tempRegulation.calibrationErrorCode();
   // Carried over this transport too, so the CYD still learns a new OctoPrint
   // address while it is falling back to HTTP because ESP-NOW is unusable.
   const IPAddress octo = octoEndpointIp();

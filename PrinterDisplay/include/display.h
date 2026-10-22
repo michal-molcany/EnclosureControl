@@ -22,7 +22,11 @@ public:
         Bed,
         Files,
         FileInfo,
-        Info
+        Info,
+        // Modal while the C3 runs a PID calibration. It is not reachable from
+        // any button: enclosureUpdate() switches to it when telemetry reports
+        // an active run, and blocks every other show*View() until the run ends.
+        Calibration
     };
 
     // Targets that get their own preheat screen, reached by tapping the
@@ -78,8 +82,10 @@ public:
     // entry, which also asks the poll task for a fresh fetch.
     void showFilesView();
     // Shows the selected file's details (material, print time, size, upload date,
-    // dimensions, filament, print history). Reads the same listing the rows were
-    // built from, so it is immediate and costs no request.
+    // dimensions, filament, print history). The list carries only the cheap
+    // fields; the heavy ones arrive from one /api/files/local/<path> request on
+    // demand, so the panel paints immediately and fills in when the poll task
+    // finishes.
     void showFileInfo();
     // Diagnostic screen, reached by tapping the wifi signal in the header.
     // Reports what this board is: firmware, uptime, network, which transport is
@@ -117,8 +123,12 @@ public:
     int fanPercent() const { return _fanSpeed; }
     // Fill an outbound command from current UI state (magic+seq stamped by link).
     void fillEnclosureCommand(EnclosureCommand &cmd) const;
-    // Feed live telemetry from EnclosureFanControl into the chamber view.
+    // Feed live telemetry from EnclosureFanControl into the chamber view and
+    // the modal calibration screen.
     void enclosureUpdate(const EnclosureSnapshot &snap);
+    // The calibration screen's single button: cancel (with confirmation) while
+    // a run is active, close the result screen otherwise.
+    void calibrationButtonTapped();
     View currentView() const { return _view; }
     void printerStatisticUpdate(const PrinterSnapshot &snap);
     void jobUpdate(const PrinterSnapshot &snap);
@@ -140,6 +150,10 @@ public:
     // row). Called from the UI loop like jobUpdate(); rebuilds rows only when
     // the cache version changes.
     void filesUpdate();
+    // Repaints the info table from the current list entry plus the poller's
+    // one-entry detail cache. Called when the panel opens and when a detail
+    // request finishes; shows "Loading..." until then.
+    void refreshFileInfoDetail();
     // Selects a cached row (0-based): highlights it and reveals the Print
     // button. -1 clears the selection.
     void selectFile(int index);
@@ -216,6 +230,17 @@ private:
     // than truncating mid-value, so running short would lose whole rows.
     static constexpr size_t kInfoBuf = 400;
     void createInfoView();
+    // Calibration screen. One container, one multi-line label + one button, for
+    // the same LVGL-pool reason as the info screen: the modal is a
+    // low-frequency, text-heavy view and does not need a widget per row.
+    void createCalibrationView();
+    void showCalibrationView();
+    void refreshCalibrationDetail();
+    // Tracks the active -> finished edge from telemetry, forces the modal on,
+    // and releases navigation once the run has ended.
+    void calibrationUpdate();
+    void showCalibrationConfirm();
+    void closeCalibrationView();
     // Hides every view container. One place, called by every show*View(), so a
     // view cannot be added to some hide-lists and missed in others - which is
     // exactly how showChamberView came to leave the preheat containers visible
@@ -293,6 +318,24 @@ private:
     lv_obj_t *_infoContainer = nullptr;
     lv_obj_t *_infoLabel = nullptr;
     char _infoText[kInfoBuf] = {0};
+    // Modal calibration view. The body is one label so the whole screen costs
+    // four LVGL objects (container, title, body, button + its label); the
+    // 60 KB pool is the binding constraint on this board.
+    lv_obj_t *_calContainer = nullptr;
+    lv_obj_t *_calTitleLabel = nullptr;
+    lv_obj_t *_calBodyLabel = nullptr;
+    lv_obj_t *_calButton = nullptr;
+    lv_obj_t *_calButtonLabel = nullptr;
+    bool _calActive = false;
+    bool _calShown = false;
+    bool _calCancelSent = false;
+    uint8_t _calPhase = ENC_CAL_PHASE_NONE;
+    // Rolling one-shot cancel id carried in EnclosureCommand::calAction. Kept
+    // nonzero; the C3 acts when it changes. Reset to 0 by a reboot, which the
+    // C3 reads as "re-arm" - see the command field's comment.
+    uint8_t _calAction = 0;
+    unsigned long _calEndedMs = 0;
+    unsigned long _calLinkLostMs = 0;
     PreheatView _preheat[kPreheatCount];
     PreheatAction _preheatAction[kPreheatCount] = {};
     // Printable-files view widgets. Rows are a fixed pool of clickable
@@ -311,12 +354,23 @@ private:
     // above it, because it is what the table is about and squeezing a long
     // filename into a cell makes both columns unreadable.
     lv_obj_t *_filesInfoTable = nullptr;
+    // Spinner shown only while the first list fetch is in flight and there are
+    // no cached rows to display. An arc, not lv_spinner: LV_USE_ARC is already
+    // compiled for the splash screen, so this adds no widget code to the tight
+    // flash budget.
+    lv_obj_t *_filesSpinner = nullptr;
+    uint8_t _filesSpinnerFrame = 0;
+    uint32_t _filesSpinnerTick = 0;
     lv_obj_t *_fileRowLabels[MAX_PRINT_FILES] = {};
     uint8_t _filesCount = 0;
     uint32_t _filesVersionSeen = 0;
     bool _filesBusy = false;
     bool _filesError = false;
     int _selectedFile = -1;
+    // Detail request currently shown in the info panel. The path is a String
+    // (heap) rather than another fixed buffer in the DRAM-tight static segment.
+    String _fileInfoPath;
+    uint32_t _fileInfoVersionSeen = 0;
     Action _filesOpenAction = nullptr;
     FilePrintAction _filePrintAction = nullptr;
     lv_obj_t *_chamberCurrentLabel = nullptr;

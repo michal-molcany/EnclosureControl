@@ -407,16 +407,33 @@ namespace
         PrintFile files[MAX_PRINT_FILES];
         uint8_t count = 0;
         uint32_t version = 0;
+        uint32_t updatedMs = 0;
+        uint32_t lastAttemptMs = 0;
+        bool hasUpdated = false;
         bool busy = false;
         bool error = false;
     };
     FileListCache *sharedFiles = nullptr;
     uint32_t filesVersion = 0;
-    // Staged print path. Written by the UI task just before it enqueues
-    // PRINT_FILE, read by the poll task after dequeuing it, so the queue
-    // itself provides the happens-after ordering. Confirm-gated (one dialog
-    // per tap), so a second stage cannot overtake a queued first one.
-    char stagedPrintPath[PRINT_FILE_PATH_LEN] = {};
+
+    // One-entry detail cache for the info panel. Heap-allocated for the same
+    // reason as the list: another PrintFile in static DRAM would not fit.
+    struct FileInfoCache
+    {
+        PrintFile file;
+        uint32_t version = 0;
+        bool busy = false;
+        bool ready = false;
+        bool error = false;
+    };
+    FileInfoCache *sharedInfo = nullptr;
+
+    // Staged path for PRINT_FILE / FILE_INFO. Written by the UI task just before
+    // it enqueues one of those commands, read by the poll task after dequeuing
+    // it, so the queue itself provides the happens-after ordering. The two
+    // commands are never queued together (the info panel and print confirm are
+    // separate screens), so one buffer is enough.
+    char stagedPath[PRINT_FILE_PATH_LEN] = {};
     // Last file-fetch outcome, re-logged every 15 s while failed so the
     // reason is capturable on serial without tap timing. Poll-task-owned
     // (written + read on the same task); codes only, strings stay in flash.
@@ -432,8 +449,44 @@ namespace
         {
             sharedFiles->busy = true;
             sharedFiles->error = false;
+            sharedFiles->lastAttemptMs = millis();
             xSemaphoreGive(snapshotMutex);
         }
+    }
+
+    void markInfoBusy()
+    {
+        if (snapshotMutex && sharedInfo &&
+            xSemaphoreTake(snapshotMutex, pdMS_TO_TICKS(20)) == pdTRUE)
+        {
+            sharedInfo->busy = true;
+            sharedInfo->error = false;
+            xSemaphoreGive(snapshotMutex);
+        }
+    }
+
+    // Copies one parsed entry into the fixed-size cache shape. Both paths use
+    // this so the field list only exists once.
+    void copyFile(const OctoFile &src, PrintFile &dst)
+    {
+        strncpy(dst.path, src.path, PRINT_FILE_PATH_LEN - 1);
+        dst.path[PRINT_FILE_PATH_LEN - 1] = '\0';
+        strncpy(dst.name, src.name, PRINT_FILE_NAME_LEN - 1);
+        dst.name[PRINT_FILE_NAME_LEN - 1] = '\0';
+        dst.date = src.date;
+        dst.size = src.size;
+        memcpy(dst.material, src.material, sizeof(dst.material));
+        dst.estimatedPrintTime = src.estimatedPrintTime;
+        dst.filamentLengthMm = src.filamentLengthMm;
+        dst.filamentVolumeCm3 = src.filamentVolumeCm3;
+        dst.dimX = src.dimX;
+        dst.dimY = src.dimY;
+        dst.dimZ = src.dimZ;
+        dst.averagePrintTime = src.averagePrintTime;
+        dst.printsSuccess = src.printsSuccess;
+        dst.printsFailure = src.printsFailure;
+        dst.layerHeightMm = src.layerHeightMm;
+        dst.nozzleMm = src.nozzleMm;
     }
 
     void executeCommand(const PollerCommand &cmd)
@@ -475,9 +528,9 @@ namespace
                 // overflow the DRAM segment - see above).
                 //
                 // Note the cost here is NOT proportional to MAX_PRINT_FILES:
-                // fetchFiles streams and parses OctoPrint's whole recursive
-                // listing (~75 KB) either way. This allocation is just the
-                // destination.
+                // fetchFiles still streams OctoPrint's whole recursive listing.
+                // It now keeps only the fields the rows draw, which makes the
+                // parse cheap; this allocation is just the destination.
                 OctoFile *scratch =
                     static_cast<OctoFile *>(malloc(sizeof(OctoFile) * MAX_PRINT_FILES));
                 if (!scratch)
@@ -503,37 +556,27 @@ namespace
                 {
                     if (found >= 0)
                     {
+                        // A periodic check that finds the same list must not
+                        // advance the version: the UI would rebuild the rows and
+                        // throw away the user's selection every five minutes.
+                        bool changed = found != sharedFiles->count;
+                        for (int i = 0; i < found && !changed; ++i)
+                        {
+                            changed = strcmp(sharedFiles->files[i].path, scratch[i].path) != 0 ||
+                                      sharedFiles->files[i].date != scratch[i].date ||
+                                      sharedFiles->files[i].size != scratch[i].size ||
+                                      strcmp(sharedFiles->files[i].name, scratch[i].name) != 0;
+                        }
                         sharedFiles->count = (uint8_t)found;
                         for (int i = 0; i < found; ++i)
-                        {
-                            strncpy(sharedFiles->files[i].path, scratch[i].path,
-                                    PRINT_FILE_PATH_LEN - 1);
-                            sharedFiles->files[i].path[PRINT_FILE_PATH_LEN - 1] = '\0';
-                            strncpy(sharedFiles->files[i].name, scratch[i].name,
-                                    PRINT_FILE_NAME_LEN - 1);
-                            sharedFiles->files[i].name[PRINT_FILE_NAME_LEN - 1] = '\0';
-                            sharedFiles->files[i].date = scratch[i].date;
-                            sharedFiles->files[i].size = scratch[i].size;
-                            // Info-view fields, copied from the same listing
-                            // entry - there is no second fetch for these.
-                            memcpy(sharedFiles->files[i].material, scratch[i].material,
-                                   sizeof(sharedFiles->files[i].material));
-                            sharedFiles->files[i].estimatedPrintTime = scratch[i].estimatedPrintTime;
-                            sharedFiles->files[i].filamentLengthMm = scratch[i].filamentLengthMm;
-                            sharedFiles->files[i].filamentVolumeCm3 = scratch[i].filamentVolumeCm3;
-                            sharedFiles->files[i].dimX = scratch[i].dimX;
-                            sharedFiles->files[i].dimY = scratch[i].dimY;
-                            sharedFiles->files[i].dimZ = scratch[i].dimZ;
-                            sharedFiles->files[i].averagePrintTime = scratch[i].averagePrintTime;
-                            sharedFiles->files[i].printsSuccess = scratch[i].printsSuccess;
-                            sharedFiles->files[i].printsFailure = scratch[i].printsFailure;
-                            sharedFiles->files[i].layerHeightMm = scratch[i].layerHeightMm;
-                            sharedFiles->files[i].nozzleMm = scratch[i].nozzleMm;
-                        }
+                            copyFile(scratch[i], sharedFiles->files[i]);
                         sharedFiles->error = false;
-                        sharedFiles->version = ++filesVersion;
-                        Serial.printf("[POLL] files refresh ok count=%d version=%u\n",
-                                      found, filesVersion);
+                        sharedFiles->updatedMs = millis();
+                        sharedFiles->hasUpdated = true;
+                        if (changed)
+                            sharedFiles->version = ++filesVersion;
+                        Serial.printf("[POLL] files refresh ok count=%d changed=%d version=%u\n",
+                                      found, changed, filesVersion);
                     }
                     else
                     {
@@ -548,9 +591,42 @@ namespace
                 free(scratch);
                 break;
             }
+            case FILE_INFO:
+            {
+                if (!sharedInfo || stagedPath[0] == '\0')
+                    break;
+                Serial.printf("[POLL] file info start %s\n", stagedPath);
+                OctoFile scratch;
+                OctoPrinter::FetchDiag diag = OctoPrinter::FETCH_OK;
+                uint8_t pcode = 0;
+                const int ok = api.fetchFileInfo(stagedPath, scratch, diag, pcode);
+                if (xSemaphoreTake(snapshotMutex, portMAX_DELAY) == pdTRUE)
+                {
+                    if (ok > 0)
+                    {
+                        copyFile(scratch, sharedInfo->file);
+                        sharedInfo->ready = true;
+                        sharedInfo->error = false;
+                        Serial.printf("[POLL] file info ok %s\n", stagedPath);
+                    }
+                    else
+                    {
+                        // Keep whatever was cached for the previous file; ready
+                        // false is what tells the UI this request failed.
+                        sharedInfo->ready = false;
+                        sharedInfo->error = true;
+                        Serial.printf("[POLL] file info FAILED diag=%u code=%u\n",
+                                      (unsigned)diag, pcode);
+                    }
+                    sharedInfo->busy = false;
+                    sharedInfo->version++;
+                    xSemaphoreGive(snapshotMutex);
+                }
+                break;
+            }
             case PRINT_FILE:
             {
-                if (stagedPrintPath[0] == '\0')
+                if (stagedPath[0] == '\0')
                     break;
                 // Second guard behind the idle-only entry: a job that started
                 // elsewhere after the confirm opened must not be overridden.
@@ -559,8 +635,8 @@ namespace
                     Serial.println("[POLL] print REJECTED job active");
                     break;
                 }
-                Serial.printf("[POLL] print %s -> HTTP %d\n", stagedPrintPath,
-                              api.selectAndPrint(stagedPrintPath));
+                Serial.printf("[POLL] print %s -> HTTP %d\n", stagedPath,
+                              api.selectAndPrint(stagedPath));
                 break;
             }
             default:
@@ -664,6 +740,9 @@ void pollerStart()
     sharedFiles = static_cast<FileListCache *>(calloc(1, sizeof(FileListCache)));
     if (!sharedFiles)
         Serial.println("[POLL] file cache alloc FAILED; files view will report errors");
+    sharedInfo = static_cast<FileInfoCache *>(calloc(1, sizeof(FileInfoCache)));
+    if (!sharedInfo)
+        Serial.println("[POLL] file info cache alloc FAILED; details will report errors");
     xTaskCreatePinnedToCore(pollTask, "octoPoll", 8192, nullptr, 1, nullptr, 0);
 }
 
@@ -764,6 +843,25 @@ bool pollerFilesMeta(uint8_t &count, uint32_t &version, bool &busy, bool &error)
     return true;
 }
 
+bool pollerFilesShouldRefresh(uint32_t ttlMs, uint32_t retryMs)
+{
+    if (!snapshotMutex || !sharedFiles)
+        return false;
+    if (xSemaphoreTake(snapshotMutex, pdMS_TO_TICKS(20)) != pdTRUE)
+        return false;
+    bool refresh = false;
+    if (!sharedFiles->busy)
+    {
+        if (sharedFiles->hasUpdated)
+            refresh = (uint32_t)(millis() - sharedFiles->updatedMs) >= ttlMs;
+        else
+            refresh = sharedFiles->lastAttemptMs == 0 ||
+                      (uint32_t)(millis() - sharedFiles->lastAttemptMs) >= retryMs;
+    }
+    xSemaphoreGive(snapshotMutex);
+    return refresh;
+}
+
 bool pollerCopyFile(int index, PrintFile &out)
 {
     if (!snapshotMutex || !sharedFiles || index < 0)
@@ -777,6 +875,42 @@ bool pollerCopyFile(int index, PrintFile &out)
     return ok;
 }
 
+bool pollerCopyFileByPath(const char *path, PrintFile &out)
+{
+    if (!snapshotMutex || !sharedFiles || !path || !*path)
+        return false;
+    if (xSemaphoreTake(snapshotMutex, pdMS_TO_TICKS(20)) != pdTRUE)
+        return false;
+    bool ok = false;
+    for (uint8_t i = 0; i < sharedFiles->count; ++i)
+    {
+        if (strcmp(sharedFiles->files[i].path, path) == 0)
+        {
+            out = sharedFiles->files[i];
+            ok = true;
+            break;
+        }
+    }
+    xSemaphoreGive(snapshotMutex);
+    return ok;
+}
+
+bool pollerCopyFileInfo(PrintFile &out, uint32_t &version, bool &busy,
+                        bool &ready, bool &error)
+{
+    if (!snapshotMutex || !sharedInfo)
+        return false;
+    if (xSemaphoreTake(snapshotMutex, pdMS_TO_TICKS(20)) != pdTRUE)
+        return false;
+    out = sharedInfo->file;
+    version = sharedInfo->version;
+    busy = sharedInfo->busy;
+    ready = sharedInfo->ready;
+    error = sharedInfo->error;
+    xSemaphoreGive(snapshotMutex);
+    return true;
+}
+
 void pollerRequestFilesRefresh()
 {
     // Optimistic busy so the view shows "Loading..." at once instead of
@@ -785,11 +919,21 @@ void pollerRequestFilesRefresh()
     pollerSendCommand({PollerCommand::Job, REFRESH_FILES});
 }
 
+void pollerRequestFileInfo(const char *path)
+{
+    if (!path || !*path)
+        return;
+    markInfoBusy();
+    strncpy(stagedPath, path, PRINT_FILE_PATH_LEN - 1);
+    stagedPath[PRINT_FILE_PATH_LEN - 1] = '\0';
+    pollerSendCommand({PollerCommand::Job, FILE_INFO});
+}
+
 void pollerRequestFilePrint(const char *path)
 {
     if (!path || !*path)
         return;
-    strncpy(stagedPrintPath, path, PRINT_FILE_PATH_LEN - 1);
-    stagedPrintPath[PRINT_FILE_PATH_LEN - 1] = '\0';
+    strncpy(stagedPath, path, PRINT_FILE_PATH_LEN - 1);
+    stagedPath[PRINT_FILE_PATH_LEN - 1] = '\0';
     pollerSendCommand({PollerCommand::Job, PRINT_FILE});
 }

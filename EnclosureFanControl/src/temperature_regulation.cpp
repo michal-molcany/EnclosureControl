@@ -446,15 +446,48 @@ void TemperatureRegulation::applyCommand(const EnclosureCommand &cmd, bool fromR
 #if SERIAL_DEBUG
     // The tag names the SOURCE, because a web-UI command and a CYD command are
     // not interchangeable: only the CYD one refreshes the link liveness.
-    Serial.printf("%s mode=%u setpoint=%u material=%u job=%u louvre=%u fan=%u\n",
+    Serial.printf("%s mode=%u setpoint=%u material=%u job=%u louvre=%u fan=%u cal=%u\n",
                   fromRemote ? "[REMOTE]" : "[WEBUI]",
                   static_cast<unsigned>(cmd.mode),
                   static_cast<unsigned>(cmd.setpoint),
                   static_cast<unsigned>(cmd.material),
                   static_cast<unsigned>(cmd.jobActive),
                   static_cast<unsigned>(cmd.louvrePct),
-                  static_cast<unsigned>(cmd.fanPct));
+                  static_cast<unsigned>(cmd.fanPct),
+                  static_cast<unsigned>(cmd.calAction));
 #endif
+
+    // Handle a calibration cancel BEFORE the relay lockout below. Every other
+    // CYD field is ignored during a run, but this one must get through or the
+    // modal screen on the display would have no way out.
+    //
+    // Only the CYD's transport is allowed to drive this field. A browser POST
+    // uses applyLocalCommand() and writes zero because it has no calAction;
+    // clearing lastCalAction from that would re-arm an old CYD value and cancel
+    // the next run the moment its heartbeat arrived. A zero from the CYD means
+    // "not cancelling", and is what re-arms the one-shot across a reboot.
+    if (fromRemote)
+    {
+        if (cmd.calAction == 0)
+        {
+            lastCalAction = 0;
+        }
+        else if (cmd.calAction != lastCalAction)
+        {
+            lastCalAction = cmd.calAction;
+            if (calibrationRunning())
+            {
+#if SERIAL_DEBUG
+                Serial.println("[CAL] cancel requested by CYD");
+#endif
+                cancelCalibration();
+                // Do not apply the rest of this command in the same breath: it
+                // was assembled while the relay owned the outputs, and the
+                // normal heartbeat 2 s later carries the current mode anyway.
+                return;
+            }
+        }
+    }
 
     // The relay needs the outputs to itself. A linked CYD keeps refreshing the
     // link liveness above - so the board still reports it as connected - but its
@@ -589,7 +622,7 @@ bool TemperatureRegulation::startCalibration(String &reason)
 void TemperatureRegulation::cancelCalibration()
 {
     if (calibrationRunning())
-        finishCalibration(false, "cancelled from the web page");
+        finishCalibration(false, "cancelled");
 }
 
 bool TemperatureRegulation::applyCalibrationResult(String &reason)
@@ -663,6 +696,36 @@ PidCalibration::Info TemperatureRegulation::calibrationInfo() const
     strncpy(info.error, calError.c_str(), sizeof(info.error) - 1);
     info.error[sizeof(info.error) - 1] = '\0';
     return info;
+}
+
+uint8_t TemperatureRegulation::calibrationErrorCode() const
+{
+    if (calPhase != PidCalibration::Phase::Aborted)
+        return ENC_CAL_ERR_NONE;
+
+    // The reasons are the literals passed to finishCalibration(). Matching on
+    // them here keeps the existing web-UI text intact while the wire carries
+    // only a one-byte code; an unrecognised reason degrades to OTHER rather
+    // than to "no error", so the CYD still says the run stopped.
+    if (calError.indexOf("cancel") >= 0)
+        return ENC_CAL_ERR_CANCELLED;
+    if (calError.indexOf("55 C") >= 0)
+        return ENC_CAL_ERR_EMERGENCY;
+    if (calError.indexOf("50 C") >= 0)
+        return ENC_CAL_ERR_CHAMBER_HIGH;
+    if (calError.indexOf("bed did not reach") >= 0)
+        return ENC_CAL_ERR_BED_TIMEOUT;
+    if (calError.indexOf("lost valid OctoPrint") >= 0)
+        return ENC_CAL_ERR_OCTO_LOST;
+    if (calError.indexOf("data went stale") >= 0)
+        return ENC_CAL_ERR_DATA_STALE;
+    if (calError.indexOf("print started") >= 0)
+        return ENC_CAL_ERR_PRINT_STARTED;
+    if (calError.indexOf("timed out") >= 0)
+        return ENC_CAL_ERR_TIMEOUT;
+    if (calError.indexOf("not usable") >= 0)
+        return ENC_CAL_ERR_BAD_READING;
+    return ENC_CAL_ERR_OTHER;
 }
 
 void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool haveData,

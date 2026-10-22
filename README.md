@@ -131,10 +131,15 @@ plugin's settings and stored in OctoPrint's `config.yaml`, never in this repo.
 - **PID calibration needs an idle printer and can take over an hour.** The C3
   preheats the bed to 90 °C, runs for up to 60 minutes after the chamber reaches
   35 °C, ignores manual and CYD commands while the relay runs, and switches the
-  bed off at the end. See
+  bed off at the end. The CYD locks onto the run automatically and shows live
+  chamber/bed readings, phase, elapsed time and cycles; its only action is a
+  confirmed cancel. See
   [`EnclosureFanControl/README.md`](EnclosureFanControl/README.md#pid-calibration).
-- **The two boards do not need matching firmware versions.** Nothing depends on
-  them being equal.
+- **Flash both boards when the protocol revision changes.** The shared version
+  line reports `proto=vN`; a mismatch drops every ESP-NOW frame because the
+  packet length is checked against each board's own `sizeof()`. The CYD falls
+  back to HTTP, so the pair still works, but the endpoint/key and calibration
+  hand-off need both boards current.
 
 ## Development
 

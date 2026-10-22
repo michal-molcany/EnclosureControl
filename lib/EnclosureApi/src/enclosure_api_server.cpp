@@ -18,9 +18,13 @@
 // lockstep with the client; the values mirror EnclosureTelemetry/EnclosureCommand.
 //
 //   GET /api/enclosure  -> {"louvre":0-100,"fan":0-100,"chamber":int16<- "0.1 C, "
-//                          "state":EnclosureState,"mode":EnclosureMode,"seq":0-255}
+//                          "bed":int16<- "0.1 C, "state":EnclosureState,"mode":EnclosureMode,
+//                          "seq":0-255,"calPhase":EnclosureCalPhase,
+//                          "calElapsed":seconds,"calCycles":n,"calBedTarget":C,
+//                          "calSetpoint":C,"calError":EnclosureCalError}
 //   POST /api/enclosure <- {"mode":EnclosureMode,"setpoint":0-60,"louvre":0-100,
-//                          "fan":0-100,"material":EnclosureMaterial,"job":0|1}
+//                          "fan":0-100,"material":EnclosureMaterial,"job":0|1,
+//                          "calAction":0|nonzero cancel request}
 //
 //   GET  /api/pid       -> {"kp":<float>,"ki":<float>,"kd":<float>}
 //   POST /api/pid       <- same shape. 400 if any value is out of range or not
@@ -79,9 +83,16 @@ namespace
         doc["louvre"] = t.louvrePct;
         doc["fan"] = t.fanPct;
         doc["chamber"] = t.chamberCx10;
+        doc["bed"] = t.bedCx10;
         doc["state"] = t.state;
         doc["mode"] = t.mode;
         doc["seq"] = t.seq;
+        doc["calPhase"] = t.calPhase;
+        doc["calElapsed"] = t.calElapsedSec;
+        doc["calCycles"] = t.calCycles;
+        doc["calBedTarget"] = t.calBedTargetC;
+        doc["calSetpoint"] = t.calSetpointC;
+        doc["calError"] = t.calErrorCode;
         doc["octoIp"] = String(t.octoIp[0]) + "." + String(t.octoIp[1]) + "." +
                         String(t.octoIp[2]) + "." + String(t.octoIp[3]);
         doc["octoPort"] = t.octoPort;
@@ -125,6 +136,7 @@ namespace
         cmd.fanPct = doc["fan"] | 0;
         cmd.material = doc["material"] | ENC_MATERIAL_UNKNOWN;
         cmd.jobActive = doc["job"] | 0;
+        cmd.calAction = doc["calAction"] | 0;
         handleCommand(cmd);
         server->send(200, "text/plain", "OK");
     }

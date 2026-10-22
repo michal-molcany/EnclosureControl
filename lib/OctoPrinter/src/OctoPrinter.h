@@ -54,10 +54,10 @@ struct OctoFile
   uint32_t date;
   uint32_t size;
 
-  // Details for the file-info view, taken from the SAME listing entry rather
-  // than a second per-file request. OctoPrint already computes all of this while
-  // producing /api/files, and asking it again per file would add a round trip
-  // and a second parse of a body we have just thrown away.
+  // Details for the file-info view. The list fetch leaves these zero; they are
+  // filled on demand by fetchFileInfo() when the user opens one file's details.
+  // The listing already contains them, but carrying them for every file made the
+  // parsed document - not the transfer - the slow part of the file list.
   //
   // Every numeric field is 0 when OctoPrint has no value (typically: the slicer
   // wrote no analysis into the file). Callers must show that as unknown rather
@@ -164,10 +164,18 @@ public:
 
   // File list + remote print. fetchFiles() GETs /api/files?recursive=true,
   // keeps only printable machinecode entries, sorts newest-first by the
-  // server timestamp and fills up to capacity entries. Returns the stored
-  // count, or -1 on transport/parse failure. selectAndPrint() POSTs
-  // {"command":"select","print":true} to /api/files/local/<path> and returns
-  // the HTTP status (204 on success, 0 when unreachable).
+  // server timestamp and fills up to capacity entries. It deliberately keeps
+  // only type/path/name/date/size: the analysis/statistics blocks are most of
+  // the response and are not needed to draw the list. Returns the stored
+  // count, or -1 on transport/parse failure.
+  //
+  // fetchFileInfo() GETs /api/files/local/<path> for one entry and fills the
+  // detail fields (material, times, dimensions, filament, print history) for
+  // the info view. That is the second request the list no longer pays for.
+  //
+  // selectAndPrint() POSTs {"command":"select","print":true} to
+  // /api/files/local/<path> and returns the HTTP status (204 on success, 0
+  // when unreachable).
   //
   // diag always reports the outcome (FETCH_OK on success); parseCode carries
   // the ArduinoJson error code when diag == FETCH_PARSE, so the caller can
@@ -182,6 +190,8 @@ public:
     FETCH_NOMEM
   };
   int fetchFiles(OctoFile *out, size_t capacity, FetchDiag &diag, uint8_t &parseCode);
+  int fetchFileInfo(const char *path, OctoFile &out, FetchDiag &diag,
+                    uint8_t &parseCode);
   int selectAndPrint(const char *path);
 
   // temperature control functions

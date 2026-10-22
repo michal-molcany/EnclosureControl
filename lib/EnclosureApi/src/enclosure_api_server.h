@@ -75,6 +75,17 @@ namespace EnclosureApi
         // next response), but reusing them keeps the receiver identical.
         char octoKey[ENC_OCTO_KEY_MAX] = {0};
         uint8_t octoKeyFlags = 0;
+        // Calibration fields, mirroring EnclosureTelemetry. The CYD needs them
+        // on this transport too: its ESP-NOW link can be down for the whole run,
+        // and the calibration screen is exactly when losing that state would
+        // leave the user with a modal screen and no numbers.
+        int16_t bedCx10 = ENC_CHAMBER_INVALID;
+        uint16_t calElapsedSec = 0;
+        uint16_t calCycles = 0;
+        uint8_t calPhase = ENC_CAL_PHASE_NONE;
+        uint8_t calBedTargetC = 0;
+        uint8_t calSetpointC = 0;
+        uint8_t calErrorCode = ENC_CAL_ERR_NONE;
     };
 
     using TelemetryProvider = Telemetry (*)();
