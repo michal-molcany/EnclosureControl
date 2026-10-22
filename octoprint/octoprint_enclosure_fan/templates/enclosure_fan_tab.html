@@ -105,21 +105,21 @@
       <label class="ef-gain">kp
         <input type="number" class="input-mini" step="0.1"
                data-bind="value: kp, attr: {min: pidMin().kp, max: pidMax().kp, step: 0.1},
-                          disable: pidSaving">
+                          disable: pidControlsDisabled">
       </label>
       <label class="ef-gain">ki
         <input type="number" class="input-mini" step="0.01"
                data-bind="value: ki, attr: {min: pidMin().ki, max: pidMax().ki, step: 0.01},
-                          disable: pidSaving">
+                          disable: pidControlsDisabled">
       </label>
       <label class="ef-gain">kd
         <input type="number" class="input-mini" step="0.1"
                data-bind="value: kd, attr: {min: pidMin().kd, max: pidMax().kd, step: 0.1},
-                          disable: pidSaving">
+                          disable: pidControlsDisabled">
       </label>
-      <button class="btn btn-primary" data-bind="click: applyPid, disable: pidSaving">Apply</button>
-      <button class="btn" data-bind="click: savePid, disable: pidSaving">Save</button>
-      <button class="btn" data-bind="click: defaultPid, disable: pidSaving">Defaults</button>
+      <button class="btn btn-primary" data-bind="click: applyPid, disable: pidControlsDisabled">Apply</button>
+      <button class="btn" data-bind="click: savePid, disable: pidControlsDisabled">Save</button>
+      <button class="btn" data-bind="click: defaultPid, disable: pidControlsDisabled">Defaults</button>
     </form>
 
     <p class="ef-help">
@@ -131,17 +131,150 @@
       </span>
     </p>
 
+    <div class="ef-cal" data-bind="visible: calSupported">
+      <h4>
+        PID calibration
+        <span data-bind="text: calBadgeText, attr: {class: calBadgeClass}"></span>
+      </h4>
+      <p class="ef-help">
+        Runs the board's relay-feedback auto-tune. The bed is heated to
+        90&nbsp;&deg;C, then the louvre and fan oscillate around a 35&nbsp;&deg;C
+        chamber setpoint. The printer must be idle. The result can be applied to
+        RAM, applied and saved to NVS, or discarded.
+      </p>
+
+      <button class="btn btn-primary"
+              data-bind="click: openCalibrationConfirm, disable: calStartDisabled">
+        Calibrate
+      </button>
+      <span class="text-error" data-bind="visible: jobActive">
+        Calibration is disabled while the printer is busy.
+      </span>
+
+      <div class="alert alert-danger" data-bind="visible: calError() !== ''">
+        <span data-bind="text: calError"></span>
+      </div>
+
+      <div class="alert alert-warning" data-bind="visible: calConfirm">
+        <h4>Start PID calibration?</h4>
+        <ul>
+          <li>The printer must be <strong>idle</strong> &mdash; no print or paused job.</li>
+          <li>The bed will be heated to <strong>90&nbsp;&deg;C</strong> and switched off when the run ends.</li>
+          <li>The louvre and fan run for up to <strong>60&nbsp;minutes after the chamber reaches
+            35&nbsp;&deg;C</strong>.</li>
+          <li>The chamber is held near 35&nbsp;&deg;C; the run aborts if it exceeds 50&nbsp;&deg;C.</li>
+          <li>Commands from the CYD are <strong>ignored</strong> for the duration.</li>
+        </ul>
+        <label class="checkbox" style="margin-top: 12px">
+          <input type="checkbox" data-bind="checked: calAck">
+          I understand and want to proceed
+        </label>
+        <div class="ef-cal-actions">
+          <button class="btn btn-danger"
+                  data-bind="click: startCalibration, disable: !calAck() || calBusy()">
+            Start
+          </button>
+          <button class="btn"
+                  data-bind="click: closeCalibrationConfirm, disable: calBusy">
+            Cancel
+          </button>
+        </div>
+      </div>
+
+      <div class="alert alert-info" data-bind="visible: calActive">
+        <h4>Calibrating&hellip;</h4>
+        <table class="table table-condensed ef-table">
+          <tbody>
+            <tr><td>Phase</td><td data-bind="text: calPhaseText"></td></tr>
+            <tr><td>Chamber</td><td data-bind="text: calChamberText"></td></tr>
+            <tr><td>Bed</td><td data-bind="text: calBedText"></td></tr>
+            <tr><td>Elapsed (total)</td><td data-bind="text: calElapsedText"></td></tr>
+            <tr><td>Relay phases</td><td data-bind="text: calCycles"></td></tr>
+          </tbody>
+        </table>
+        <p class="ef-help">
+          Calibration running &mdash; manual and CYD commands are ignored.
+        </p>
+        <button class="btn btn-danger"
+                data-bind="click: cancelCalibration, disable: calBusy">
+          Cancel calibration
+        </button>
+      </div>
+
+      <div class="alert alert-danger" data-bind="visible: calAborted() && !calActive()">
+        <h4>Calibration stopped</h4>
+        <table class="table table-condensed ef-table">
+          <tbody>
+            <tr><td>Phase</td><td data-bind="text: calPhaseText"></td></tr>
+            <tr><td>Chamber</td><td data-bind="text: calChamberText"></td></tr>
+            <tr><td>Bed</td><td data-bind="text: calBedText"></td></tr>
+            <tr><td>Elapsed (total)</td><td data-bind="text: calElapsedText"></td></tr>
+            <tr><td>Relay phases</td><td data-bind="text: calCycles"></td></tr>
+          </tbody>
+        </table>
+        <p data-bind="text: calErrorText"></p>
+        <button class="btn"
+                data-bind="click: dismissCalibration, disable: calBusy">
+          Dismiss
+        </button>
+      </div>
+
+      <div class="alert alert-success" data-bind="visible: calHasResult() && !calActive()">
+        <h4>New PID gains</h4>
+        <table class="table table-condensed ef-table ef-gains-table">
+          <thead>
+            <tr><th></th><th>old</th><th>new</th></tr>
+          </thead>
+          <tbody data-bind="foreach: calGainRows">
+            <tr>
+              <td data-bind="text: name"></td>
+              <td data-bind="text: oldText"></td>
+              <td data-bind="text: newText"></td>
+            </tr>
+          </tbody>
+        </table>
+        <table class="table table-condensed ef-table">
+          <tbody data-bind="foreach: calMetrics">
+            <tr><td data-bind="text: name"></td><td data-bind="text: text"></td></tr>
+          </tbody>
+        </table>
+        <div class="alert alert-warning" data-bind="visible: calWarnings() !== ''">
+          <span data-bind="text: calWarnings"></span>
+        </div>
+        <div class="ef-cal-actions">
+          <button class="btn btn-primary"
+                  data-bind="click: applyCalibration, disable: calBusy">
+            Apply
+          </button>
+          <button class="btn"
+                  data-bind="click: applyAndSaveCalibration, disable: calBusy">
+            Apply + save to NVS
+          </button>
+          <button class="btn"
+                  data-bind="click: discardCalibration, disable: calBusy">
+            Discard
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="alert alert-warning" data-bind="visible: !calSupported()">
+      This C3 firmware does not report PID calibration state. Update it to
+      0.5.7 or newer to enable calibration here.
+    </div>
+
     <hr>
 
     <h3>Manual control</h3>
-    <div class="alert alert-warning" data-bind="visible: cydLinked()">
-      Unavailable while the CYD is linked.
+    <div class="alert alert-warning" data-bind="visible: cydLinked() || calActive()">
+      <span data-bind="visible: cydLinked()">Unavailable while the CYD is linked.</span>
+      <span data-bind="visible: !cydLinked() && calActive()">Unavailable while PID calibration is running.</span>
     </div>
 
-    <div data-bind="visible: !cydLinked()">
+    <div data-bind="visible: !cydLinked() && !calActive()">
       <div class="btn-group ef-modes">
-        <button class="btn" data-bind="click: setAuto, disable: manualBusy">Automatic</button>
-        <button class="btn" data-bind="click: setManual, disable: manualBusy">Manual</button>
+        <button class="btn" data-bind="click: setAuto, disable: manualControlsDisabled">Automatic</button>
+        <button class="btn" data-bind="click: setManual, disable: manualControlsDisabled">Manual</button>
       </div>
 
       <div data-bind="visible: manualMode()">
@@ -149,13 +282,13 @@
           <label>Louvre <span data-bind="text: manualLouvre"></span>%</label>
           <input type="range" min="0" max="100" step="1"
                  data-bind="value: manualLouvre, event: {change: pushManual},
-                            disable: manualBusy">
+                            disable: manualControlsDisabled">
         </div>
         <div class="ef-meter">
           <label>Fan <span data-bind="text: manualFan"></span>%</label>
           <input type="range" min="0" max="100" step="1"
                  data-bind="value: manualFan, event: {change: pushManual},
-                            disable: manualBusy">
+                            disable: manualControlsDisabled">
         </div>
       </div>
 

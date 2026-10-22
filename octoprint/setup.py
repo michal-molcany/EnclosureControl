@@ -24,11 +24,11 @@ plugin_package = "octoprint_enclosure_fan"
 plugin_author = "EnclosureDisplay"
 plugin_author_email = "michal.molcany@betterask.erni"
 plugin_description = (
-    "Live enclosure state, runtime PID tuning and a manual fan/louvre override "
-    "for the EnclosureFanControl (C3) board. Talks to the board's existing HTTP "
-    "API on port 8082, so no firmware changes are required."
+    "Live enclosure state, runtime PID tuning, PID calibration and a manual "
+    "fan/louvre override for the EnclosureFanControl (C3) board. Talks to the "
+    "board's existing HTTP API on port 8082, so no firmware changes are required."
 )
-plugin_version = "0.3.7"
+plugin_version = "0.4.0"
 plugin_license = "AGPLv3"
 plugin_url = "https://github.com/michal-molcany/EnclosureControl"
 

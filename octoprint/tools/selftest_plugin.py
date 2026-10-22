@@ -136,16 +136,31 @@ def make_client(**over):
     class C:
         def __init__(self):
             self.status = {"ok": True, "chamber": 252, "chamberValid": True,
+                           "bed": 251, "bedValid": True,
                            "state": 0, "mode": 0, "louvre": 0, "fan": 0,
                            "manualLouvre": 0, "manualFan": 0, "remote": False,
-                           "pidSaved": True, "ip": "10.0.0.1", "fw": "0.4.1",
+                           "pidSaved": True, "ip": "10.0.0.1", "fw": "0.5.7",
                            "rssi": -60, "heap": 190000, "uptime": 900,
                            "pid": {"kp": 6, "ki": 0.1, "kd": 0,
                                    "min": {"kp": 0, "ki": 0, "kd": 0},
-                                   "max": {"kp": 50, "ki": 5, "kd": 50}}}
+                                   "max": {"kp": 50, "ki": 5, "kd": 50}},
+                           "cal": {"active": False, "hasResult": False,
+                                   "aborted": False, "phase": 0, "elapsed": 0,
+                                   "cycles": 0, "bedTarget": 90,
+                                   "setpoint": 35, "error": ""}}
 
         def get_status(self):
             calls.append("GET")
+            return dict(self.status)
+
+        def calibrate(self, action):
+            calls.append(("calibrate", action))
+            cal = dict(self.status["cal"])
+            cal["active"] = action == "start"
+            if action in ("apply", "discard"):
+                cal["hasResult"] = False
+                cal["aborted"] = False
+            self.status = dict(self.status, cal=cal)
             return dict(self.status)
 
         def set_manual(self, mode, louvre, fan):
@@ -187,6 +202,84 @@ for bad, why in [({"mode": 5, "louvre": 0, "fan": 0}, "bad mode"),
     check("rejects " + why, res["ok"] is False, str(res))
 
 print()
+print("== PID calibration ==")
+
+# The board's single lifecycle route takes an action, and the client refuses a
+# typo before it becomes a network request.
+try:
+    c3client.C3Client("unused").calibrate("nonsense")
+except c3client.C3Error as err:
+    check("client refuses an unknown calibration action", err.status == 400,
+          str(err))
+else:
+    check("client refuses an unknown calibration action", False)
+
+
+class Refusing(c3client.C3Client):
+    """A board that answers the way /api/calibrate does when it says no."""
+
+    def _request(self, path, payload=None, method=None):
+        raise c3client.C3Error(
+            "C3 returned HTTP 409: the printer is not idle", status=409,
+            kind="http", detail="the printer is not idle")
+
+
+try:
+    Refusing("unused").calibrate("start")
+except c3client.C3Error as err:
+    check("409 reason is surfaced verbatim", str(err) == "the printer is not idle",
+          str(err))
+else:
+    check("409 reason is surfaced verbatim", False)
+
+client, calls = make_client()
+p = FakePlugin(client)
+p._refresh()
+res = call(p, "calibrate", {"action": "start"})
+check("start calibration is accepted", res.get("ok") is True, str(res))
+check("start forwarded the action",
+      ("calibrate", "start") in calls, str(calls))
+check("start refreshed the cache",
+      p._snapshot()["status"]["cal"]["active"] is True,
+      str(p._snapshot()["status"].get("cal")))
+
+# Calibration must be startable while the CYD is linked: the C3 suspends CYD
+# commands during a run, and this is not the manual-control gate.
+client, calls = make_client()
+client.status["remote"] = True
+p = FakePlugin(client)
+res = call(p, "calibrate", {"action": "start"})
+check("CYD link does not block calibration", res.get("ok") is True, str(res))
+
+client, calls = make_client()
+p = FakePlugin(client)
+res = call(p, "calibrate", {"action": "explode"})
+check("unknown action is refused", res.get("ok") is False, str(res))
+check("unknown action names the valid ones",
+      "start" in res.get("error", ""), res.get("error", ""))
+check("unknown action sent no request",
+      not any(isinstance(c, tuple) for c in calls), str(calls))
+
+client, calls = make_client()
+
+
+def refuse(action):
+    # init.C3Error, not c3client.C3Error: the plugin imports the class from
+    # the package, and the selftest imports the module directly, so these are
+    # two different classes. Only the one the plugin catches turns a board
+    # refusal into a clean 400 instead of an unhandled exception.
+    raise init.C3Error("the printer is not idle", status=409, kind="http")
+
+
+client.calibrate = refuse
+p = FakePlugin(client)
+res = call(p, "calibrate", {"action": "start"})
+check("board refusal is returned as a clean error", res.get("ok") is False,
+      str(res))
+check("board refusal text survives the plugin", "printer is not idle" in res.get("error", ""),
+      res.get("error", ""))
+
+print()
 print("== on_api_command dispatch ==")
 p = FakePlugin(make_client()[0])
 p._refresh()
@@ -198,6 +291,45 @@ res = call(p, "nosuchcommand", {})
 check("unknown command is refused", res["ok"] is False, str(res))
 check("unknown command lists the valid ones", "setmanual" in res["error"],
       res["error"])
+
+print()
+print("== OctoPrint command declarations ==")
+
+# Mirror of octoprint/server/util/flask.py:get_json_command_from_request() in
+# OctoPrint 1.11.8:
+#
+#     if any(x not in data for x in valid_commands[command]):
+#         flask.abort(400, description="Mandatory parameters missing")
+#
+# Iterating a dict yields its KEYS, so a command declared as
+# dict(parameters=[...]) makes OctoPrint look for a parameter literally named
+# "parameters" and refuse every call with HTTP 400 - before the plugin's own
+# handler ever runs. The selftest calls on_api_command() directly and would
+# never notice, so the check lives here.
+commands = p.get_api_commands()
+check("every command is declared as a list of parameter names",
+      all(isinstance(value, list) for value in commands.values()),
+      str(commands))
+
+
+def mandatory_parameters_missing(command, data):
+    return [name for name in commands[command] if name not in data]
+
+
+for command, payload in [("setpid", {"kp": 1, "ki": 0.1, "kd": 2}),
+                          ("setmanual", {"mode": 1, "louvre": 40, "fan": 55}),
+                          ("calibrate", {"action": "start"}),
+                          ("status", {}), ("test", {}), ("savepid", {}),
+                          ("defaultpid", {})]:
+    body = dict(payload)
+    body["command"] = command
+    missing = mandatory_parameters_missing(command, body)
+    check(command + " passes OctoPrint's mandatory-parameter check",
+          not missing, str(missing))
+
+missing = mandatory_parameters_missing("setpid", {"command": "setpid", "kp": 1})
+check("a missing parameter is still caught by OctoPrint",
+      missing == ["ki", "kd"], str(missing))
 
 print()
 print("== poller resilience ==")
@@ -380,6 +512,9 @@ with open(os.path.join(PKG_DIR, "octoprint_enclosure_fan", "templates",
 with open(os.path.join(PKG_DIR, "octoprint_enclosure_fan", "static", "js",
                        "enclosure_fan.js"), encoding="utf-8") as handle:
     client_js = handle.read()
+with open(os.path.join(PKG_DIR, "octoprint_enclosure_fan", "templates",
+                       "enclosure_fan_tab.html"), encoding="utf-8") as handle:
+    tab_html = handle.read()
 
 
 def code_only(source):
@@ -421,6 +556,20 @@ check("no PNotify.notify (does not exist in OctoPrint 1.11)",
       "PNotify.notify" not in client_code)
 check("the test button is wired", "testConnection" in settings_html
       and "self.testConnection" in client_code)
+check("calibration start is wired", "openCalibrationConfirm" in tab_html
+      and "self.startCalibration" in client_code)
+check("calibration progress shows phase/chamber/bed/elapsed/cycles",
+      all(token in tab_html for token in
+          ("calPhaseText", "calChamberText", "calBedText", "calElapsedText",
+           "calCycles")))
+check("calibration result actions are wired",
+      all(token in tab_html for token in
+          ("applyCalibration", "applyAndSaveCalibration", "discardCalibration")))
+check("calibration remains visible when the board refuses",
+      "calError" in tab_html and "function calibrationCommand" in client_code)
+check("compound calibration bindings unwrap observables",
+      "visible: calAborted &&" not in tab_html
+      and "visible: calHasResult &&" not in tab_html)
 
 # The registration that makes any of the above reachable. OctoPrint 1.x has no
 # "DOMReady" event - waiting for one means the view model is never constructed,

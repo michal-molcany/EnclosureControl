@@ -28,7 +28,13 @@ STATUS_PATH = "/api/status"
 PID_PATH = "/api/pid"
 PID_SAVE_PATH = "/api/pid/save"
 PID_DEFAULTS_PATH = "/api/pid/defaults"
+CALIBRATE_PATH = "/api/calibrate"
 MANUAL_PATH = "/api/manual"
+
+# The one route covers the whole lifecycle. Keeping the list here means an
+# accidental typo is refused before a request is sent, instead of coming back as
+# a generic 400 from the board.
+CALIBRATION_ACTIONS = ("start", "cancel", "apply", "discard")
 
 # Every POST must carry this, or WebServer hands the body to its form parser
 # instead of arg("plain") and the board answers "bad json". curl -d alone does
@@ -62,10 +68,14 @@ class C3Error(Exception):
     8081, and "empty"/"not_json" is how it usually presents.
     """
 
-    def __init__(self, message, status=None, kind="error"):
+    def __init__(self, message, status=None, kind="error", detail=""):
         super().__init__(message)
         self.status = status
         self.kind = kind
+        # The board's response body, when it sent one. Calibration refusals are
+        # deliberately explanatory ("the printer is not idle", ...), and that
+        # text is more useful to the user than "C3 returned HTTP 409".
+        self.detail = detail
 
 
 class C3Client:
@@ -146,10 +156,11 @@ class C3Client:
             if err.code == 401:
                 raise C3Error(
                     "C3 rejected the credentials - check the API token "
-                    "(username must be 'Enclosure').", status=401, kind="auth")
+                    "(username must be 'Enclosure').", status=401, kind="auth",
+                    detail=detail)
             raise C3Error("C3 returned HTTP {0}{1}".format(
                 err.code, ": " + detail if detail else ""), status=err.code,
-                kind="http")
+                kind="http", detail=detail)
         except urllib.error.URLError as err:
             # Covers refused connections and DNS failures. socket.timeout also
             # surfaces here on most builds, but is caught separately below because
@@ -201,6 +212,29 @@ class C3Client:
 
     def restore_default_pid(self):
         return self._request(PID_DEFAULTS_PATH, method="POST")
+
+    def calibrate(self, action):
+        """Run one step of the PID calibration state machine.
+
+        The C3 answers a refusal with 409 and a human-readable reason. Strip the
+        generic HTTP wrapper so the tab can show the board's own words - that
+        reason is the whole point of the route returning it.
+        """
+        if action not in CALIBRATION_ACTIONS:
+            raise C3Error("Unknown calibration action '{0}'".format(action),
+                          status=400, kind="request")
+        try:
+            return self._request(CALIBRATE_PATH, {"action": action})
+        except C3Error as err:
+            if err.status in (404, 501):
+                raise C3Error(
+                    "This C3 firmware does not support PID calibration. "
+                    "Update it to 0.5.7 or newer.", status=err.status,
+                    kind="unsupported")
+            if err.status == 409:
+                raise C3Error(err.detail or "The C3 refused to calibrate.",
+                              status=409, kind="http", detail=err.detail)
+            raise
 
     def set_manual(self, mode, louvre, fan):
         """mode 0 = AUTO, 1 = MANUAL. louvre/fan are 0-100.

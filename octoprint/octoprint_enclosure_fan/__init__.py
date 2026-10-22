@@ -3,7 +3,8 @@
 # What this is
 # ------------
 # A tab inside OctoPrint showing the enclosure's live state, letting the PID gains
-# be tuned, and offering a manual fan/louvre override.
+# be tuned, running the board's PID calibration, and offering a manual fan/louvre
+# override.
 #
 # It is a CLIENT of an API that already exists. The C3 has served /api/status and
 # the PID/manual routes on port 8082 since before this plugin existed (see
@@ -246,26 +247,38 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
         return True
 
     def get_api_commands(self):
+        # The VALUES ARE LISTS OF MANDATORY PARAMETER NAMES, and that is not a
+        # style choice - it is what OctoPrint's request validation expects.
+        #
+        # OctoPrint 1.11's get_json_command_from_request() does this:
+        #
+        #     if any(x not in data for x in valid_commands[command]):
+        #         flask.abort(400, description="Mandatory parameters missing")
+        #
+        # Iterating a dict yields its KEYS, so a declaration written as
+        # dict(parameters=[...]) makes OctoPrint look for a parameter literally
+        # named "parameters" in the request body - and refuse EVERY call to
+        # that command with "Mandatory parameters missing" before the plugin is
+        # ever reached. The command then looks broken in a way that has nothing
+        # to do with the code that handles it.
+        #
+        # The values are therefore plain lists here, and each handler checks
+        # the values itself (see on_setpid, on_setmanual, on_calibrate).
         return dict(
             # Reads the cache. Does NOT touch the board, so it is instant and
             # cannot fail for network reasons; a dead board is reported ok=false.
-            status=dict(),
+            status=[],
             # Probes the board ONCE with values that may not be saved yet, so the
             # settings dialog can tell a typo from a firewall before the user
             # commits them. Never reads or writes the cache.
-            test=dict(),
-            setpid=dict(parameters=[
-                dict(name="kp", type="number", optional=False),
-                dict(name="ki", type="number", optional=False),
-                dict(name="kd", type="number", optional=False),
-            ]),
-            savepid=dict(),
-            defaultpid=dict(),
-            setmanual=dict(parameters=[
-                dict(name="mode", type="number", optional=False),
-                dict(name="louvre", type="number", optional=False),
-                dict(name="fan", type="number", optional=False),
-            ]),
+            test=[],
+            setpid=["kp", "ki", "kd"],
+            savepid=[],
+            defaultpid=[],
+            # One command mirrors the board's single lifecycle route. The action
+            # is validated again in the handler.
+            calibrate=["action"],
+            setmanual=["mode", "louvre", "fan"],
         )
 
     def on_api_command(self, command, data):
@@ -286,6 +299,7 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
             "setpid": self.on_setpid,
             "savepid": self.on_savepid,
             "defaultpid": self.on_defaultpid,
+            "calibrate": self.on_calibrate,
             "setmanual": self.on_setmanual,
         }
         handler = handlers.get(command)
@@ -487,6 +501,13 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
 
     def on_defaultpid(self, **kwargs):
         return self._write(lambda c: c.restore_default_pid())
+
+    def on_calibrate(self, data, **kwargs):
+        action = (data or {}).get("action")
+        if action not in ("start", "cancel", "apply", "discard"):
+            raise CommandFailed(
+                "action must be start, cancel, apply or discard")
+        return self._write(lambda c: c.calibrate(action))
 
     def on_setmanual(self, data, **kwargs):
         mode = data.get("mode")

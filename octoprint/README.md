@@ -1,7 +1,8 @@
 # OctoPrint-­EnclosureFan
 
 A **Fan Control** tab inside OctoPrint for the EnclosureFanControl (C3) board: live
-enclosure state, runtime PID tuning, and a manual fan/louvre override.
+enclosure state, runtime PID tuning, PID calibration, and a manual fan/louvre
+override.
 
 ## It is a client, not a new device
 
@@ -31,6 +32,31 @@ board does not have.
 
 Port 8081 is the CYD's own machine-to-machine channel and uses username `cyd`
 (8082 uses `Enclosure`).
+
+## PID calibration
+
+The tab can run the board's relay-feedback auto-tune and follow it live, with
+the same data the board's own web page shows: phase, chamber and bed
+temperature, elapsed time and relay cycles.
+
+- **Start** sits behind a confirmation panel that spells out what the run
+  does: the bed goes to 90 °C, the louvre and fan oscillate around a 35 °C
+  chamber setpoint for up to 60 minutes after the setpoint is reached, and the
+  run aborts above 50 °C. The printer must be idle, and the board refuses to
+  start otherwise - its reason is shown verbatim.
+- While a run is active, the tab shows the live values and a **Cancel
+  calibration** button. The PID gains and the manual controls are locked: the
+  board owns the outputs for the duration and ignores every other command.
+- When the run stops, the board's own reason is shown ("cancelled", "chamber
+  exceeded the 50 C abort limit", ...).
+- When the run finishes, the result panel shows the old and the new gains, the
+  measured Ku/Tu/amplitude, and any clamping or convergence warnings, with
+  **Apply**, **Apply + save to NVS** and **Discard**.
+
+This is still only a client: the plugin posts to the board's existing
+`/api/calibrate` route and reads the `cal` block of `/api/status`. **The C3
+firmware must be 0.5.7 or newer** - older boards report no `cal` block at all,
+and the tab then says so instead of offering a button that cannot work.
 
 ## Manual control is disabled while the CYD is linked
 
@@ -95,13 +121,15 @@ settings dialog distinguishes the two.
   unplugged.
 - **mDNS can be flaky** on some networks. An IP address in the settings works
   identically and is the fallback.
-- **Both boards report different firmware versions.** The C3 in this repo is on
-  0.4.x while the CYD has moved ahead; nothing here depends on them matching.
+- **PID calibration needs C3 firmware 0.5.7 or newer.** Older boards do not
+  report calibration state, so the section is hidden and an explanation is
+  shown instead. Everything else in the plugin works on older firmware.
 
 ## Development
 
 ```
 tools/selftest_plugin.py    # logic tests, no OctoPrint required (stubs the API)
+tools/selftest_viewmodel.js  # front-end test, needs Node but no npm packages
 tools/build_package.py      # builds dist/OctoPrint-EnclosureFan-<v>.zip
 ```
 
@@ -114,3 +142,10 @@ and — the decisive one — the view model registered on a `DOMReady` event tha
 OctoPrint never fires, so none of the other work ever ran. Plus a live check
 against the real C3 when one is reachable. It needs no OctoPrint installed: it
 stubs `octoprint.plugin` and drives the real plugin class.
+
+`selftest_viewmodel.js` goes one step further and actually RUNS the shipped
+JavaScript: it stubs Knockout, jQuery and OctoPrint, constructs the real view
+model from the real asset file and drives a whole calibration through it —
+confirmation, start, live values, cancel, the board's reason, dismiss, apply.
+String checks can only prove that the right names are present; this proves the
+behaviour. It needs Node and no npm packages.

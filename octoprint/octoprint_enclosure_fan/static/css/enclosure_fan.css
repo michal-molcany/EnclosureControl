@@ -72,6 +72,42 @@
     width: 70px;
 }
 
+/* Calibration block. It lives inside the PID section because it produces PID
+ * gains; the alert boxes double as the progress/result panels, so no modal or
+ * extra library is needed. */
+.ef-cal {
+    margin-top: 16px;
+}
+
+.ef-cal h4 .label {
+    margin-left: 6px;
+    vertical-align: middle;
+}
+
+.ef-cal .alert {
+    margin-top: 10px;
+    margin-bottom: 0;
+}
+
+.ef-cal .alert h4 {
+    margin-top: 0;
+}
+
+.ef-cal .ef-gains-table th {
+    color: #777;
+    font-weight: normal;
+}
+
+.ef-cal .ef-gains-table td:first-child,
+.ef-cal .ef-gains-table th:first-child {
+    width: 70px;
+    color: #777;
+}
+
+.ef-cal-actions {
+    margin-top: 10px;
+}
+
 .ef-modes {
     margin-bottom: 12px;
 }
