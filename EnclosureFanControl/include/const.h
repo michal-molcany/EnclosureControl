@@ -120,10 +120,11 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 // eat into the oscillation time. Ziegler-Nichols needs a handful of periods; if
 // that has not happened by now the process is not oscillating the way the
 // method assumes.
-#define CAL_MAX_DURATION_MS (20UL * 60UL * 1000UL)
+#define CAL_MAX_DURATION_MS (60UL * 60UL * 1000UL)
 // Absolute backstop for a chamber that never reaches the setpoint, so the
-// window above never starts. Covers the 5-minute preheat, the 20-minute window
-// and a margin.
+// window above never starts. Covers the 5-minute preheat and leaves 25 minutes
+// for the chamber to reach the setpoint. It no longer applies once the setpoint
+// has been reached: the full experiment window is then available.
 #define CAL_ABSOLUTE_TIMEOUT_MS (30UL * 60UL * 1000UL)
 // New OctoPrint data arrives every OCTO_POLL_INTERVAL_MS. If the timestamp
 // stops moving for this long the link is gone (or OctoPrint is stuck), and

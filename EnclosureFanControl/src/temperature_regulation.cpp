@@ -674,20 +674,23 @@ void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool hav
         return;
     }
 
+    // If the chamber never reaches the setpoint, the experiment window never
+    // starts. End the run after the absolute backstop rather than heating
+    // indefinitely. Once the setpoint is reached this cap no longer applies:
+    // the full experiment window is available however long the climb took.
+    if (calExperimentStartedMs == 0 &&
+        now - calStartedMs > CAL_ABSOLUTE_TIMEOUT_MS)
+    {
+        finishCalibration(false, "timed out before the chamber reached the setpoint");
+        return;
+    }
     // The experiment window starts at the setpoint, not at the button press:
     // the preheat and the first climb to 35 C must not eat into the oscillation
     // time.
     if (calExperimentStartedMs != 0 &&
         now - calExperimentStartedMs > CAL_MAX_DURATION_MS)
     {
-        finishCalibration(false, "timed out after 20 minutes at the setpoint");
-        return;
-    }
-    // Absolute backstop. If the chamber never reaches the setpoint, the window
-    // above never starts; this still ends the run and switches the bed off.
-    if (now - calStartedMs > CAL_ABSOLUTE_TIMEOUT_MS)
-    {
-        finishCalibration(false, "timed out after 30 minutes in total");
+        finishCalibration(false, "timed out after 60 minutes at the setpoint");
         return;
     }
 
@@ -783,7 +786,7 @@ void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool hav
 
     case PidCalibration::Phase::Relay:
     {
-        // The 20-minute clock starts the first time the chamber reaches the
+        // The 60-minute clock starts the first time the chamber reaches the
         // setpoint, not when the relay starts: a cold enclosure can spend
         // several minutes in the initial no-cooling phase, and that is not the
         // experiment.

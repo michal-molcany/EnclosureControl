@@ -10,7 +10,7 @@ PIDAutotuner) driven by a first-order thermal process with transport delay.
 It answers the questions that cannot be answered by reading the code:
 
   * does the 35 C setpoint with a 0/200 relay produce a stable limit cycle?
-  * how long is the period, and therefore can a 20-minute run finish?
+  * how long is the period, and therefore can a one-hour run finish?
   * how big is the oscillation, and does it stay under the 50 C abort limit?
   * are the measured amplitude/period the ones the process actually produced?
   * do the Ziegler-Nichols gains land inside the ranges in enclosure_pid.h?
@@ -34,7 +34,7 @@ NOISEBAND = 0.5            # CAL_NOISEBAND_C
 OUT_LO, OUT_HI = 0.0, 200.0  # CAL_RELAY_LOW / CAL_RELAY_HIGH
 SAMPLE_S = 5.0             # OCTO_POLL_INTERVAL_MS
 TICK_S = 1.0               # PID_UPDATE_INTERVAL
-DURATION_S = 1200.0        # CAL_MAX_DURATION_MS
+DURATION_S = 3600.0        # CAL_MAX_DURATION_MS
 
 KP_MAX, KI_MAX, KD_MAX = 50.0, 5.0, 50.0
 ABORT_C = 50.0             # CAL_ABORT_CHAMBER_C
@@ -323,7 +323,7 @@ def main():
 
     # A cooling-only loop cannot oscillate around a setpoint the bed can never
     # reach: with no cooling the chamber settles BELOW 35 C, so there is no
-    # crossing and the regulator's 20-minute timeout is the correct outcome.
+    # crossing and the regulator's 30-minute backstop is the correct outcome.
     check_case("no-osc", (32.0, 24.0, 300.0, 10.0), expect_result=False)
 
     print("\nAll PID calibration design checks passed.")
