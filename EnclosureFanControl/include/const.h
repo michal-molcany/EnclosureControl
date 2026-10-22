@@ -146,6 +146,13 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 // off, 200 = louvre 100% and fan 100%.
 #define CAL_RELAY_LOW 0.0f
 #define CAL_RELAY_HIGH 200.0f
+// How long the board keeps treating a "paused" printer as paused BY US after
+// the M84 that was supposed to end the pause.
+//
+// Long enough for the command to reach the printer and for the printer to
+// come out of the pause; short enough that a printer which ignores M84 does
+// not stay mis-flagged for ever, which would hide a real pause later.
+#define CAL_PAUSE_GRACE_MS 30000UL
 
 // OctoPrint background poll interval (FreeRTOS task, CYD-style). Loop only
 // copies the latest snapshot and never blocks on the network.

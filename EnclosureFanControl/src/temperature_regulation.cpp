@@ -169,6 +169,36 @@ void TemperatureRegulation::update(const OctoSnapshot &snap)
         haveData = true;
     }
 
+    // Track the pause the calibration asked for. This has to happen BEFORE the
+    // calibration branch below, because during a run update() returns early and
+    // never reaches the normal path - and the run needs to know whether the
+    // pause it sees is its own.
+    if (calPrinterPausedByUs)
+    {
+        if (haveData && effective.paused)
+        {
+            // The printer took the pause.
+            calPauseObserved = true;
+        }
+        else if (calPauseObserved)
+        {
+            // It was paused and now it is not: the pause is over, and it is no
+            // longer ours to explain away.
+            calPrinterPausedByUs = false;
+            calPauseObserved = false;
+            calPauseGraceUntilMs = 0;
+        }
+        else if (calPauseGraceUntilMs != 0 && (int32_t)(now - calPauseGraceUntilMs) >= 0)
+        {
+            // The M84 has been out for the whole grace period and the printer
+            // never reported a pause at all: it ignored the M25, or the M84
+            // ended it before we saw it. Either way it is not ours.
+            calPrinterPausedByUs = false;
+            calPauseObserved = false;
+            calPauseGraceUntilMs = 0;
+        }
+    }
+
     // A calibration run owns the outputs and bypasses the material/cooldown
     // machine entirely. The emergency check still goes first: it is the one
     // path that must never be behind an experiment, especially with a 90 C bed
@@ -185,9 +215,15 @@ void TemperatureRegulation::update(const OctoSnapshot &snap)
     }
 
     const bool useRemote = remoteLinkAlive();
+    // A pause the calibration asked for is not a job. Without this the board
+    // would treat its own M25 as "the printer is busy" - which would abort the
+    // run that sent it, refuse the next one as "not idle", and put the
+    // enclosure into print-cooling mode for a printer that is printing
+    // nothing.
+    const bool printerPaused = effective.paused && !calPrinterPausedByUs;
     const bool jobActive = useRemote
                                ? remoteJobActive
-                               : haveData && (effective.printing || effective.paused);
+                               : haveData && (effective.printing || printerPaused);
 
     uint8_t material = ENC_MATERIAL_UNKNOWN;
     if (useRemote && hasRemoteMaterial)
@@ -567,8 +603,10 @@ bool TemperatureRegulation::startCalibration(String &reason)
         return false;
     }
     // The relay needs the chamber to itself. A print would both move the
-    // temperature and compete for the same printer.
-    if (lastSnap.printing || lastSnap.paused || jobWasActive)
+    // temperature and compete for the same printer. A pause the calibration
+    // asked for on a PREVIOUS run does not count - that is ours, and it is
+    // cleared as soon as the printer comes out of it.
+    if (lastSnap.printing || (lastSnap.paused && !calPrinterPausedByUs) || jobWasActive)
     {
         reason = "the printer is not idle (printing, paused, or still cooling down)";
         return false;
@@ -611,7 +649,20 @@ bool TemperatureRegulation::startCalibration(String &reason)
     pidController.reset();
     lastDemand = 0.0f;
 
+    // 1. The bed goes to 90 C through OctoPrint.
     octoPollerRequestBed(CAL_BED_TARGET_C);
+    // 2. M25 pauses the printer. That is what keeps a firmware-side heating
+    //    timeout from switching the bed off again a few minutes into the run -
+    //    the same timeout that would otherwise abort it with "the bed did not
+    //    reach 90 C". The poll task sends the bed target first, so the bed is
+    //    already on its way up when the pause lands.
+    //
+    //    The flag says the pause is OURS, so the run does not read its own
+    //    pause as "a print started" and abort.
+    octoPollerRequestPause();
+    calPrinterPausedByUs = true;
+    calPauseObserved = false;
+    calPauseGraceUntilMs = 0;
 
     Serial.printf("[CAL] starting: bed %d C, setpoint %.1f C, relay %.0f-%.0f, noiseband %.2f C\n",
                   CAL_BED_TARGET_C, (double)CAL_SETPOINT_C, (double)CAL_RELAY_LOW,
@@ -775,9 +826,12 @@ void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool hav
     // A print starting mid-run changes the chamber's heat load and would fight
     // the relay for the fan and louvre. The start check refuses a busy printer;
     // this keeps that promise if one starts afterwards.
-    if (snap.printing || snap.paused)
+    //
+    // The pause the run asked for itself does NOT count - that is ours, and it
+    // is the whole reason the bed keeps its temperature.
+    if (snap.printing || (snap.paused && !calPrinterPausedByUs))
     {
-        finishCalibration(false, "a print started during calibration");
+        finishCalibration(false, "a print started during calibration", true);
         return;
     }
 
@@ -873,13 +927,35 @@ void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool hav
     }
 }
 
-void TemperatureRegulation::finishCalibration(bool success, const char *reason)
+void TemperatureRegulation::finishCalibration(bool success, const char *reason,
+                                              bool printerBusy)
 {
     const bool wasRunning = calibrationRunning();
 
     // The bed goes off on success AND on every abort. Leaving a 90 C bed behind
     // after a failed experiment is the one outcome that must never happen.
-    octoPollerRequestBed(0);
+    //
+    // ...unless a print started DURING the run. Then the printer is the
+    // print's: it set its own bed target when it started, and sending the
+    // bed-off would cool the bed under a running print. M84 is skipped for the
+    // same reason and with more force - it switches the heaters off, which
+    // would leave the print extruding into a cold nozzle.
+    if (!printerBusy)
+    {
+        octoPollerRequestBed(0);
+        // 3. M84 ends the pause and turns the heaters off, so the printer is
+        //    left ready for the next print instead of paused with a stale
+        //    pause state. Sent on EVERY other exit - a completed run and an
+        //    aborted one alike.
+        octoPollerRequestUnpause();
+        // The printer has a moment to come out of the pause. Until it does, or
+        // until the grace period runs out, a reported pause is still ours.
+        calPauseGraceUntilMs = millis() + CAL_PAUSE_GRACE_MS;
+    }
+    else
+    {
+        Serial.println(F("[CAL] print started during the run - printer left to the print"));
+    }
 
     calFinishedMs = millis();
     calResultApplied = false;

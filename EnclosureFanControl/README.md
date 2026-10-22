@@ -68,7 +68,10 @@ method ESPHome uses — and turns the measurement into Ziegler-Nichols gains.
 
 What it does, in order:
 
-1. Asks for confirmation, then preheats the bed to **90 °C** through OctoPrint.
+1. Asks for confirmation, then preheats the bed to **90 °C** through OctoPrint
+   and sends **M25** to the printer, which pauses it. The pause is what keeps a
+   firmware-side heating timeout from switching the bed off again a few
+   minutes into the run - the same timeout that would otherwise abort it.
 2. Waits for the bed to reach 88 °C (5-minute timeout), then lets it settle
    briefly.
 3. Drives the louvre and fan between **no cooling** and **full cooling** (output
@@ -77,8 +80,10 @@ What it does, in order:
 4. Measures the resulting oscillation: the ultimate gain `Ku = 4d / (pi*a)` and
    the period `Tu`, then computes `kp = 0.6*Ku`, `ki = 1.2*Ku/Tu`,
    `kd = 0.075*Ku*Tu`.
-5. Switches the bed off and shows the old and new gains, `Ku`, `Tu`, the measured
-   amplitude, and any quality warnings.
+5. Switches the bed off, sends **M84** - which ends the pause and turns the
+   heaters off, so the printer is left ready for the next print - and shows the
+   old and new gains, `Ku`, `Tu`, the measured amplitude, and any quality
+   warnings.
 6. Offers **Apply** (RAM only), **Apply + save to NVS**, or **Discard**.
 
 Safety and limits:
@@ -91,8 +96,15 @@ Safety and limits:
   available however long the climb took. The run aborts above **50 °C** chamber,
   if the bed is not at temperature within 5 minutes, if OctoPrint data goes stale
   for 30 s, if a print starts while it runs, or on **Cancel**.
-- Every exit path switches the bed off and enters the normal full-cooling state.
-  The 55 °C emergency path stays armed and wins.
+- Every exit path switches the bed off, sends M84 and enters the normal
+  full-cooling state. The 55 °C emergency path stays armed and wins.
+- The pause is OURS, and the board knows it: it does not read its own M25 as
+  "a print started" (which would abort the run that sent it), and it does not
+  refuse the next run as "not idle" because of it. The pause stops counting as
+  ours as soon as the printer reports that it is not paused any more.
+- A print that starts DURING a run aborts it - and then the bed-off and the M84
+  are skipped, because the printer belongs to that print now: it set its own
+  bed target when it started, and M84 would switch its heaters off under it.
 - The CYD latches a modal calibration screen as soon as it sees an active run.
   It shows live chamber/bed readings, phase, elapsed time and cycles, blocks
   navigation, and offers one confirmed **Cancel calibration** action. This works

@@ -23,6 +23,20 @@ namespace
     // exchange() makes last-write-wins exact.
     std::atomic<int> pendingBedTarget(-1);
 
+    // One G-code line waiting to be sent to the printer. Read-and-clear, like
+    // the bed target: the newest request wins.
+    //
+    // A single slot is enough because the two lines never overlap in time -
+    // M25 goes out when a calibration starts and M84 when it ends, minutes
+    // apart. A queue would only be able to send the pair in the wrong order.
+    enum PendingGcode : int
+    {
+        GCODE_NONE = 0,
+        GCODE_PAUSE = 1,   // M25
+        GCODE_UNPAUSE = 2, // M84
+    };
+    std::atomic<int> pendingGcode(GCODE_NONE);
+
     // Pending endpoint change, published by octoPollerSetEndpoint() from the
     // main/web-UI task and consumed by pollTask(). `pending` is the guard: the
     // value is a multi-byte struct, so the task must not read it while the
@@ -143,6 +157,21 @@ namespace
                     const int status = api.preheatBed(bedTarget);
                     Serial.printf("[octoPoll] bed target %d C HTTP %d\n", bedTarget, status);
                 }
+                // A G-code line for the printer itself. Sent AFTER the bed
+                // target, so the bed is already on its way up when the pause
+                // lands - the pause exists to protect the heating, so it must
+                // not delay it.
+                const int gcode = pendingGcode.exchange(GCODE_NONE);
+                if (gcode == GCODE_PAUSE)
+                {
+                    const int status = api.sendGcode("M25");
+                    Serial.printf("[octoPoll] M25 HTTP %d\n", status);
+                }
+                else if (gcode == GCODE_UNPAUSE)
+                {
+                    const int status = api.sendGcode("M84");
+                    Serial.printf("[octoPoll] M84 HTTP %d\n", status);
+                }
                 api.update();
                 publishSnapshot();
             }
@@ -183,6 +212,16 @@ void octoPollerRequestCancel()
 void octoPollerRequestBed(int targetC)
 {
     pendingBedTarget.store(targetC < 0 ? 0 : targetC);
+}
+
+void octoPollerRequestPause()
+{
+    pendingGcode.store(GCODE_PAUSE);
+}
+
+void octoPollerRequestUnpause()
+{
+    pendingGcode.store(GCODE_UNPAUSE);
 }
 
 void octoPollerSetEndpoint(IPAddress host, uint16_t port)

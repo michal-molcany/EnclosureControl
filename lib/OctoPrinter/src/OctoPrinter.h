@@ -201,6 +201,19 @@ public:
   // separate off variant.
   int preheatBed(int bedTemp);
 
+  // Sends ONE G-code line to the printer through OctoPrint's
+  // /api/printer/command route. Returns the HTTP status code (204 on success),
+  // or 0 when the request could not be made at all.
+  //
+  // Used by the calibration to talk to the printer itself rather than to
+  // OctoPrint: M25 pauses the printer (which is what keeps a firmware-side
+  // heating timeout from switching the 90 C bed off mid-run) and M84 ends that
+  // pause and turns the heaters off.
+  //
+  // The API key needs the CONTROL permission for this route - the same one
+  // /api/printer/bed needs, so a key that can preheat the bed can do this too.
+  int sendGcode(const char *command);
+
   // give server related information
   String serverVersion();
   String apiVersion();

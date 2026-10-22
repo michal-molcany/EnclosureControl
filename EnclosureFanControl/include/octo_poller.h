@@ -53,6 +53,24 @@ void octoPollerRequestCancel();
 // bed off without blocking loop() on an HTTP request.
 void octoPollerRequestBed(int targetC);
 
+// Asks the poll task to send ONE G-code line to the printer itself.
+//
+// Same contract as octoPollerRequestBed(): non-blocking, safe from any task,
+// last write wins. The poll task owns the OctoPrinter instance and is
+// mid-request most of the time, so the line is only recorded here and sent at
+// the top of the task's next pass.
+//
+// The two requests are used by the PID calibration:
+//
+//   octoPollerRequestPause()    -> M25, the printer pauses
+//   octoPollerRequestUnpause()  -> M84, the pause ends and the heaters go off
+//
+// M25 is what keeps a firmware-side heating timeout from switching the 90 C
+// bed off in the middle of the run; M84 is the way back out, so the printer is
+// left ready for the next print.
+void octoPollerRequestPause();
+void octoPollerRequestUnpause();
+
 // Repoints the poll task at a different OctoPrint server.
 //
 // Non-blocking and safe to call from any task: it only records the value. The

@@ -110,6 +110,27 @@ private:
     unsigned long calLastSampleMs = 0;
     unsigned long calLastSampleAtMs = 0;
     bool calResultApplied = false;
+    // True while the printer is paused BECAUSE the calibration asked for it.
+    //
+    // The run sends M25 when it starts and M84 when it ends. M25 exists to
+    // stop a firmware-side heating timeout from switching the 90 C bed off in
+    // the middle of the run; M84 is the way back out, so the printer is left
+    // ready for the next print.
+    //
+    // A printer that honours the pause reports "paused", and the board must
+    // not read that as "a print started" - it would abort its own run, and it
+    // would refuse the next one as "not idle". The flag is cleared as soon as
+    // the printer reports that it is not paused any more, or when the grace
+    // period after the M84 runs out.
+    bool calPrinterPausedByUs = false;
+    // True once the printer has actually reported "paused". Until then the
+    // flag stays set even if the printer reports "not paused", because the M25
+    // may simply not have reached it yet - clearing it there would make the
+    // pause look like a foreign one the moment it did.
+    bool calPauseObserved = false;
+    // Deadline for that grace period. 0 = no deadline (the M84 has not been
+    // sent yet).
+    unsigned long calPauseGraceUntilMs = 0;
     // Last nonzero cancellation action received from the CYD. The CYD repeats
     // its command every heartbeat; acting only on a CHANGE makes the cancel
     // one-shot without adding an acknowledgement to the protocol.
@@ -153,7 +174,9 @@ private:
 
     bool calibrationRunning() const;
     void updateCalibration(const OctoSnapshot &snap, bool haveData, unsigned long now);
-    void finishCalibration(bool success, const char *reason);
+    // `printerBusy` means the printer started a print DURING the run: it owns
+    // the bed and the heaters now, so the end-of-run commands are skipped.
+    void finishCalibration(bool success, const char *reason, bool printerBusy = false);
     // Applies a 0-200 cooling demand directly, bypassing the fan duty floor and
     // FAN_MIN_ON_MS. The relay's two levels are 0 and 200, so the fan must be
     // able to stop the instant the relay flips; the anti-chatter hold would

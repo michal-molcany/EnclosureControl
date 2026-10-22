@@ -776,6 +776,30 @@ int OctoPrinter::preheatBed(int bedTemp)
   return response.toInt();
 }
 
+int OctoPrinter::sendGcode(const char *command)
+{
+  if (!command || !*command)
+    return 0;
+
+  // The body is JSON, so the two characters that could break out of the string
+  // are escaped. The lines this is used for (M25, M84) contain neither, but a
+  // command that did would otherwise be turned into a malformed request that
+  // OctoPrint rejects with a 400 and no explanation.
+  String body = "{\"command\": \"";
+  for (const char *p = command; *p; ++p)
+  {
+    if (*p == '"' || *p == '\\')
+      body += '\\';
+    body += *p;
+  }
+  body += "\"}";
+
+  // 204 on success. OctoPrint answers 409 when the printer is not operational
+  // and 400 for a body it does not like; both are returned to the caller so
+  // the failure is visible instead of silent.
+  return _poster("/api/printer/command", body).toInt();
+}
+
 String OctoPrinter::Status()
 {
   if (_is._closed)
