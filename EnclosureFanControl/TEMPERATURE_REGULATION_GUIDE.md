@@ -368,10 +368,12 @@ Operating point: the bed is preheated to 90 °C to make the heat load repeatable
 and the chamber setpoint is **40 °C**. That is deliberately below the 50 °C
 abort and the 55 °C emergency trigger, because the no-cooling half of the relay
 lets the chamber rise. The relay span is the full 0-200 output: louvre 0 / fan
-off, versus louvre 100 / fan 100. The run is capped at 20 minutes and aborted
-above 50 °C, on bed timeout, on stale OctoPrint data, if a print starts, or on
-cancel; the bed is switched off and the normal full-cooling state is entered on
-every exit path.
+off, versus louvre 100 / fan 100. The 20-minute experiment window starts when the
+chamber first reaches 40 °C, so the preheat and the initial climb do not consume
+it; an absolute 30-minute cap is the backstop for a chamber that never gets
+there. The run is aborted above 50 °C, on bed timeout, on stale OctoPrint data,
+if a print starts, or on cancel; the bed is switched off and the normal
+full-cooling state is entered on every exit path.
 
 `kd` from the formula is usually 300-1500, well above `PID_KD_MAX = 50`, so it
 is clamped and the result dialog warns. `kp` can clamp too when the measured

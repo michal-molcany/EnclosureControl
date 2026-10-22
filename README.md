@@ -128,9 +128,10 @@ plugin's settings and stored in OctoPrint's `config.yaml`, never in this repo.
   can put the boards on different radios; the HTTP fallback covers it.
 - **mDNS is not guaranteed.** `enclosure-fan-control.local` works on most home
   networks; an IP address always works.
-- **PID calibration needs an idle printer and takes up to 20 minutes.** The C3
-  preheats the bed to 90 °C, ignores manual and CYD commands while the relay
-  runs, and switches the bed off at the end. See
+- **PID calibration needs an idle printer and takes up to 30 minutes.** The C3
+  preheats the bed to 90 °C, runs for up to 20 minutes after the chamber reaches
+  40 °C, ignores manual and CYD commands while the relay runs, and switches the
+  bed off at the end. See
   [`EnclosureFanControl/README.md`](EnclosureFanControl/README.md#pid-calibration).
 - **The two boards do not need matching firmware versions.** Nothing depends on
   them being equal.

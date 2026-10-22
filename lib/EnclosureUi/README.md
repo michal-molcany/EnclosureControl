@@ -180,8 +180,12 @@ quietly.
   both.
 - `discard` drops the result without touching the running gains.
 
+The 20-minute experiment window starts when the chamber first reaches 40 °C; a
+30-minute absolute cap covers a chamber that never gets there.
+
 `/api/status` includes a `cal` object: `active`, `hasResult`, `aborted`, `phase`
-(0 none, 1 preheating, 2 settling, 3 relay, 4 done, 5 aborted), `elapsed` (ms),
+(0 none, 1 preheating, 2 settling, 3 relay, 4 done, 5 aborted), `elapsed` (ms,
+total run time),
 `cycles` (relay phases, each a half-cycle), `ku`, `tu`, `amp`, `delta`, the new
 `kp`/`ki`/`kd`, the old `oldKp`/`oldKi`/`oldKd`, `clamped`, `applied`, `zcSym`,
 `ampConv`, `warned`, `bedTarget`, `setpoint`, and `error`. The page derives the

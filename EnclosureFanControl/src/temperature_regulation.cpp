@@ -561,6 +561,7 @@ bool TemperatureRegulation::startCalibration(String &reason)
     calPhase = PidCalibration::Phase::Preheating;
     calStartedMs = millis();
     calPhaseStartedMs = calStartedMs;
+    calExperimentStartedMs = 0;
     calFinishedMs = 0;
     calLastSampleMs = lastSnap.updatedMs;
     calLastSampleAtMs = calStartedMs;
@@ -673,9 +674,20 @@ void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool hav
         return;
     }
 
-    if (now - calStartedMs > CAL_MAX_DURATION_MS)
+    // The experiment window starts at the setpoint, not at the button press:
+    // the preheat and the first climb to 40 C must not eat into the oscillation
+    // time.
+    if (calExperimentStartedMs != 0 &&
+        now - calExperimentStartedMs > CAL_MAX_DURATION_MS)
     {
-        finishCalibration(false, "timed out after 20 minutes");
+        finishCalibration(false, "timed out after 20 minutes at the setpoint");
+        return;
+    }
+    // Absolute backstop. If the chamber never reaches the setpoint, the window
+    // above never starts; this still ends the run and switches the bed off.
+    if (now - calStartedMs > CAL_ABSOLUTE_TIMEOUT_MS)
+    {
+        finishCalibration(false, "timed out after 30 minutes in total");
         return;
     }
 
@@ -771,6 +783,16 @@ void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool hav
 
     case PidCalibration::Phase::Relay:
     {
+        // The 20-minute clock starts the first time the chamber reaches the
+        // setpoint, not when the relay starts: a cold enclosure can spend
+        // several minutes in the initial no-cooling phase, and that is not the
+        // experiment.
+        if (calExperimentStartedMs == 0 && chamber >= CAL_SETPOINT_C)
+        {
+            calExperimentStartedMs = now;
+            Serial.printf("[CAL] chamber reached %.1f C - 20 min window starts\n",
+                          (double)CAL_SETPOINT_C);
+        }
         bool finished = false;
         const float output = calAutotuner.update(chamber - CAL_SETPOINT_C,
                                                  (uint32_t)now, finished, calResult);

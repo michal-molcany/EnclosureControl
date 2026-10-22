@@ -142,7 +142,8 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
   <div class="subhead">PID calibration <span class="badge" id="calbadge">idle</span></div>
   <div class="note">Runs a relay-feedback auto-tune (the method ESPHome uses). It heats the bed to 90&nbsp;&deg;C,
     oscillates the louvre and fan around a 40&nbsp;&deg;C chamber setpoint, measures the ultimate gain and period,
-    then offers new Ziegler&ndash;Nichols gains. The printer must be idle and the run takes up to 20&nbsp;minutes.</div>
+    then offers new Ziegler&ndash;Nichols gains. The printer must be idle; the 20-minute cap starts when the
+    chamber reaches 40&nbsp;&deg;C.</div>
   <div class="btns"><button class="primary" id="calstart">Calibrate</button></div>
   <div class="msg" id="calmsg"></div>
 </div>
@@ -190,7 +191,8 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
     <ul>
       <li>The printer must be <strong>idle</strong> &mdash; no print or paused job.</li>
       <li>The bed will be heated to <strong>90&nbsp;&deg;C</strong> and switched off when the run ends.</li>
-      <li>The louvre and fan will run for up to <strong>20&nbsp;minutes</strong>.</li>
+      <li>The louvre and fan run for up to <strong>20&nbsp;minutes after the chamber reaches
+        40&nbsp;&deg;C</strong> (30&nbsp;minutes in total).</li>
       <li>The chamber is held near 40&nbsp;&deg;C; the run aborts if it exceeds 50&nbsp;&deg;C.</li>
       <li>Commands from the CYD are <strong>ignored</strong> for the duration.</li>
     </ul>
@@ -210,7 +212,7 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
       <div class="k">Phase</div><div class="v" id="calpphase">&ndash;</div>
       <div class="k">Chamber</div><div class="v" id="calpchamber">&ndash;</div>
       <div class="k">Bed</div><div class="v" id="calpbed">&ndash;</div>
-      <div class="k">Elapsed</div><div class="v" id="calptime">&ndash;</div>
+      <div class="k">Elapsed (total)</div><div class="v" id="calptime">&ndash;</div>
       <div class="k">Relay phases</div><div class="v" id="calpcycles">&ndash;</div>
     </div>
     <div class="warnbox hide" id="calpwarn"></div>

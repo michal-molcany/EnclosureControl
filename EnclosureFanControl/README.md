@@ -85,9 +85,11 @@ Safety and limits:
 
 - The printer must be **idle** (no print, no pause) and the chamber below 45 °C
   at the start. The **Calibrate** button is disabled while a job is active.
-- The run aborts after **20 minutes**, above **50 °C** chamber, if the bed is not
-  at temperature within 5 minutes, if OctoPrint data goes stale for 30 s, if a
-  print starts while it runs, or on **Cancel**.
+- The 20-minute experiment window starts when the chamber first reaches 40 °C,
+  not at the button press; an absolute 30-minute backstop covers a chamber that
+  never gets there. The run aborts above **50 °C** chamber, if the bed is not at
+  temperature within 5 minutes, if OctoPrint data goes stale for 30 s, if a print
+  starts while it runs, or on **Cancel**.
 - Every exit path switches the bed off and enters the normal full-cooling state.
   The 55 °C emergency path stays armed and wins.
 - While a run is active, manual controls and the CYD's 2-second command stream

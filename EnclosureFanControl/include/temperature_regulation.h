@@ -102,6 +102,10 @@ private:
     PidGains calOldGains = {0.0f, 0.0f, 0.0f};
     unsigned long calStartedMs = 0;
     unsigned long calPhaseStartedMs = 0;
+    // 0 until the chamber first reaches CAL_SETPOINT_C. The 20-minute
+    // experiment window is measured from here, so the preheat does not consume
+    // it.
+    unsigned long calExperimentStartedMs = 0;
     unsigned long calFinishedMs = 0;
     unsigned long calLastSampleMs = 0;
     unsigned long calLastSampleAtMs = 0;
