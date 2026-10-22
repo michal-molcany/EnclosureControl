@@ -180,7 +180,7 @@ quietly.
   both.
 - `discard` drops the result without touching the running gains.
 
-The 20-minute experiment window starts when the chamber first reaches 40 °C; a
+The 20-minute experiment window starts when the chamber first reaches 35 °C; a
 30-minute absolute cap covers a chamber that never gets there.
 
 `/api/status` includes a `cal` object: `active`, `hasResult`, `aborted`, `phase`

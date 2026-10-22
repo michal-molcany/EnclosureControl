@@ -99,11 +99,11 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 //
 // The experiment is a relay-feedback auto-tune: the bed is heated to 90 C to
 // turn the enclosure into a repeatable heat load, then the louvre/fan are
-// switched between full cooling (200) and no cooling (0) around a 40 C chamber
+// switched between full cooling (200) and no cooling (0) around a 35 C chamber
 // setpoint. The resulting oscillation gives the ultimate gain and period, from
 // which Ziegler-Nichols produces the gains.
 //
-// 40 C is deliberately BELOW the 50 C abort and the 55 C emergency trigger: the
+// 35 C is deliberately BELOW the 50 C abort and the 55 C emergency trigger: the
 // no-cooling half of the relay lets the chamber rise, so the setpoint has to
 // leave headroom for that overshoot. Do not raise it without re-checking those
 // two limits.
@@ -116,7 +116,7 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 // run is aborted rather than left heating indefinitely.
 #define CAL_PREHEAT_TIMEOUT_MS (5UL * 60UL * 1000UL)
 // Experiment window. It starts when the chamber first reaches CAL_SETPOINT_C,
-// not at the button press: the preheat and the initial climb to 40 C must not
+// not at the button press: the preheat and the initial climb to 35 C must not
 // eat into the oscillation time. Ziegler-Nichols needs a handful of periods; if
 // that has not happened by now the process is not oscillating the way the
 // method assumes.
@@ -137,7 +137,7 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 // Abort before the 55 C emergency trigger. The emergency path itself stays
 // armed and wins regardless.
 #define CAL_ABORT_CHAMBER_C 50.0f
-#define CAL_SETPOINT_C 40.0f
+#define CAL_SETPOINT_C 35.0f
 // Relay hysteresis in C. Above the chamber sensor's noise, below the
 // oscillation amplitude the relay is meant to produce.
 #define CAL_NOISEBAND_C 0.5f

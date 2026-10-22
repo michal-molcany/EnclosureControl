@@ -141,9 +141,9 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
 
   <div class="subhead">PID calibration <span class="badge" id="calbadge">idle</span></div>
   <div class="note">Runs a relay-feedback auto-tune (the method ESPHome uses). It heats the bed to 90&nbsp;&deg;C,
-    oscillates the louvre and fan around a 40&nbsp;&deg;C chamber setpoint, measures the ultimate gain and period,
+    oscillates the louvre and fan around a 35&nbsp;&deg;C chamber setpoint, measures the ultimate gain and period,
     then offers new Ziegler&ndash;Nichols gains. The printer must be idle; the 20-minute cap starts when the
-    chamber reaches 40&nbsp;&deg;C.</div>
+    chamber reaches 35&nbsp;&deg;C.</div>
   <div class="btns"><button class="primary" id="calstart">Calibrate</button></div>
   <div class="msg" id="calmsg"></div>
 </div>
@@ -192,8 +192,8 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
       <li>The printer must be <strong>idle</strong> &mdash; no print or paused job.</li>
       <li>The bed will be heated to <strong>90&nbsp;&deg;C</strong> and switched off when the run ends.</li>
       <li>The louvre and fan run for up to <strong>20&nbsp;minutes after the chamber reaches
-        40&nbsp;&deg;C</strong> (30&nbsp;minutes in total).</li>
-      <li>The chamber is held near 40&nbsp;&deg;C; the run aborts if it exceeds 50&nbsp;&deg;C.</li>
+        35&nbsp;&deg;C</strong> (30&nbsp;minutes in total).</li>
+      <li>The chamber is held near 35&nbsp;&deg;C; the run aborts if it exceeds 50&nbsp;&deg;C.</li>
       <li>Commands from the CYD are <strong>ignored</strong> for the duration.</li>
     </ul>
     <label class="chk" style="margin-top:12px"><input type="checkbox" id="calack"> I understand and want to proceed</label>

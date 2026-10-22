@@ -675,7 +675,7 @@ void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool hav
     }
 
     // The experiment window starts at the setpoint, not at the button press:
-    // the preheat and the first climb to 40 C must not eat into the oscillation
+    // the preheat and the first climb to 35 C must not eat into the oscillation
     // time.
     if (calExperimentStartedMs != 0 &&
         now - calExperimentStartedMs > CAL_MAX_DURATION_MS)
@@ -721,7 +721,7 @@ void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool hav
         finishCalibration(false, "the chamber reading is not usable");
         return;
     }
-    // Below the 55 C emergency trigger and above the 40 C setpoint, so the
+    // Below the 55 C emergency trigger and above the 35 C setpoint, so the
     // no-cooling half of the relay has headroom without approaching the point
     // where the board would cancel a print.
     if (chamber > CAL_ABORT_CHAMBER_C)

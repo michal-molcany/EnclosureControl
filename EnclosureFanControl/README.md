@@ -72,7 +72,7 @@ What it does, in order:
 2. Waits for the bed to reach 88 °C (5-minute timeout), then lets it settle
    briefly.
 3. Drives the louvre and fan between **no cooling** and **full cooling** (output
-   0 and 200) with a 0.5 °C hysteresis, around a fixed **40 °C** chamber
+   0 and 200) with a 0.5 °C hysteresis, around a fixed **35 °C** chamber
    setpoint.
 4. Measures the resulting oscillation: the ultimate gain `Ku = 4d / (pi*a)` and
    the period `Tu`, then computes `kp = 0.6*Ku`, `ki = 1.2*Ku/Tu`,
@@ -85,7 +85,7 @@ Safety and limits:
 
 - The printer must be **idle** (no print, no pause) and the chamber below 45 °C
   at the start. The **Calibrate** button is disabled while a job is active.
-- The 20-minute experiment window starts when the chamber first reaches 40 °C,
+- The 20-minute experiment window starts when the chamber first reaches 35 °C,
   not at the button press; an absolute 30-minute backstop covers a chamber that
   never gets there. The run aborts above **50 °C** chamber, if the bed is not at
   temperature within 5 minutes, if OctoPrint data goes stale for 30 s, if a print
