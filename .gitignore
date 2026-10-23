@@ -15,3 +15,4 @@ include/enclosure_api.h
 # ESP-NOW link key (LTK), shared by both firmwares. Copy
 # include/espnow_key.example.h to include/espnow_key.h.
 include/espnow_key.h
+Images/
