@@ -65,6 +65,7 @@ with `send_P()` (streams from flash) rather than `send()` (builds a `String`).
 | `/api/pid/save` | POST | persist the running gains to NVS |
 | `/api/pid/defaults` | POST | restore compiled-in defaults and persist |
 | `/api/calibrate` | POST | `{action: start / cancel / apply / discard}` — 409 with the reason when refused |
+| `/api/cal/trace` | GET | the current/last calibration run's temperature history (see below) |
 | `/api/manual` | POST | `{mode, louvre, fan}` |
 | `/api/octoprint` | POST | `{ip, port[, key]}` — **probes first**, stores only on success |
 | `/api/octoprint/defaults` | POST | drop **both** stored overrides, return to the compiled-in ones |
@@ -209,14 +210,54 @@ key controls are disabled too, and `/api/octoprint` and
 `/api/octoprint/defaults` answer **409** during a run: the final bed-off has to
 reach the server the run started with.
 
+### The graph, and why the board records it
+
+`GET /api/cal/trace` returns the temperature history of the current (or most
+recent) run:
+
+```json
+{"interval":5,"n":120,"t":[0,5,...],"ch":[262,265,...],"bed":[251,253,...],
+ "out":[0,0,...],"ph":[1,1,...]}
+```
+
+`t` is seconds since the run started, `ch`/`bed` are 0.1 °C
+(`-32768` = no reading, drawn as a break in the line), `out` is the cooling
+demand the run applied (0–200, so the relay's two levels and the moments it
+switched are visible), and `ph` is the phase code from `/api/status`. `interval`
+is the spacing between points in seconds.
+
+The page does **not** accumulate this itself. A run lasts up to an hour, it is
+usually started from the OctoPrint plugin or the CYD so the page is opened long
+after the preheat began, a reload would throw the history away, and a
+backgrounded tab throttles its timers to about one tick a minute. The board is
+the only observer present for the whole experiment, so the regulator samples it
+every 5 s into a 780-sample ring (65 minutes, 6.2 KB of static RAM) and this
+route serves it.
+
+The response is decimated to at most 320 points, every *k*-th sample plus the
+most recent one. It is deliberately **not** part of `/api/status`: that document
+is polled every 2 s, and a few thousand numbers folded into it would be a
+stall on a server that shares `loop()` with the relay. The page fetches the
+trace when the graph appears, every 10 s while a run is active, and once more on
+the falling edge.
+
+State stays in `/api/status` (`active`, `aborted`, `elapsed`, ...); this route is
+series data only, so there is one authority for what the run is doing. The trace
+is RAM only: it survives the end of a run (so the result dialog can show the
+oscillation the gains came from) and is cleared when the next run starts, but a
+reboot loses it — and a reboot aborts the run, so there is nothing left to show.
+
 ## Files
 
 | File | Provides |
 | --- | --- |
 | `src/enclosure_ui.{h,cpp}` | `begin()` / `poll()`, the JSON routes, Basic auth |
 | `src/enclosure_ui_page.h` | the HTML page as one string constant |
+| `test/selftest_trace.js` | runs the page's own graph code against a stub canvas |
 
 Callback-based and project-agnostic, like `lib/EnclosureApi`: the library knows
 nothing about `TemperatureRegulation`, the OLED or ESP-NOW. Every callback is
 optional — without the PID callbacks `/api/pid` answers 501 rather than failing
-silently, and without the calibration callback `/api/calibrate` does the same.
+silently, without the calibration callback `/api/calibrate` does the same, and
+without the trace writer `/api/cal/trace` answers 501 (the page then leaves the
+graph on its "waiting for samples" message instead of showing an empty axis).

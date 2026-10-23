@@ -637,6 +637,13 @@ bool TemperatureRegulation::startCalibration(String &reason)
     calLastSampleMs = lastSnap.updatedMs;
     calLastSampleAtMs = calStartedMs;
 
+    // A new run starts a new graph. The previous run's trace is dropped here
+    // rather than when the result is applied or discarded: "the trace on screen
+    // belongs to the run the page is describing" is the simpler promise.
+    calTrace.reset();
+    calTraceLastMs = 0;
+    calOutput = 0;
+
     // Zero the detectors now, not at relay start: the progress dialog shows the
     // phase count from the first second, and a count left over from a previous
     // run would look like the new one was already oscillating.
@@ -925,6 +932,24 @@ void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool hav
     default:
         break;
     }
+
+    // Graph trace: one point every CAL_TRACE_INTERVAL_MS, and the first one
+    // immediately so a run cancelled early still shows something. Sampled after
+    // the phase switch so the point carries the output this tick has just
+    // applied, not the previous one.
+    if (calibrationRunning() &&
+        (calTrace.count() == 0 || now - calTraceLastMs >= CAL_TRACE_INTERVAL_MS))
+    {
+        CalTraceSample sample;
+        sample.elapsedSec = (uint16_t)((now - calStartedMs) / 1000UL);
+        sample.chamberCx10 = isfinite(chamber) ? (int16_t)(chamber * 10.0f) : ENC_CHAMBER_INVALID;
+        const double bed = snap.bedActual;
+        sample.bedCx10 = isfinite(bed) ? (int16_t)(bed * 10.0) : ENC_CHAMBER_INVALID;
+        sample.output = calOutput;
+        sample.phase = (uint8_t)calPhase;
+        calTrace.add(sample);
+        calTraceLastMs = now;
+    }
 }
 
 void TemperatureRegulation::finishCalibration(bool success, const char *reason,
@@ -998,6 +1023,11 @@ void TemperatureRegulation::applyRawDemand(float demand)
         demand = 0.0f;
     if (demand > 200.0f)
         demand = 200.0f;
+
+    // Remember what the run is applying, for the graph's relay trace. This is
+    // the calibration's demand, not lastDemand: lastDemand belongs to the
+    // normal controller and the calibration deliberately leaves it alone.
+    calOutput = (uint8_t)lroundf(demand);
 
     const uint8_t louvre = demand >= 100.0f ? 100 : (uint8_t)lroundf(demand);
     setLouvrePercent(louvre);

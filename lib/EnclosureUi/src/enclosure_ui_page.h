@@ -96,6 +96,18 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
 .kv .k{text-transform:none;letter-spacing:0}
 .kv .v{font-size:14px}
 .warnbox{border:1px solid var(--warn);color:var(--warn);border-radius:6px;padding:8px 10px;margin-top:10px;font-size:12px;line-height:1.4}
+.chart{margin-top:12px}
+.chart canvas{width:100%;display:block;background:#0e1116;border:1px solid var(--line);border-radius:6px}
+.chart canvas+canvas{margin-top:6px}
+.lg{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--dim);margin-bottom:6px}
+.lg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.lg i.bed{background:#e6eaf0}
+.lg i.ch{background:#4caf7d}
+.lg i.tgt{background:#8b97a8}
+.lg i.out{background:#5aa9e6}
+.lg i.p1{background:rgba(90,140,255,.45)}
+.lg i.p2{background:rgba(150,150,170,.45)}
+.lg i.p3{background:rgba(224,163,62,.5)}
 </style>
 </head>
 <body>
@@ -215,6 +227,20 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
       <div class="k">Elapsed (total)</div><div class="v" id="calptime">&ndash;</div>
       <div class="k">Relay phases</div><div class="v" id="calpcycles">&ndash;</div>
     </div>
+    <div id="calchartslot"><div class="chart" id="calchart">
+      <div class="lg">
+        <span><i class="bed"></i>bed</span>
+        <span><i class="ch"></i>chamber</span>
+        <span><i class="tgt"></i>target</span>
+        <span><i class="out"></i>cooling</span>
+        <span><i class="p1"></i>preheat</span>
+        <span><i class="p2"></i>settle</span>
+        <span><i class="p3"></i>relay</span>
+      </div>
+      <canvas id="calplotbed" style="height:96px"></canvas>
+      <canvas id="calplotch" style="height:124px"></canvas>
+      <div class="msg" id="calplotmsg">Waiting for the first samples&hellip;</div>
+    </div></div>
     <div class="warnbox hide" id="calpwarn"></div>
     <div class="btns">
       <button id="calpcancel">Cancel calibration</button>
@@ -238,6 +264,7 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
       <div class="k">Amplitude</div><div class="v" id="calramp">&ndash;</div>
       <div class="k">Relay half-span (d)</div><div class="v" id="calrdelta">&ndash;</div>
     </div>
+    <div id="calreschart"></div>
     <div class="warnbox hide" id="calrwarn"></div>
     <div class="btns">
       <button class="primary" id="calrapply">Apply</button>
@@ -315,6 +342,260 @@ function fmt3(v) {
 }
 function showModal(id) { $(id).classList.remove('hide'); }
 function hideModal(id) { $(id).classList.add('hide'); }
+
+// --- Calibration temperature graph -----------------------------------------
+//
+// The numbers come from the BOARD (GET api/cal/trace), not from this page's own
+// sampling: a run lasts up to an hour, it is usually started from the OctoPrint
+// plugin or the CYD so the page is opened late, and a backgrounded tab
+// throttles its timers to about one tick a minute.
+//
+// Two stacked plots sharing a time axis, drawn by hand on canvas. No charting
+// library: this page has no external assets by design, so it works on a LAN
+// with no internet.
+
+var calTrace = null;      // last api/cal/trace document
+var calTraceAt = 0;       // Date.now() of the last fetch
+var calWasActive = false; // edge detection for "a run just started / ended"
+
+// Index = phase code: 1 preheat, 2 settle, 3 relay. 0/4/5 get no band.
+var CAL_PHASE_TINT = ['', 'rgba(90,140,255,.13)', 'rgba(150,150,170,.13)', 'rgba(224,163,62,.16)'];
+var CAL_INVALID = -32768; // ENC_CHAMBER_INVALID
+
+// ONE chart element, moved between the progress and the result panel. Moving it
+// beats drawing into two canvases: one draw path, and the bitmap survives the
+// move (an element cannot be in two places, so appendChild() is a move).
+function chartInto(slotId) {
+  var chart = $('calchart');
+  var slot = $(slotId);
+  if (chart && slot && chart.parentNode !== slot) { slot.appendChild(chart); }
+}
+
+function maybeFetchTrace(c) {
+  if (!(c.active || c.hasResult || c.aborted)) { calWasActive = false; return; }
+  var nowMs = Date.now();
+  var starting = !!c.active && !calWasActive;
+  var settled = !c.active && calWasActive;
+  calWasActive = !!c.active;
+  // A new run means a new trace. Drop the old one immediately so the graph
+  // cannot show the previous experiment for the first seconds of this one.
+  if (starting) { calTrace = null; calTraceAt = 0; }
+  // While a run is on, refresh every 10 s; the 2 s status poll keeps the live
+  // right edge moving in between. The falling edge gets one extra fetch, to
+  // pick up the samples the run wrote on its way out.
+  var due = starting || settled || (c.active && nowMs - calTraceAt > 10000) ||
+            (!c.active && !calTrace && nowMs - calTraceAt > 10000);
+  if (!due) { return; }
+  calTraceAt = nowMs;
+  get('api/cal/trace').then(function (d) {
+    calTrace = d;
+    drawTrace(lastStatus);
+  }).catch(function (err) {
+    var msg = $('calplotmsg');
+    if (msg) { msg.textContent = 'Temperature history unavailable: ' + err.message; msg.style.display = ''; }
+  });
+}
+
+function clearPlot(cv) {
+  var ctx = cv.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+}
+
+// Sizes the backing store to the CSS box and returns a context in CSS pixels.
+// Null while the panel is hidden: clientWidth is 0 there, and resizing the
+// canvas to it would discard the bitmap for nothing.
+function plotSize(cv) {
+  var w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) { return null; }
+  var dpr = window.devicePixelRatio || 1;
+  var bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+  if (cv.width !== bw) { cv.width = bw; }
+  if (cv.height !== bh) { cv.height = bh; }
+  var ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx: ctx, w: w, h: h };
+}
+
+function drawTrace(s) {
+  var bedCv = $('calplotbed'), chCv = $('calplotch'), msg = $('calplotmsg');
+  if (!bedCv || !chCv) { return; }
+  var d = calTrace;
+  if (!d || !d.n) {
+    clearPlot(bedCv); clearPlot(chCv);
+    if (msg) { msg.textContent = 'Waiting for the first samples\u2026'; msg.style.display = ''; }
+    return;
+  }
+  if (msg) { msg.style.display = 'none'; }
+
+  var t = d.t, chRaw = d.ch, bedRaw = d.bed, outRaw = d.out || [], ph = d.ph || [], n = d.n;
+  var cal = (s && s.cal) || {};
+  var padL = 34, padR = 6, padT = 8, padB = 14;
+
+  // The freshest reading from the status poll, so the right edge keeps moving
+  // between the 10 s trace refreshes. Same units as the trace (0.1 C).
+  var live = null;
+  if (cal.active && s && s.chamberValid) {
+    live = { t: Math.floor((cal.elapsed || 0) / 1000), ch: s.chamber, bed: s.bed };
+  }
+  var lastT = Math.max(t[n - 1], live ? live.t : 0);
+  var xMax = Math.max(300, Math.ceil(lastT / 60) * 60); // 5 min floor, whole minutes
+  var xStep = xMax <= 900 ? 120 : (xMax <= 1800 ? 300 : 600);
+
+  function map(cv, yMin, yMax) {
+    var p = plotSize(cv);
+    if (!p) { return null; }
+    p.X = function (sec) { return padL + (sec / xMax) * (p.w - padL - padR); };
+    p.Y = function (v) { return p.h - padB - ((v - yMin) / (yMax - yMin)) * (p.h - padT - padB); };
+    p.yMin = yMin;
+    p.yMax = yMax;
+    return p;
+  }
+
+  function axes(p, decimals) {
+    if (!p) { return; }
+    var ctx = p.ctx, k, v, y, x, sec;
+    ctx.font = '10px system-ui,sans-serif';
+    ctx.lineWidth = 1;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'right';
+    for (k = 0; k <= 4; k++) {
+      v = p.yMin + (p.yMax - p.yMin) * k / 4;
+      y = Math.round(p.Y(v)) + 0.5;
+      ctx.strokeStyle = '#2a313d';
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(p.w - padR, y); ctx.stroke();
+      ctx.fillStyle = '#8b97a8';
+      ctx.fillText(decimals ? v.toFixed(1) : String(Math.round(v)), padL - 4, y);
+    }
+    for (sec = xStep; sec <= xMax; sec += xStep) {
+      x = Math.round(p.X(sec)) + 0.5;
+      ctx.strokeStyle = '#2a313d';
+      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, p.h - padB); ctx.stroke();
+    }
+  }
+
+  // Minute labels belong under the bottom plot only.
+  function xAxis(p) {
+    if (!p) { return; }
+    var ctx = p.ctx, sec;
+    ctx.font = '10px system-ui,sans-serif';
+    ctx.fillStyle = '#8b97a8';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (sec = xStep; sec <= xMax; sec += xStep) {
+      ctx.fillText((sec / 60) + 'm', p.X(sec), p.h - padB + 2);
+    }
+  }
+
+  function bands(p) {
+    if (!p) { return; }
+    var ctx = p.ctx, i = 0, code, start, end;
+    // One rect per contiguous run: per-sample rects would leave seams and cost
+    // a few hundred calls per redraw for no visible difference.
+    while (i < n) {
+      code = ph[i];
+      if (!(code >= 1 && code <= 3)) { i++; continue; }
+      start = i;
+      while (i < n && ph[i] === code) { i++; }
+      end = (i < n) ? t[i] : lastT;
+      ctx.fillStyle = CAL_PHASE_TINT[code];
+      ctx.fillRect(p.X(t[start]), padT, Math.max(1, p.X(end) - p.X(t[start])),
+                   p.h - padT - padB);
+    }
+  }
+
+  // Polyline with a gap at every invalid sample, plus the live point when the
+  // status poll has a fresher reading than the trace does.
+  function line(p, values, color, width, dash, liveRaw) {
+    if (!p) { return; }
+    var ctx = p.ctx, i, x, y, pen = false;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    if (dash) { ctx.setLineDash(dash); }
+    ctx.beginPath();
+    for (i = 0; i < n; i++) {
+      if (values[i] === CAL_INVALID) { pen = false; continue; }
+      x = p.X(t[i]);
+      y = p.Y(values[i] / 10);
+      if (pen) { ctx.lineTo(x, y); } else { ctx.moveTo(x, y); pen = true; }
+    }
+    if (liveRaw !== undefined && liveRaw !== CAL_INVALID && pen) {
+      ctx.lineTo(p.X(live.t), p.Y(liveRaw / 10));
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function hline(p, value, color, dash) {
+    if (!p) { return; }
+    var ctx = p.ctx;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash(dash);
+    ctx.beginPath();
+    ctx.moveTo(padL, p.Y(value));
+    ctx.lineTo(p.w - padR, p.Y(value));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Chamber range: fit the data, but never tighter than 10 C, or a 1 C
+  // oscillation is a flat line. The setpoint stays in view even before the
+  // climb gets there.
+  var setpoint = cal.setpoint ? cal.setpoint : 35;
+  var lo = setpoint - 1, hi = setpoint + 1, i, v;
+  for (i = 0; i < n; i++) {
+    if (chRaw[i] === CAL_INVALID) { continue; }
+    v = chRaw[i] / 10;
+    if (v < lo) { lo = v; }
+    if (v > hi) { hi = v; }
+  }
+  if (live && live.ch !== CAL_INVALID) {
+    v = live.ch / 10;
+    if (v < lo) { lo = v; }
+    if (v > hi) { hi = v; }
+  }
+  var mid = (lo + hi) / 2;
+  var span = Math.max(10, hi - lo + 2);
+  lo = mid - span / 2;
+  hi = mid + span / 2;
+
+  var bedP = map(bedCv, 20, 100);
+  var chP = map(chCv, lo, hi);
+
+  bands(bedP); bands(chP);
+  axes(bedP, false); axes(chP, true);
+  xAxis(chP);
+
+  // Chamber: the relay's noise band, then the setpoint through its middle.
+  if (chP) {
+    var c2 = chP.ctx;
+    c2.fillStyle = 'rgba(139,151,168,.10)';
+    c2.fillRect(padL, chP.Y(setpoint + 0.5), chP.w - padL - padR,
+                Math.max(1, chP.Y(setpoint - 0.5) - chP.Y(setpoint + 0.5)));
+  }
+  hline(chP, setpoint, '#8b97a8', [4, 3]);
+  hline(bedP, cal.bedTarget ? cal.bedTarget : 90, '#8b97a8', [4, 3]);
+
+  // Relay "cooling on" as a 3 px strip along the bottom of the chamber plot:
+  // it shows when the relay switched without needing another axis.
+  if (chP && outRaw.length) {
+    var c3 = chP.ctx, a, b;
+    c3.fillStyle = 'rgba(90,169,230,.6)';
+    for (i = 0; i < n; i++) {
+      if (outRaw[i] >= 100) {
+        a = chP.X(t[i]);
+        b = chP.X((i + 1 < n) ? t[i + 1] : lastT);
+        c3.fillRect(a, chP.h - padB - 4, Math.max(1, b - a), 3);
+      }
+    }
+  }
+
+  line(bedP, bedRaw, '#e6eaf0', 1.6, null, live ? live.bed : undefined);
+  line(chP, chRaw, '#4caf7d', 1.6, null, live ? live.ch : undefined);
+}
 
 // The calibration modal is driven entirely by the board's status document,
 // except for the first screen: the confirmation exists only in the browser,
@@ -416,6 +697,12 @@ function renderCal(s) {
       ? 'Calibration is disabled while the printer is busy.'
       : '';
   }
+
+  // The graph follows whichever dialog is on screen. It is the same element,
+  // moved into that panel, so there is one canvas and one draw path.
+  chartInto((c.hasResult && !c.active) ? 'calreschart' : 'calchartslot');
+  maybeFetchTrace(c);
+  if (c.active || c.hasResult || c.aborted) { drawTrace(s); }
 }
 
 function render(s) {

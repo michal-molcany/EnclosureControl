@@ -109,6 +109,12 @@ Safety and limits:
   It shows live chamber/bed readings, phase, elapsed time and cycles, blocks
   navigation, and offers one confirmed **Cancel calibration** action. This works
   over ESP-NOW and the HTTP fallback alike.
+- The web UI draws the run: bed and chamber curves, the 90 °C bed target, the
+  35 °C setpoint with its ±0.5 °C noise band, the relay's cooling strip, and a
+  tinted band per phase. The history comes from the board, not the browser
+  (`GET /api/cal/trace`, one sample every 5 s), so it is complete even when the
+  page is opened late, reloaded, or left in a background tab. The same graph
+  stays on screen in the result dialog, next to the gains it produced.
 - While a run is active, manual controls and the CYD's 2-second command stream
   are **ignored** (the CYD link is still reported as live), except for that
   dedicated cancel action; they resume when the run ends. The OctoPrint address,

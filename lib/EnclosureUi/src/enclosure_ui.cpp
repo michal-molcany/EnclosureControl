@@ -9,6 +9,10 @@
 //
 //   GET  /                 -> the page (text/html)
 //   GET  /api/status       -> everything the page renders, one round trip
+//   GET  /api/cal/trace    -> the calibration temperature history, decimated to
+//                            at most CAL_TRACE_POINTS points. Separate from
+//                            /api/status because it is only fetched while the
+//                            graph is on screen, not 30 times a minute.
 //   POST /api/pid          <- {"kp":<float>,"ki":<float>,"kd":<float>}
 //                            400 if a value is out of range or not finite, in
 //                            which case the running gains are left untouched
@@ -69,6 +73,7 @@ namespace
     EnclosureUi::PidPersist persistPid = nullptr;
     EnclosureUi::PidPersist restoreDefaultPid = nullptr;
     EnclosureUi::CalibrationHandler handleCalibration = nullptr;
+    EnclosureUi::TraceWriter writeTrace = nullptr;
     EnclosureUi::ManualHandler handleManual = nullptr;
     EnclosureUi::EndpointSetter applyEndpoint = nullptr;
     EnclosureUi::EndpointReset clearEndpointFn = nullptr;
@@ -207,6 +212,28 @@ namespace
 
         String body;
         serializeJson(doc, body);
+        server->send(200, "application/json", body);
+    }
+
+    // GET /api/cal/trace - the calibration graph's data.
+    //
+    // Separate from /api/status because the page polls that every 2 s and this
+    // document is a few thousand numbers: folding it in would multiply the
+    // traffic for a chart that is only on screen while a run is open. The
+    // programme formats it; this only serves the bytes.
+    //
+    // A missing writer answers 501 rather than 404, the same way the other
+    // optional callbacks do - "this build cannot do it" is a different fact
+    // from "this route does not exist".
+    void sendTrace()
+    {
+        if (!writeTrace)
+        {
+            server->send(501, "text/plain", "calibration trace not supported on this build");
+            return;
+        }
+        String body;
+        writeTrace(body);
         server->send(200, "application/json", body);
     }
 
@@ -531,6 +558,7 @@ namespace EnclosureUi
         persistPid = cfg.savePid;
         restoreDefaultPid = cfg.restoreDefaultPid;
         handleCalibration = cfg.calibrate;
+        writeTrace = cfg.trace;
         handleManual = cfg.manual;
         applyEndpoint = cfg.setEndpoint;
         clearEndpointFn = cfg.clearEndpoint;
@@ -548,6 +576,11 @@ namespace EnclosureUi
         server->on("/api/status", HTTP_GET, []() {
             if (authorized())
                 sendStatus();
+        });
+
+        server->on("/api/cal/trace", HTTP_GET, []() {
+            if (authorized())
+                sendTrace();
         });
 
         // Registered unconditionally: a request against a build without the

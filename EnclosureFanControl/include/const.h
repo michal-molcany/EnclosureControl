@@ -154,6 +154,18 @@ static const uint8_t ENC_PEER_MAC[6] = {0x5C, 0x01, 0x3B, 0x8A, 0x63, 0x54};
 // not stay mis-flagged for ever, which would hide a real pause later.
 #define CAL_PAUSE_GRACE_MS 30000UL
 
+// Temperature trace for the web UI's calibration graph. One point every 5 s:
+// far finer than the minutes-long oscillation it shows, and the chamber sensor
+// itself only updates at 1 Hz. See include/cal_trace.h for the reasoning.
+#define CAL_TRACE_INTERVAL_MS 5000UL
+// 65 minutes at 5 s - the 60-minute experiment window plus the preheat and the
+// tail of an aborted run. 780 x 8 bytes = 6.2 KB of static RAM.
+#define CAL_TRACE_SAMPLES 780
+// Most points served to the page in one response. The trace is decimated to
+// this, so a long run does not turn into a 20 KB document served by the same
+// loop that drives the relay.
+#define CAL_TRACE_POINTS 320
+
 // OctoPrint background poll interval (FreeRTOS task, CYD-style). Loop only
 // copies the latest snapshot and never blocks on the network.
 #define OCTO_POLL_INTERVAL_MS 5000 // 5 seconds

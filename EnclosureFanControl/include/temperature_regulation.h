@@ -4,8 +4,10 @@
 #include <Arduino.h>
 #include <enclosure_proto.h>
 #include <enclosure_pid.h>
+#include "const.h"
 #include "octo_poller.h"
 #include "pid_calibration.h"
+#include "cal_trace.h"
 
 // Forward declaration
 class ServoLouver;
@@ -135,6 +137,16 @@ private:
     // its command every heartbeat; acting only on a CHANGE makes the cancel
     // one-shot without adding an acknowledgement to the protocol.
     uint8_t lastCalAction = 0;
+    // Temperature history for the page's graph, sampled while the run is
+    // active. Kept after it ends so the result dialog can show the oscillation
+    // the gains came from; cleared when the next run starts.
+    CalTrace<CAL_TRACE_SAMPLES> calTrace;
+    unsigned long calTraceLastMs = 0;
+    // Cooling demand the run currently has applied, 0-200. The trace records
+    // this rather than lastDemand: lastDemand is the normal controller's
+    // integral cache and is deliberately left alone by the calibration paths,
+    // so it would show zero through the whole relay phase.
+    uint8_t calOutput = 0;
 
     enum MaterialState
     {
@@ -229,6 +241,11 @@ public:
 
     // Snapshot for the web UI. Safe at any time.
     PidCalibration::Info calibrationInfo() const;
+
+    // Temperature history of the current (or last) calibration run, oldest
+    // first. Empty until the first sample, which lands a second after the run
+    // starts. Read-only: the page draws it, the run owns it.
+    const CalTrace<CAL_TRACE_SAMPLES> &calibrationTrace() const { return calTrace; }
 
     // Compact reason code for telemetry, so the CYD can label an abort without
     // carrying the full sentence in every frame. ENC_CAL_ERR_NONE unless the

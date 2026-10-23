@@ -258,6 +258,80 @@ static EnclosureUi::Status provideEnclosureUiStatus()
   return s;
 }
 
+// Web UI calibration trace (GET /api/cal/trace).
+//
+// The board is the only observer that is present for a whole 60-minute run: the
+// page may be opened long after the preheat started (a run is usually started
+// from the plugin or the CYD), reloaded, or left in a background tab that
+// throttles its timers to about one tick a minute. So the regulator records the
+// run and this serves it.
+//
+// Decimated to CAL_TRACE_POINTS. A full 65-minute run holds 780 samples; sent
+// whole that is a ~16 KB response from a server that shares loop() with the
+// relay - a stall, not a graph. `interval` reports the effective spacing so the
+// page draws the real timeline instead of evenly spaced points that lie.
+//
+// Hand-written rather than ArduinoJson: a 320-element document costs a 10-15 KB
+// transient heap allocation per request, and this document has one fixed shape.
+static void provideEnclosureUiTrace(String &out)
+{
+  const CalTrace<CAL_TRACE_SAMPLES> &trace = tempRegulation.calibrationTrace();
+  const uint16_t count = trace.count();
+
+  // Every step-th sample, plus the freshest one when the stride does not land
+  // on it: without the tail a run in progress would end up to `interval`
+  // seconds behind, which is exactly the part being watched.
+  const uint16_t step = (count <= CAL_TRACE_POINTS)
+                            ? 1
+                            : (uint16_t)((count + CAL_TRACE_POINTS - 1) / CAL_TRACE_POINTS);
+  const bool tail = count > 0 && ((count - 1) % step) != 0;
+  uint16_t points = 0;
+  for (uint16_t i = 0; i < count; i = (uint16_t)(i + step))
+    ++points;
+  if (tail)
+    ++points;
+
+  char buf[40];
+  out.reserve((size_t)points * 24 + 96);
+  snprintf(buf, sizeof(buf), "{\"interval\":%lu,\"n\":%u,",
+           (unsigned long)(step * (CAL_TRACE_INTERVAL_MS / 1000UL)), (unsigned)points);
+  out += buf;
+
+  // Parallel arrays in one unit per axis: time in seconds, temperatures in
+  // 0.1 C, output in the regulator's 0-200 span, phase as its enum value.
+  static const char *const kKeys[5] = {"t", "ch", "bed", "out", "ph"};
+  for (uint8_t field = 0; field < 5; ++field)
+  {
+    out += '"';
+    out += kKeys[field];
+    out += "\":[";
+    for (uint16_t j = 0; j < points; ++j)
+    {
+      if (j)
+        out += ',';
+      const uint16_t index = (tail && j == (uint16_t)(points - 1))
+                                 ? (uint16_t)(count - 1)
+                                 : (uint16_t)(j * step);
+      const CalTraceSample &sample = trace.at(index);
+      int value = 0;
+      switch (field)
+      {
+      case 0: value = sample.elapsedSec; break;
+      case 1: value = sample.chamberCx10; break;
+      case 2: value = sample.bedCx10; break;
+      case 3: value = sample.output; break;
+      default: value = sample.phase; break;
+      }
+      snprintf(buf, sizeof(buf), "%d", value);
+      out += buf;
+    }
+    out += ']';
+    if (field < 4)
+      out += ',';
+  }
+  out += '}';
+}
+
 // A manual command from the browser. Deliberately applyLocalCommand(), not
 // applyRemoteCommand(): a browser click is not proof that the CYD is alive, and
 // stamping the link liveness from here would make the OLED claim a connection
@@ -554,6 +628,7 @@ void setup()
   ui.savePid = pidWrite;
   ui.restoreDefaultPid = pidRestoreDefaults;
   ui.calibrate = handleEnclosureUiCalibration;
+  ui.trace = provideEnclosureUiTrace;
   ui.manual = applyEnclosureUiManual;
   ui.setEndpoint = applyEnclosureUiEndpoint;
   ui.clearEndpoint = resetEnclosureUiEndpoint;
@@ -563,7 +638,7 @@ void setup()
   // http://<host>.local:8082/, and ESPmDNS keys services by name: a second
   // _http._tcp service would replace the 8081 one the CYD's discovery relies on.
 #if SERIAL_DEBUG
-  Serial.printf("[UI] web ui on port %u, open http://%s.local:%u/ (user: cyd, password: the API token)\n",
+  Serial.printf("[UI] web ui on port %u, open http://%s.local:%u/ (user: Enclosure, password: the API token)\n",
                 (unsigned)ENC_UI_PORT, OTA_ARDUINO_HOSTNAME, (unsigned)ENC_UI_PORT);
 #endif
 }

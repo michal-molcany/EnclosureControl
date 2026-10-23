@@ -154,6 +154,15 @@ namespace EnclosureUi
     // which is more useful than a generic "conflict".
     using CalibrationHandler = bool (*)(const char *action, String &reason);
 
+    // Serialises the calibration temperature history for GET /api/cal/trace.
+    //
+    // A writer rather than a Status field: the trace is a few thousand numbers,
+    // and copying it into every status document (polled 30 times a minute)
+    // would cost more than the whole rest of the document. The library does not
+    // parse or reshape it - the programme owns the history and the format, this
+    // only serves the bytes.
+    using TraceWriter = void (*)(String &out);
+
     // Receives a decoded EnclosureCommand from POST /api/manual. This is a LOCAL
     // command, not one from the CYD, so the handler must apply it WITHOUT
     // refreshing the remote-link liveness - otherwise a browser click would make
@@ -206,6 +215,7 @@ namespace EnclosureUi
         PidPersist savePid = nullptr;
         PidPersist restoreDefaultPid = nullptr;
         CalibrationHandler calibrate = nullptr;
+        TraceWriter trace = nullptr;
         ManualHandler manual = nullptr;
         EndpointSetter setEndpoint = nullptr;
         EndpointReset clearEndpoint = nullptr;
@@ -215,10 +225,11 @@ namespace EnclosureUi
     //
     // Every callback is optional. Without status there is no /api/status; without
     // the PID callbacks the /api/pid routes answer 501; without calibrate the
-    // /api/calibrate route answers 501; without manual there is no /api/manual;
-    // without setEndpoint there is no /api/octoprint. A board that wires up only
-    // part of this still serves the page, with the missing sections reporting why
-    // rather than failing silently.
+    // /api/calibrate route answers 501; without trace /api/cal/trace does too;
+    // without manual there is no /api/manual; without setEndpoint there is no
+    // /api/octoprint. A board that wires up only part of this still serves the
+    // page, with the missing sections reporting why rather than failing
+    // silently.
     void begin(const Config &cfg);
 
     // Handles one pending request. Call from loop(); returns immediately.
