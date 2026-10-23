@@ -373,10 +373,12 @@ function niceStep(raw) {
   return steps[steps.length - 1];
 }
 
-// Seconds as a person reads them: "6m 35s", "1h 02m 08s". The same format the
-// OctoPrint plugin tab uses, so the two never disagree about one run.
+// Seconds as a person reads them: "42 s" under a minute, then "6m 35s" and
+// "1h 02m 08s". Same format the OctoPrint plugin tab uses, so the two never
+// disagree about one run.
 function formatElapsed(ms) {
   var total = Math.floor((parseInt(ms, 10) || 0) / 1000);
+  if (total < 60) { return total + ' s'; }
   var h = Math.floor(total / 3600);
   var m = Math.floor((total % 3600) / 60);
   var s = total % 60;
