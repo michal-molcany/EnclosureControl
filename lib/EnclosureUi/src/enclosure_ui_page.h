@@ -362,6 +362,29 @@ var calWasActive = false; // edge detection for "a run just started / ended"
 var CAL_PHASE_TINT = ['', 'rgba(90,140,255,.13)', 'rgba(150,150,170,.13)', 'rgba(224,163,62,.16)'];
 var CAL_INVALID = -32768; // ENC_CHAMBER_INVALID
 
+// Smallest "round" number at or above `raw`. Keeps the chamber axis on steps
+// a person can read: 2, 2.5, 5, 10 - never span/4 turning a 10 C window into
+// 28.4 / 30.9 / 33.4 / 35.9.
+function niceStep(raw) {
+  var steps = [0.5, 1, 2, 2.5, 5, 10, 20, 50];
+  for (var i = 0; i < steps.length; i++) {
+    if (raw <= steps[i]) { return steps[i]; }
+  }
+  return steps[steps.length - 1];
+}
+
+// Seconds as a person reads them: "6m 35s", "1h 02m 08s". The same format the
+// OctoPrint plugin tab uses, so the two never disagree about one run.
+function formatElapsed(ms) {
+  var total = Math.floor((parseInt(ms, 10) || 0) / 1000);
+  var h = Math.floor(total / 3600);
+  var m = Math.floor((total % 3600) / 60);
+  var s = total % 60;
+  var pad = function (v) { return ('0' + v).slice(-2); };
+  if (h) { return h + 'h ' + pad(m) + 'm ' + pad(s) + 's'; }
+  return m + 'm ' + pad(s) + 's';
+}
+
 // ONE chart element, moved between the progress and the result panel. Moving it
 // beats drawing into two canvases: one draw path, and the bitmap survives the
 // move (an element cannot be in two places, so appendChild() is a move).
@@ -445,6 +468,12 @@ function drawTrace(s) {
   function map(cv, yMin, yMax) {
     var p = plotSize(cv);
     if (!p) { return null; }
+    // Clear on EVERY frame. plotSize() only resets the canvas when its backing
+    // size changes, which is once; without this the previous frame stays
+    // underneath. The translucent phase bands then stack until they are solid,
+    // and every step of the time window leaves its labels, gridlines and curve
+    // behind as ghosts.
+    p.ctx.clearRect(0, 0, p.w, p.h);
     p.X = function (sec) { return padL + (sec / xMax) * (p.w - padL - padR); };
     p.Y = function (v) { return p.h - padB - ((v - yMin) / (yMax - yMin)) * (p.h - padT - padB); };
     p.yMin = yMin;
@@ -452,23 +481,29 @@ function drawTrace(s) {
     return p;
   }
 
-  function axes(p, decimals) {
+  // `step` is the tick step in degrees, so the labels are round numbers.
+  function axes(p, step) {
     if (!p) { return; }
     var ctx = p.ctx, k, v, y, x, sec;
+    var ticks = Math.round((p.yMax - p.yMin) / step);
+    var whole = (step % 1 === 0);
     ctx.font = '10px system-ui,sans-serif';
     ctx.lineWidth = 1;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'right';
-    for (k = 0; k <= 4; k++) {
-      v = p.yMin + (p.yMax - p.yMin) * k / 4;
+    for (k = 0; k <= ticks; k++) {
+      v = p.yMin + k * step;
       y = Math.round(p.Y(v)) + 0.5;
       ctx.strokeStyle = '#2a313d';
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(p.w - padR, y); ctx.stroke();
       ctx.fillStyle = '#8b97a8';
-      ctx.fillText(decimals ? v.toFixed(1) : String(Math.round(v)), padL - 4, y);
+      ctx.fillText(whole ? String(Math.round(v)) : v.toFixed(1), padL - 4, y);
     }
     for (sec = xStep; sec <= xMax; sec += xStep) {
       x = Math.round(p.X(sec)) + 0.5;
+      // A tick at the very end of the window would put its label half outside
+      // the canvas, so the edge tick is skipped rather than clipped.
+      if (x > p.w - 12) { continue; }
       ctx.strokeStyle = '#2a313d';
       ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, p.h - padB); ctx.stroke();
     }
@@ -477,13 +512,15 @@ function drawTrace(s) {
   // Minute labels belong under the bottom plot only.
   function xAxis(p) {
     if (!p) { return; }
-    var ctx = p.ctx, sec;
+    var ctx = p.ctx, sec, x;
     ctx.font = '10px system-ui,sans-serif';
     ctx.fillStyle = '#8b97a8';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     for (sec = xStep; sec <= xMax; sec += xStep) {
-      ctx.fillText((sec / 60) + 'm', p.X(sec), p.h - padB + 2);
+      x = p.X(sec);
+      if (x > p.w - 12) { continue; } // same edge rule as the gridlines
+      ctx.fillText((sec / 60) + 'm', x, p.h - padB + 2);
     }
   }
 
@@ -543,7 +580,9 @@ function drawTrace(s) {
 
   // Chamber range: fit the data, but never tighter than 10 C, or a 1 C
   // oscillation is a flat line. The setpoint stays in view even before the
-  // climb gets there.
+  // climb gets there. The window is then snapped to the tick step, and grown
+  // a gap at a time until it covers the curve, so no sample is ever drawn on
+  // the axis edge.
   var setpoint = cal.setpoint ? cal.setpoint : 35;
   var lo = setpoint - 1, hi = setpoint + 1, i, v;
   for (i = 0; i < n; i++) {
@@ -557,22 +596,29 @@ function drawTrace(s) {
     if (v < lo) { lo = v; }
     if (v > hi) { hi = v; }
   }
+  var need = Math.max(10, hi - lo + 2);
+  var chStep = niceStep(need / 5);
+  var gaps = 5;
   var mid = (lo + hi) / 2;
-  var span = Math.max(10, hi - lo + 2);
-  lo = mid - span / 2;
-  hi = mid + span / 2;
+  var chLo, chHi;
+  for (;;) {
+    chLo = Math.floor((mid - (gaps * chStep) / 2) / chStep) * chStep;
+    chHi = chLo + gaps * chStep;
+    if ((chHi >= hi + 0.5 && chLo <= lo - 0.5) || gaps >= 8) { break; }
+    gaps += 1;
+  }
 
   var bedP = map(bedCv, 20, 100);
-  var chP = map(chCv, lo, hi);
+  var chP = map(chCv, chLo, chHi);
 
   bands(bedP); bands(chP);
-  axes(bedP, false); axes(chP, true);
+  axes(bedP, 20); axes(chP, chStep);
   xAxis(chP);
 
   // Chamber: the relay's noise band, then the setpoint through its middle.
   if (chP) {
     var c2 = chP.ctx;
-    c2.fillStyle = 'rgba(139,151,168,.10)';
+    c2.fillStyle = 'rgba(139,151,168,.07)';
     c2.fillRect(padL, chP.Y(setpoint + 0.5), chP.w - padL - padR,
                 Math.max(1, chP.Y(setpoint - 0.5) - chP.Y(setpoint + 0.5)));
   }
@@ -647,7 +693,7 @@ function renderCal(s) {
     $('calpphase').textContent = CAL_PHASES[c.phase] || '?';
     $('calpchamber').textContent = s.chamberValid ? (s.chamber / 10).toFixed(1) + ' \u00b0C' : 'no data';
     $('calpbed').textContent = s.bedValid ? (s.bed / 10).toFixed(1) + ' \u00b0C (target ' + fmt1(c.bedTarget) + ' \u00b0C)' : 'no data';
-    $('calptime').textContent = Math.floor((c.elapsed || 0) / 1000) + ' s';
+    $('calptime').textContent = formatElapsed(c.elapsed);
     $('calpcycles').textContent = c.cycles || 0;
     $('calpcancel').classList.remove('hide');
     $('calpdismiss').classList.add('hide');
@@ -659,7 +705,7 @@ function renderCal(s) {
     $('calpphase').textContent = 'aborted';
     $('calpchamber').textContent = s.chamberValid ? (s.chamber / 10).toFixed(1) + ' \u00b0C' : 'no data';
     $('calpbed').textContent = s.bedValid ? (s.bed / 10).toFixed(1) + ' \u00b0C' : 'no data';
-    $('calptime').textContent = Math.floor((c.elapsed || 0) / 1000) + ' s';
+    $('calptime').textContent = formatElapsed(c.elapsed);
     $('calpcycles').textContent = c.cycles || 0;
     $('calpwarn').textContent = c.error || 'The calibration did not finish.';
     $('calpwarn').classList.remove('hide');
