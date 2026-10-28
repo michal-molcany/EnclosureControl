@@ -100,6 +100,8 @@ namespace
         copy.printing = api.printing();
         copy.paused = api.paused();
         copy.filament = api.filamentName();
+        copy.elapsed = api.elapsedFormatted();
+        copy.remaining = api.remainingFormatted();
         copy.toolActual = api.toolActual();
         copy.bedActual = api.bedActual();
         copy.chamberActual = api.chamberActual();

@@ -155,6 +155,10 @@ namespace
         doc["manualLouvre"] = s.manualLouvrePct;
         doc["manualFan"] = s.manualFanPct;
         doc["job"] = s.jobActive;
+  doc["elapsed"] = s.elapsed;
+  doc["remaining"] = s.remaining;
+  doc["elapsed"] = s.elapsed;
+  doc["remaining"] = s.remaining;
         doc["material"] = s.material;
         doc["setpoint"] = s.setpointC;
         doc["emergency"] = s.emergencyActive;

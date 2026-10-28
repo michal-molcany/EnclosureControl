@@ -122,17 +122,31 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
   <h2>Status</h2>
   <div class="grid">
     <div><div class="k">Chamber</div><div class="v" id="chamber">&ndash;</div></div>
+    <div><div class="k">Setpoint</div><div class="v" id="setpoint">&ndash;</div></div>
     <div><div class="k">State</div><div class="v" id="state">&ndash;</div></div>
     <div><div class="k">Mode</div><div class="v" id="mode">&ndash;</div></div>
-    <div><div class="k">Setpoint</div><div class="v" id="setpoint">&ndash;</div></div>
     <div><div class="k">Material</div><div class="v" id="material">&ndash;</div></div>
     <div><div class="k">Job</div><div class="v" id="job">&ndash;</div></div>
     <div><div class="k">Louvre</div><div class="v" id="louvre">&ndash;</div><div class="bar"><i id="louvrebar"></i></div></div>
     <div><div class="k">Fan</div><div class="v" id="fan">&ndash;</div><div class="bar"><i id="fanbar"></i></div></div>
+    <div><div class="k">Elapsed</div><div class="v" id="elapsed">&ndash;</div></div>
+    <div><div class="k">Remaining</div><div class="v" id="remaining">&ndash;</div></div>
     <div><div class="k">CYD link</div><div class="v" id="link">&ndash;</div></div>
     <div><div class="k">Emergency</div><div class="v" id="emg">&ndash;</div></div>
   </div>
   <div class="note" id="offline" style="display:none">Board unreachable &mdash; retrying every 2&nbsp;s.</div>
+</div>
+
+<div class="card">
+  <h2>History</h2>
+  <div class="lg">
+    <span><i style="background:#e6eaf0"></i>chamber &deg;C</span>
+    <span><i style="background:#ff6b6b"></i>setpoint &deg;C</span>
+    <span><i style="background:#4caf7d"></i>louvre %</span>
+    <span><i style="background:#5aa9e6"></i>fan %</span>
+  </div>
+  <canvas id="histplot" style="height:240px;width:100%;background:#0e1116;border:1px solid var(--line);border-radius:6px"></canvas>
+  <div class="note" id="histmsg">Waiting for samples&hellip;</div>
 </div>
 
 <div class="card">
@@ -291,6 +305,13 @@ var keyJustSaved = false;
 // Latest status document, so a local UI action (opening the confirm dialog) can
 // repaint the modal without waiting for the next poll.
 var lastStatus = null;
+// History buffers for the status graph. Each entry is one poll (2 s).
+var HIST_MAX = 60;
+var histCh = [];
+var histLouvre = [];
+var histFan = [];
+var histSetpoint = [];
+var histMs = [];
 // True while the client-side confirmation dialog is open. Purely a view state:
 // the board knows nothing about it until Start is pressed.
 var calConfirm = false;
@@ -753,6 +774,150 @@ function renderCal(s) {
   if (c.active || c.hasResult || c.aborted) { drawTrace(s); }
 }
 
+function drawHist() {
+  var cv = $('histplot');
+  if (!cv) { return; }
+  var p = plotSize(cv);
+  if (!p) { return; }
+  var ctx = p.ctx, w = p.w, h = p.h;
+  ctx.clearRect(0, 0, w, h);
+  if (histCh.length < 2) {
+    $('histmsg').style.display = '';
+    $('histmsg').textContent = 'Waiting for samples\u2026';
+    return;
+  }
+  $('histmsg').style.display = 'none';
+  var padL = 34, padR = 40, padT = 8, padB = 18;
+  var n = histCh.length;
+
+  // Left Y-axis: 0-100% for louvre and fan
+  var yMaxL = 100, yMinL = 0;
+  var stepL = 20;
+
+  // Right Y-axis: dynamic range based on chamber data
+  var chMin = Infinity, chMax = -Infinity;
+  for (var i = 0; i < n; i++) {
+    if (histCh[i] < chMin) { chMin = histCh[i]; }
+    if (histCh[i] > chMax) { chMax = histCh[i]; }
+    if (histSetpoint[i] !== null) {
+      if (histSetpoint[i] < chMin) { chMin = histSetpoint[i]; }
+      if (histSetpoint[i] > chMax) { chMax = histSetpoint[i]; }
+    }
+  }
+  // Add 10% padding, round to nice numbers
+  var chRange = chMax - chMin;
+  if (chRange < 1) { chRange = 5; }
+  var pad = chRange * 0.15;
+  chMin = Math.floor((chMin - pad) / 5) * 5;
+  chMax = Math.ceil((chMax + pad) / 5) * 5;
+  if (chMin < 0) { chMin = 0; }
+  if (chMax - chMin < 5) { chMax = chMin + 5; }
+  var yMaxR = chMax, yMinR = chMin;
+  var stepR = (yMaxR - yMinR) <= 20 ? 5 : 10;
+
+  // Grid lines (left axis)
+  ctx.strokeStyle = '#2a313d';
+  ctx.lineWidth = 1;
+  ctx.font = '9px system-ui,sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#8b97a8';
+  for (var v = yMinL; v <= yMaxL; v += stepL) {
+    var y = h - padB - ((v - yMinL) / (yMaxL - yMinL)) * (h - padT - padB);
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(w - padR, y);
+    ctx.stroke();
+    ctx.fillText(v, padL - 4, y);
+  }
+
+  // Right axis line
+  ctx.strokeStyle = '#8b97a8';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(w - padR, padT);
+  ctx.lineTo(w - padR, h - padB);
+  ctx.stroke();
+
+  // Right axis labels
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#e6eaf0';
+  ctx.font = '10px system-ui,sans-serif';
+  for (var v = yMinR; v <= yMaxR; v += stepR) {
+    var y = h - padB - ((v - yMinR) / (yMaxR - yMinR)) * (h - padT - padB);
+    ctx.fillText(v + '\u00b0C', w - padR + 4, y);
+  }
+
+  // X axis with time labels
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#8b97a8';
+  var now = Date.now();
+  var spanMs = now - histMs[0];
+  var spanSec = Math.max(1, spanMs / 1000);
+  var numLabels = Math.min(5, n);
+  for (var li = 0; li < numLabels; li++) {
+    var idx = Math.round(li * (n - 1) / (numLabels - 1));
+    var x = xOf(idx);
+    var ago = Math.round((now - histMs[idx]) / 1000);
+    var label = ago === 0 ? 'now' : (ago < 60 ? '-' + ago + 's' : '-' + Math.floor(ago / 60) + 'm');
+    ctx.fillText(label, x, h - padB + 4);
+  }
+
+  function xOf(i) { return padL + (i / (n - 1)) * (w - padL - padR); }
+  function yOfL(v) { return h - padB - ((v - yMinL) / (yMaxL - yMinL)) * (h - padT - padB); }
+  function yOfR(v) { return h - padB - ((v - yMinR) / (yMaxR - yMinR)) * (h - padT - padB); }
+
+  // Draw chamber (right axis)
+  ctx.strokeStyle = '#e6eaf0';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (var i = 0; i < n; i++) {
+    var x = xOf(i);
+    var y = yOfR(histCh[i]);
+    if (i === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
+  }
+  ctx.stroke();
+
+  // Draw setpoint (right axis, dashed)
+  ctx.strokeStyle = '#ff6b6b';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  var spStarted = false;
+  for (var i = 0; i < n; i++) {
+    if (histSetpoint[i] === null) { spStarted = false; continue; }
+    var x = xOf(i);
+    var y = yOfR(histSetpoint[i]);
+    if (!spStarted) { ctx.moveTo(x, y); spStarted = true; }
+    else { ctx.lineTo(x, y); }
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Draw louvre (left axis)
+  ctx.strokeStyle = '#4caf7d';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (var i = 0; i < n; i++) {
+    var x = xOf(i);
+    var y = yOfL(histLouvre[i]);
+    if (i === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
+  }
+  ctx.stroke();
+
+  // Draw fan (left axis)
+  ctx.strokeStyle = '#5aa9e6';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (var i = 0; i < n; i++) {
+    var x = xOf(i);
+    var y = yOfL(histFan[i]);
+    if (i === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
+  }
+  ctx.stroke();
+}
+
 function render(s) {
   lastStatus = s;
   $('offline').style.display = 'none';
@@ -765,6 +930,8 @@ function render(s) {
   $('setpoint').textContent = s.setpoint < 0 ? '\u2013' : s.setpoint + ' \u00b0C';
   $('material').textContent = MATERIALS[s.material] || '?';
   $('job').textContent = s.job ? 'printing' : 'idle';
+  $('elapsed').textContent = s.elapsed || '\u2013';
+  $('remaining').textContent = s.remaining || '\u2013';
   $('louvre').textContent = s.louvre + '%';
   $('fan').textContent = s.fan + '%' + (s.fanActive ? ' (on)' : '');
   $('louvrebar').style.width = pct(s.louvre) + '%';
@@ -840,6 +1007,19 @@ function render(s) {
   if (document.activeElement !== $('fanres')) { $('fanres').value = s.manualFan; $('fanrev').textContent = s.manualFan; }
 
   renderCal(s);
+
+  // --- Status history graph ---
+  if (s.chamberValid) {
+    histCh.push(s.chamber / 10.0);
+    histLouvre.push(s.louvre);
+    histFan.push(s.fan);
+    histSetpoint.push(s.setpoint >= 0 ? s.setpoint : null);
+    histMs.push(Date.now());
+    if (histCh.length > HIST_MAX) {
+      histCh.shift(); histLouvre.shift(); histFan.shift(); histSetpoint.shift(); histMs.shift();
+    }
+  }
+  drawHist();
 }
 
 function fillPid(p) {

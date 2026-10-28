@@ -216,6 +216,8 @@ static EnclosureUi::Status provideEnclosureUiStatus()
   s.manualLouvrePct = tempRegulation.manualLouvrePercent();
   s.manualFanPct = tempRegulation.manualFanPercent();
   s.jobActive = tempRegulation.jobIsActive();
+  s.elapsed = haveGood ? lastGood.elapsed : "";
+  s.remaining = haveGood ? lastGood.remaining : "";
   s.material = tempRegulation.activeMaterial();
   s.setpointC = (int8_t)tempRegulation.activeSetpoint();
   s.emergencyActive = tempRegulation.isEmergencyActive();

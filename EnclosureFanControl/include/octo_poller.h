@@ -11,6 +11,8 @@ struct OctoSnapshot
     bool printing = false;
     bool paused = false;
     String filament;
+    String elapsed;
+    String remaining;
     double toolActual = 0;
     double bedActual = 0;
     double chamberActual = 0;

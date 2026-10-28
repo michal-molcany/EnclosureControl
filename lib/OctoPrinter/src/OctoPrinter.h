@@ -135,6 +135,7 @@ public:
 
   // give job related information
   String remainingFormatted();
+  String elapsedFormatted();
   String fileName();
   String Status();
   double progress();

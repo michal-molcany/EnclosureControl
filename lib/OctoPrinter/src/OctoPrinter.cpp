@@ -258,6 +258,11 @@ String OctoPrinter::remainingFormatted()
   return _job._remaining.formatted;
 }
 
+String OctoPrinter::elapsedFormatted()
+{
+  return _job._elapsed.formatted;
+}
+
 String OctoPrinter::fileName()
 {
   return _job._fileName;

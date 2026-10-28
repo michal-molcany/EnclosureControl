@@ -90,6 +90,8 @@ namespace EnclosureUi
         uint8_t manualFanPct = 0;
         bool jobActive = false;
         uint8_t material = ENC_MATERIAL_UNKNOWN;
+        String elapsed;
+        String remaining;
         // Setpoint in force, in whole C. Negative when the regulator has not
         // applied one yet (no valid data since boot).
         int8_t setpointC = -1;
