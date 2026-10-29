@@ -84,6 +84,7 @@ private:
     bool usingRemoteSetpoint = false;
     int lastAppliedSetpoint = -1;
     uint8_t lastLouvrePct = 0;
+    uint8_t louvreRampTarget = 255;
 
     // -----------------------------------------------------------------------
     // PID calibration (the web UI's Calibrate button).

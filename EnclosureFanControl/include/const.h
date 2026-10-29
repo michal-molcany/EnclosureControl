@@ -20,6 +20,9 @@
 #define SERVO_ON_ANGLE 120
 // Minimum time between physical servo moves (replaces blocking delay).
 #define SERVO_MIN_MOVE_INTERVAL_MS 500
+// Louvre ramp: maximum percentage point change per poll (2 s interval).
+// Lower = slower smoother motion; higher = faster but may jerk.
+#define LOUVRE_RAMP_PCT 5
 
 // Fan Control (PWM)
 // IMPORTANT: LEDC channel/timer reservation (Arduino maps chan->timer fixed):

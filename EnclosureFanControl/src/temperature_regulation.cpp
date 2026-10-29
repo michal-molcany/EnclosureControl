@@ -1140,13 +1140,18 @@ void TemperatureRegulation::setLouvrePercent(uint8_t percent)
 {
     if (percent > 100)
         percent = 100;
-    if (lastLouvrePct != percent)
-    {
-        if (louver)
-            louver->setPercent(percent);
-        lastLouvrePct = percent;
-        louvreOpen = percent > 0;
+    // Ramp toward target by at most LOUVRE_RAMP_PCT per poll for smooth motion.
+    if (louvreRampTarget == 255) {
+        louvreRampTarget = lastLouvrePct;
     }
+    int8_t delta = (int8_t)percent - (int8_t)louvreRampTarget;
+    if (delta > LOUVRE_RAMP_PCT) delta = LOUVRE_RAMP_PCT;
+    if (delta < -LOUVRE_RAMP_PCT) delta = -LOUVRE_RAMP_PCT;
+    louvreRampTarget += delta;
+    if (louver)
+        louver->setPercent((uint8_t)louvreRampTarget);
+    lastLouvrePct = louvreRampTarget;
+    louvreOpen = louvreRampTarget > 0;
 }
 
 void TemperatureRegulation::setFanPercent(uint8_t percent)
