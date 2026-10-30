@@ -100,6 +100,61 @@ static const char *PID_NS = "enclosure";
 static const char *PID_KEY_VER = "pidver";
 static const uint8_t PID_VERSION = 1;
 
+// Material temperature targets NVS storage.
+static Preferences matPrefs;
+static const char *MAT_NS = "matprof";
+static const char *MAT_KEY_VER = "matver";
+static const uint8_t MAT_VERSION = 1;
+
+static void matWrite()
+{
+    if (!matPrefs.begin(MAT_NS, false))
+    {
+        Serial.println("[MAT] NVS open for WRITE failed");
+        return;
+    }
+    matPrefs.putInt("pla", tempRegulation.materialPlaTarget());
+    matPrefs.putInt("petg", tempRegulation.materialPetgTarget());
+    matPrefs.putInt("flex", tempRegulation.materialFlexTarget());
+    matPrefs.putInt("ht", tempRegulation.materialHtTarget());
+    matPrefs.putUChar(MAT_KEY_VER, MAT_VERSION);
+    matPrefs.end();
+    Serial.println("[MAT] material targets saved to NVS");
+}
+
+static void matLoadAtBoot()
+{
+    if (matPrefs.begin(MAT_NS, true))
+    {
+        if (matPrefs.getUChar(MAT_KEY_VER, 0) == MAT_VERSION)
+        {
+            int pla = matPrefs.getInt("pla", 30);
+            int petg = matPrefs.getInt("petg", 40);
+            int flex = matPrefs.getInt("flex", 35);
+            int ht = matPrefs.getInt("ht", 50);
+            tempRegulation.setMaterialTargets(pla, petg, flex, ht);
+            Serial.printf("[MAT] restored from NVS: pla=%d petg=%d flex=%d ht=%d\n", pla, petg, flex, ht);
+        }
+        else
+        {
+            Serial.println("[MAT] NVS version mismatch, using defaults");
+        }
+        matPrefs.end();
+    }
+    else
+    {
+        Serial.println("[MAT] NVS unavailable, using defaults");
+    }
+}
+
+static bool applyMaterialTargets(int pla, int petg, int flex, int ht, String &reason)
+{
+    tempRegulation.setMaterialTargets(pla, petg, flex, ht);
+    matWrite();
+    Serial.printf("[MAT] updated: pla=%d petg=%d flex=%d ht=%d\n", pla, petg, flex, ht);
+    return true;
+}
+
 static void pidReport(const char *what)
 {
   const PidGains g = tempRegulation.gains();
@@ -216,6 +271,10 @@ static EnclosureUi::Status provideEnclosureUiStatus()
   s.manualLouvrePct = tempRegulation.manualLouvrePercent();
   s.manualFanPct = tempRegulation.manualFanPercent();
   s.jobActive = tempRegulation.jobIsActive();
+  s.matPlaTarget = tempRegulation.materialPlaTarget();
+  s.matPetgTarget = tempRegulation.materialPetgTarget();
+  s.matFlexTarget = tempRegulation.materialFlexTarget();
+  s.matHtTarget = tempRegulation.materialHtTarget();
   s.elapsed = haveGood ? lastGood.elapsed : "";
   s.remaining = haveGood ? lastGood.remaining : "";
   s.material = tempRegulation.activeMaterial();
@@ -243,6 +302,9 @@ static EnclosureUi::Status provideEnclosureUiStatus()
   s.calibration.phase = (uint8_t)cal.phase;
   s.calibration.elapsedMs = cal.elapsedMs;
   s.calibration.cycles = cal.cycles;
+s.calibration.cyclesExpected = cal.phasesExpected;
+s.calibration.bedRefreshes = cal.bedRefreshes;
+s.calibration.bedRefreshNextMs = cal.bedRefreshNextMs;
   s.calibration.ku = cal.ku;
   s.calibration.pu = cal.pu;
   s.calibration.amplitude = cal.amplitude;
@@ -596,6 +658,7 @@ void setup()
   // begin() leaves the PID on the compiled-in defaults, so loading later would
   // let a boot with no valid OctoPrint data run briefly on the wrong tuning.
   pidLoadAtBoot();
+  matLoadAtBoot();
 
   espnowLinkBegin(ENC_PEER_MAC);
 
@@ -634,6 +697,7 @@ void setup()
   ui.manual = applyEnclosureUiManual;
   ui.setEndpoint = applyEnclosureUiEndpoint;
   ui.clearEndpoint = resetEnclosureUiEndpoint;
+  ui.setMaterial = applyMaterialTargets;
   EnclosureUi::begin(ui);
   // Deliberately NO MDNS.addService() here. The host name is already registered
   // by ArduinoOTA.begin(), which is all a browser needs to resolve
@@ -687,6 +751,7 @@ void loop()
   // 1Hz, so a 300ms boost could not otherwise be ended on time and the fan
   // would sit at full power for a second on every start. No-op when idle.
   tempRegulation.serviceFan();
+tempRegulation.serviceLouvre();
 
   // Show chamber temperature + state on the onboard OLED (~1s, non-blocking).
   // While unpaired, show the MAC pairing screen instead (no serial needed).

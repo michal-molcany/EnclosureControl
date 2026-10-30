@@ -17,15 +17,17 @@ CYD <-> C3 packet layout, timing and fallback rules are in
 
 ## Features
 
-- PID enclosure regulation with material profiles (PLA/TPU/ASA/ABS) and
+- PID enclosure regulation with material profiles (PLA/PETG/FLEX/HT) and
   emergency cooling
-- Servo louvre with a minimum move interval, plus a power-on self-test
+- Servo louvre with a minimum move interval, a **2 s full-travel ramp** (also
+  used by the power-on self-test), and an instant close for emergency/power-off
 - ESP-NOW telemetry to the CYD and inbound CYD control commands
 - WiFi captive portal via WiFiManager for first-time network setup
 - **OTA firmware updates over WiFi** (HTTP on port 8080, plus ArduinoOTA), with
   progress shown on the OLED
-- **Web UI on port 8082** — live status, PID tuning and manual fan/louvre control
-  from any browser on the network
+- **Web UI on port 8082** — three tabs: **Status** (live values plus the history
+  graph), **Settings** (material profiles, PID gains, OctoPrint address/key) and
+  **Manual control** — from any browser on the network
 - **Relay-feedback PID auto-calibration** — preheat the bed, measure the
   chamber's ultimate gain and period, and get Ziegler-Nichols gains from the web
   UI instead of guessing
@@ -71,7 +73,13 @@ What it does, in order:
 1. Asks for confirmation, then preheats the bed to **90 °C** through OctoPrint
    and sends **M25** to the printer, which pauses it. The pause is what keeps a
    firmware-side heating timeout from switching the bed off again a few
-   minutes into the run - the same timeout that would otherwise abort it.
+   minutes into the run - the same timeout that would otherwise abort it. As a
+   second, independent defence the board re-asserts `M140 S90` every **25
+   minutes** (`CAL_BED_REFRESH_MS`). Re-asserting the target resets Marlin's
+   30-minute `HEATER_IDLE_TIMEOUT` **without dropping the heater**, so a run
+   longer than the timeout survives even on a printer that ignores `M25`. The
+   progress dialog shows how many re-asserts have happened and when the next
+   one is due, so the keep-alive is visible rather than silent.
 2. Waits for the bed to reach 88 °C (5-minute timeout), then lets it settle
    briefly.
 3. Drives the louvre and fan between **no cooling** and **full cooling** (output
@@ -79,7 +87,11 @@ What it does, in order:
    setpoint.
 4. Measures the resulting oscillation: the ultimate gain `Ku = 4d / (pi*a)` and
    the period `Tu`, then computes `kp = 0.6*Ku`, `ki = 1.2*Ku/Tu`,
-   `kd = 0.075*Ku*Tu`.
+   `kd = 0.075*Ku*Tu`. The progress dialog shows **relay phases** as
+   `current / ~estimate`: the run ends when enough consistent oscillations have
+   been collected, so the total is an estimate (`Autotuner::expectedPhaseCount()`,
+   never fewer than 6 and usually at most about 12), not a fixed count. The same
+   run also counts the bed re-asserts described in step 1.
 5. Switches the bed off, sends **M84** - which ends the pause and turns the
    heaters off, so the printer is left ready for the next print - and shows the
    old and new gains, `Ku`, `Tu`, the measured amplitude, and any quality
@@ -366,9 +378,10 @@ portal will not be on the network to serve it.
 pio run -e esp32-c3-devkitm-1
 ```
 
-The firmware is roughly 975 KB and the default partition table provides two
+The firmware is roughly 1129 KB and the default partition table provides two
 1.25 MB app slots, so images up to ~1.25 MB can be sent OTA. The current build
-sits at 74.4% of its slot, leaving about 335 KB of headroom.
+sits at 88.2% of its slot, leaving about 150 KB of headroom — the page lives in
+flash (`send_P`), but there is not much room left for new client-side code.
 
 ## Uploading from VS Code
 

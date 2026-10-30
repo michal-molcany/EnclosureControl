@@ -30,6 +30,7 @@ PID_SAVE_PATH = "/api/pid/save"
 PID_DEFAULTS_PATH = "/api/pid/defaults"
 CALIBRATE_PATH = "/api/calibrate"
 MANUAL_PATH = "/api/manual"
+MATERIALS_PATH = "/api/materials"
 
 # The one route covers the whole lifecycle. Keeping the list here means an
 # accidental typo is refused before a request is sent, instead of coming back as
@@ -195,6 +196,17 @@ class C3Client:
 
     def get_status(self):
         return self._request(STATUS_PATH)
+
+    def get_materials(self):
+        # Returns {"pla": N, "petg": N, "flex": N, "ht": N}. The board also
+        # carries the same values in /api/status (matPla...), but this route is
+        # the dedicated, stable contract for profile editing.
+        return self._request(MATERIALS_PATH)
+
+    def set_materials(self, pla, petg, flex, ht):
+        return self._request(MATERIALS_PATH, {
+            "pla": int(pla), "petg": int(petg),
+            "flex": int(flex), "ht": int(ht)})
 
     # -- writes. Each returns the FULL status, so a write doubles as a refresh.
 

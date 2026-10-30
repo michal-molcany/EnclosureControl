@@ -17,8 +17,10 @@ public:
     void begin();
 
     // Move servo to target angle if it differs from current.
-    // Non-blocking: rate-limited, no delay().
-    void setAngle(int targetAngle);
+    // Non-blocking: rate-limited, no delay(). Returns true when the move was
+    // actually applied (false when rate-limited or already there), so callers
+    // that ramp in steps do not lose a step.
+    bool setAngle(int targetAngle);
 
     // Proportional 0-100% opening between SERVO_OFF_ANGLE and SERVO_ON_ANGLE.
     // Used by remote manual control.

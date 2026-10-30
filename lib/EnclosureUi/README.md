@@ -1,7 +1,8 @@
 # EnclosureUi
 
-A browser page served by the EnclosureFanControl (C3): live status, PID gain
-tuning, and manual fan/louvre control.
+A browser page served by the EnclosureFanControl (C3): live status and history
+graph, material/PID/OctoPrint settings, and manual fan/louvre control, in three
+tabs so the settings no longer share a column with the live readings.
 
 Open **`http://enclosure-fan-control.local:8082/`** (or the board's IP). The
 browser asks for credentials: username **`Enclosure`**, password
@@ -67,12 +68,26 @@ with `send_P()` (streams from flash) rather than `send()` (builds a `String`).
 | `/api/calibrate` | POST | `{action: start / cancel / apply / discard}` — 409 with the reason when refused |
 | `/api/cal/trace` | GET | the current/last calibration run's temperature history (see below) |
 | `/api/manual` | POST | `{mode, louvre, fan}` |
+| `/api/materials` | GET | `{pla, petg, flex, ht}` — the chamber setpoint per material group |
+| `/api/materials` | POST | `{pla, petg, flex, ht}` — persist to NVS; **answers `{ok:true}`, not the status** |
 | `/api/octoprint` | POST | `{ip, port[, key]}` — **probes first**, stores only on success |
 | `/api/octoprint/defaults` | POST | drop **both** stored overrides, return to the compiled-in ones |
 
 Every response — including the ones to a write — is the same document
 `/api/status` returns, so the page can never end up showing a value the board
 does not have.
+
+**`/api/materials` is the one exception.** Its `POST` answers `{"ok":true}` and
+nothing else; the values themselves are in the following `/api/status`
+(`matPla` … `matHt`). A client that keeps a status cache must re-read
+`/api/status` after a materials write instead of treating the write's body as a
+status document — the OctoPrint plugin does exactly that (`on_setmaterials`).
+Rejecting an out-of-range value answers `400` with a plain-text reason, and both
+the range (`20`–`80`) and the handler are shared with the page's own card.
+
+Material groups are four, not eight: `PLA`, `PETG`, `FLEX` (TPU/TPA) and `HT`
+(ASA, ABS, Nylon, PC and everything unrecognised). The CYD and OctoPrint send
+the `ENC_MATERIAL_*` index; the board maps it in `TemperatureRegulation::materialTarget()`.
 
 ### `Content-Type: application/json` is required on POSTs with a body
 

@@ -48,11 +48,16 @@ namespace EnclosureUi
 :root{--bg:#12151a;--card:#1b2029;--line:#2a313d;--fg:#e6eaf0;--dim:#8b97a8;--ok:#4caf7d;--warn:#e0a33e;--bad:#e05c5c;--acc:#5aa9e6}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,"Segoe UI",Roboto,sans-serif}
-.wrap{max-width:840px;margin:0 auto;padding:16px}
-header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.tabs{display:flex;gap:4px;margin-bottom:12px;grid-column:1/-1;align-items:center}
+.wrap{max-width:900px;margin:0 auto;padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:12px}
+.tab{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px 16px;cursor:pointer;color:var(--dim);font:inherit}
+.tab.active{background:var(--acc);border-color:var(--acc);color:#06121c;font-weight:600}
+.tab-content{display:none}
+.tab-content.active{display:block}
+header{grid-column:1/-1;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}
 h1{font-size:18px;margin:0}
 .meta{color:var(--dim);font-size:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:0}
 .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 10px}
 .subhead{display:flex;align-items:center;gap:8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:16px 0 6px;padding-top:12px;border-top:1px solid var(--line)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px 14px}
@@ -113,11 +118,14 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
 <body>
 <div class="wrap">
 
-<header>
-  <h1>Enclosure Fan Control</h1>
-  <span class="meta" id="meta">connecting&hellip;</span>
-</header>
+<nav class="tabs">
+  <button class="tab active" data-tab="status">Status</button>
+  <button class="tab" data-tab="settings">Settings</button>
+  <button class="tab" data-tab="manual">Manual control</button>
+  <span class="meta" id="meta" style="margin-left:auto">connecting&hellip;</span>
+</nav>
 
+<div class="tab-content active" id="tab-status">
 <div class="card">
   <h2>Status</h2>
   <div class="grid">
@@ -137,7 +145,7 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
   <div class="note" id="offline" style="display:none">Board unreachable &mdash; retrying every 2&nbsp;s.</div>
 </div>
 
-<div class="card">
+<div class="card wide">
   <h2>History</h2>
   <div class="lg">
     <span><i style="background:#e6eaf0"></i>chamber &deg;C</span>
@@ -147,6 +155,20 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
   </div>
   <canvas id="histplot" style="height:240px;width:100%;background:#0e1116;border:1px solid var(--line);border-radius:6px"></canvas>
   <div class="note" id="histmsg">Waiting for samples&hellip;</div>
+</div>
+
+</div>
+<div class="tab-content" id="tab-settings">
+<div class="card">
+  <h2>Material profiles</h2>
+  <div class="row">
+    <div><div class="k">PLA</div><input id="matpla" type="number" min="20" max="80" step="1"></div>
+    <div><div class="k">PETG</div><input id="matpetg" type="number" min="20" max="80" step="1"></div>
+    <div><div class="k">FLEX (TPU/TPA)</div><input id="matflex" type="number" min="20" max="80" step="1"></div>
+    <div><div class="k">HT (ASA/ABS/Nylon)</div><input id="matht" type="number" min="20" max="80" step="1"></div>
+  </div>
+  <div class="btns"><button class="primary" id="matsave">Save</button></div>
+  <div class="msg" id="matmsg"></div>
 </div>
 
 <div class="card">
@@ -194,6 +216,8 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
   <div class="msg" id="octomsg"></div>
 </div>
 
+</div>
+<div class="tab-content" id="tab-manual">
 <div class="card">
   <h2>Manual control</h2>
   <label class="chk"><input type="checkbox" id="manualmode"> Take over &mdash; fan and louvre follow the sliders</label>
@@ -209,6 +233,7 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
   <div class="msg" id="manmsg"></div>
 </div>
 
+</div>
 </div>
 
 <div class="modal hide" id="calconfirm">
@@ -240,7 +265,9 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
       <div class="k">Bed</div><div class="v" id="calpbed">&ndash;</div>
       <div class="k">Elapsed (total)</div><div class="v" id="calptime">&ndash;</div>
       <div class="k">Relay phases</div><div class="v" id="calpcycles">&ndash;</div>
+      <div class="k">Bed re-asserts</div><div class="v" id="calpbedkeep">&ndash;</div>
     </div>
+    <div class="note">The run ends when the oscillation is stable and measurable: at least 6 phases, up to 12 if it has not settled. The total is an estimate and can move.</div>
     <div id="calchartslot"><div class="chart" id="calchart">
       <div class="lg">
         <span><i class="bed"></i>bed</span>
@@ -305,6 +332,12 @@ var keyJustSaved = false;
 // Latest status document, so a local UI action (opening the confirm dialog) can
 // repaint the modal without waiting for the next poll.
 var lastStatus = null;
+var HIST_MAX = 60;
+var histCh = [];
+var histLouvre = [];
+var histFan = [];
+var histSetpoint = [];
+var histMs = [];
 // History buffers for the status graph. Each entry is one poll (2 s).
 var HIST_MAX = 60;
 var histCh = [];
@@ -717,7 +750,10 @@ function renderCal(s) {
     $('calpchamber').textContent = s.chamberValid ? (s.chamber / 10).toFixed(1) + ' \u00b0C' : 'no data';
     $('calpbed').textContent = s.bedValid ? (s.bed / 10).toFixed(1) + ' \u00b0C (target ' + fmt1(c.bedTarget) + ' \u00b0C)' : 'no data';
     $('calptime').textContent = formatElapsed(c.elapsed);
-    $('calpcycles').textContent = c.cycles || 0;
+    $('calpcycles').textContent = (c.cycles || 0) + ' / ~' + (c.cyclesExpected || c.cycles || 6);
+    var _bk = (c.bedRefreshes || 0);
+    if (c.bedRefreshNextMs) { _bk += ' (next in ' + Math.ceil(c.bedRefreshNextMs / 60000) + 'm)'; }
+    $('calpbedkeep').textContent = _bk;
     $('calpcancel').classList.remove('hide');
     $('calpdismiss').classList.add('hide');
     $('calmsg').textContent = 'Calibration running \u2014 manual and CYD commands are ignored.';
@@ -729,7 +765,10 @@ function renderCal(s) {
     $('calpchamber').textContent = s.chamberValid ? (s.chamber / 10).toFixed(1) + ' \u00b0C' : 'no data';
     $('calpbed').textContent = s.bedValid ? (s.bed / 10).toFixed(1) + ' \u00b0C' : 'no data';
     $('calptime').textContent = formatElapsed(c.elapsed);
-    $('calpcycles').textContent = c.cycles || 0;
+    $('calpcycles').textContent = (c.cycles || 0) + ' / ~' + (c.cyclesExpected || c.cycles || 6);
+    var _bk = (c.bedRefreshes || 0);
+    if (c.bedRefreshNextMs) { _bk += ' (next in ' + Math.ceil(c.bedRefreshNextMs / 60000) + 'm)'; }
+    $('calpbedkeep').textContent = _bk;
     $('calpwarn').textContent = c.error || 'The calibration did not finish.';
     $('calpwarn').classList.remove('hide');
     $('calpcancel').classList.add('hide');
@@ -781,20 +820,14 @@ function drawHist() {
   if (!p) { return; }
   var ctx = p.ctx, w = p.w, h = p.h;
   ctx.clearRect(0, 0, w, h);
-  if (histCh.length < 2) {
+  var n = histCh.length;
+  if (n < 2) {
     $('histmsg').style.display = '';
     $('histmsg').textContent = 'Waiting for samples\u2026';
     return;
   }
   $('histmsg').style.display = 'none';
   var padL = 34, padR = 40, padT = 8, padB = 18;
-  var n = histCh.length;
-
-  // Left Y-axis: 0-100% for louvre and fan
-  var yMaxL = 100, yMinL = 0;
-  var stepL = 20;
-
-  // Right Y-axis: dynamic range based on chamber data
   var chMin = Infinity, chMax = -Infinity;
   for (var i = 0; i < n; i++) {
     if (histCh[i] < chMin) { chMin = histCh[i]; }
@@ -804,7 +837,6 @@ function drawHist() {
       if (histSetpoint[i] > chMax) { chMax = histSetpoint[i]; }
     }
   }
-  // Add 10% padding, round to nice numbers
   var chRange = chMax - chMin;
   if (chRange < 1) { chRange = 5; }
   var pad = chRange * 0.15;
@@ -814,8 +846,8 @@ function drawHist() {
   if (chMax - chMin < 5) { chMax = chMin + 5; }
   var yMaxR = chMax, yMinR = chMin;
   var stepR = (yMaxR - yMinR) <= 20 ? 5 : 10;
-
-  // Grid lines (left axis)
+  var yMaxL = 100, yMinL = 0;
+  var stepL = 20;
   ctx.strokeStyle = '#2a313d';
   ctx.lineWidth = 1;
   ctx.font = '9px system-ui,sans-serif';
@@ -830,16 +862,12 @@ function drawHist() {
     ctx.stroke();
     ctx.fillText(v, padL - 4, y);
   }
-
-  // Right axis line
   ctx.strokeStyle = '#8b97a8';
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(w - padR, padT);
   ctx.lineTo(w - padR, h - padB);
   ctx.stroke();
-
-  // Right axis labels
   ctx.textAlign = 'left';
   ctx.fillStyle = '#e6eaf0';
   ctx.font = '10px system-ui,sans-serif';
@@ -847,14 +875,11 @@ function drawHist() {
     var y = h - padB - ((v - yMinR) / (yMaxR - yMinR)) * (h - padT - padB);
     ctx.fillText(v + '\u00b0C', w - padR + 4, y);
   }
-
-  // X axis with time labels
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillStyle = '#8b97a8';
+  ctx.font = '9px system-ui,sans-serif';
   var now = Date.now();
-  var spanMs = now - histMs[0];
-  var spanSec = Math.max(1, spanMs / 1000);
   var numLabels = Math.min(5, n);
   for (var li = 0; li < numLabels; li++) {
     var idx = Math.round(li * (n - 1) / (numLabels - 1));
@@ -863,12 +888,9 @@ function drawHist() {
     var label = ago === 0 ? 'now' : (ago < 60 ? '-' + ago + 's' : '-' + Math.floor(ago / 60) + 'm');
     ctx.fillText(label, x, h - padB + 4);
   }
-
   function xOf(i) { return padL + (i / (n - 1)) * (w - padL - padR); }
   function yOfL(v) { return h - padB - ((v - yMinL) / (yMaxL - yMinL)) * (h - padT - padB); }
   function yOfR(v) { return h - padB - ((v - yMinR) / (yMaxR - yMinR)) * (h - padT - padB); }
-
-  // Draw chamber (right axis)
   ctx.strokeStyle = '#e6eaf0';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -878,8 +900,6 @@ function drawHist() {
     if (i === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
   }
   ctx.stroke();
-
-  // Draw setpoint (right axis, dashed)
   ctx.strokeStyle = '#ff6b6b';
   ctx.lineWidth = 1.5;
   ctx.setLineDash([4, 3]);
@@ -894,8 +914,6 @@ function drawHist() {
   }
   ctx.stroke();
   ctx.setLineDash([]);
-
-  // Draw louvre (left axis)
   ctx.strokeStyle = '#4caf7d';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -905,8 +923,6 @@ function drawHist() {
     if (i === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
   }
   ctx.stroke();
-
-  // Draw fan (left axis)
   ctx.strokeStyle = '#5aa9e6';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -938,6 +954,13 @@ function render(s) {
   $('fanbar').style.width = pct(s.fan) + '%';
   $('link').textContent = !s.peer ? 'no peer' : (s.remote ? 'live' : 'silent');
   $('emg').textContent = s.emergency ? 'ACTIVE' : 'no';
+
+  if (s.matPla !== undefined) { $('matpla').value = s.matPla; }
+  if (s.matPetg !== undefined) { $('matpetg').value = s.matPetg; }
+  if (s.matFlex !== undefined) { $('matflex').value = s.matFlex; }
+  if (s.matHt !== undefined) { $('matht').value = s.matHt; }
+
+
 
   var badge = $('savedbadge');
   if (s.pidSaved) { badge.textContent = 'saved'; badge.className = 'badge ok'; }
@@ -1234,6 +1257,31 @@ $('calrdiscard').onclick = function () {
     say($('calrmsg'), err.message, 'err');
   });
 };
+
+// Material save button
+$('matsave').onclick = function () {
+  post('api/materials', {
+    pla: parseInt($('matpla').value, 10),
+    petg: parseInt($('matpetg').value, 10),
+    flex: parseInt($('matflex').value, 10),
+    ht: parseInt($('matht').value, 10)
+  }).then(function () {
+    say($('matmsg'), 'Saved.', 'ok');
+    poll();
+  }).catch(function (err) {
+    say($('matmsg'), err.message, 'err');
+  });
+};
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(function(btn) {
+  btn.onclick = function() {
+    document.querySelectorAll('.tab').forEach(function(b) { b.classList.remove('active'); });
+    document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  };
+});
 
 poll();
 </script>

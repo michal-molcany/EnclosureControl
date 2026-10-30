@@ -279,6 +279,8 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
             # is validated again in the handler.
             calibrate=["action"],
             setmanual=["mode", "louvre", "fan"],
+            getmaterials=[],
+            setmaterials=["pla", "petg", "flex", "ht"],
         )
 
     def on_api_command(self, command, data):
@@ -301,6 +303,8 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
             "defaultpid": self.on_defaultpid,
             "calibrate": self.on_calibrate,
             "setmanual": self.on_setmanual,
+            "getmaterials": self.on_getmaterials,
+            "setmaterials": self.on_setmaterials,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -545,6 +549,44 @@ class EnclosureFanPlugin(octoprint.plugin.StartupPlugin,
                 "display to take control from OctoPrint.")
 
         return self._write(lambda c: c.set_manual(mode, louvre, fan))
+
+    def on_getmaterials(self, data, **kwargs):
+        client = self._client
+        if client is None:
+            raise CommandFailed("Plugin is not configured yet")
+        try:
+            return client.get_materials()
+        except C3Error as err:
+            raise CommandFailed(str(err))
+
+    def on_setmaterials(self, data, **kwargs):
+        data = data or {}
+        try:
+            pla = int(data.get("pla"))
+            petg = int(data.get("petg"))
+            flex = int(data.get("flex"))
+            ht = int(data.get("ht"))
+        except (TypeError, ValueError):
+            raise CommandFailed("pla, petg, flex and ht must be integers (20-80)")
+        if not (20 <= pla <= 80 and 20 <= petg <= 80 and 20 <= flex <= 80 and 20 <= ht <= 80):
+            raise CommandFailed("values must be 20-80")
+
+        # Deliberately NOT _write(). /api/materials answers a write with just
+        # {"ok": true}, not with the full status document the PID, manual and
+        # calibration routes return. Folding that little object into the cache
+        # would make apply() in the tab read every field as missing and blank
+        # the whole page until the next poll. Write, then refresh from
+        # /api/status so the cache always holds a real status document.
+        client = self._client
+        if client is None:
+            raise CommandFailed("Plugin is not configured yet")
+        try:
+            client.set_materials(pla, petg, flex, ht)
+            status = client.get_status()
+        except C3Error as err:
+            raise CommandFailed(str(err))
+        self._set_cache(True, status, None)
+        return {"ok": True, "status": status, "error": None}
 
     # ------------------------------------------------------------------ #
     # Assets and templates

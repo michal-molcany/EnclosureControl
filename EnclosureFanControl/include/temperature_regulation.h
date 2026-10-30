@@ -84,7 +84,14 @@ private:
     bool usingRemoteSetpoint = false;
     int lastAppliedSetpoint = -1;
     uint8_t lastLouvrePct = 0;
-    uint8_t louvreRampTarget = 255;
+    uint8_t louvreTarget = 255;     // desired final percent (255 = unset)
+    uint8_t louvreRamped = 0;       // current ramped position
+    unsigned long lastLouvreMoveMs = 0;
+    // Material temperature targets (configurable via NVS/web UI).
+    int matPlaTarget = 30;
+    int matPetgTarget = 40;
+    int matFlexTarget = 35;
+    int matHtTarget = 50;
 
     // -----------------------------------------------------------------------
     // PID calibration (the web UI's Calibrate button).
@@ -134,6 +141,10 @@ private:
     // Deadline for that grace period. 0 = no deadline (the M84 has not been
     // sent yet).
     unsigned long calPauseGraceUntilMs = 0;
+    // Deadline for the next bed-target re-assert during a run (heater timeout
+    // keep-alive). 0 = not armed.
+    unsigned long calBedRefreshMs = 0;
+    uint16_t calBedRefreshCount = 0;
     // Last nonzero cancellation action received from the CYD. The CYD repeats
     // its command every heartbeat; acting only on a CHANGE makes the cancel
     // one-shot without adding an acknowledgement to the protocol.
@@ -170,9 +181,9 @@ private:
     static bool isDataValid(const OctoSnapshot &s);
     static uint8_t classifyMaterial(const String &raw);
     static bool validRemoteMaterial(uint8_t material);
-    static int materialTarget(uint8_t material);
+    int materialTarget(uint8_t material);
     static bool louvreOnly(uint8_t material);
-    void setLouvrePercent(uint8_t percent);
+    void setLouvrePercent(uint8_t percent, bool immediate = false);
     void setFanPercent(uint8_t percent);
     // Immediate off, bypassing the duty floor, the break-away boost and
     // FAN_MIN_ON_MS. Used by the fail-safe paths (invalid OctoPrint data, leaving
@@ -212,6 +223,10 @@ public:
     // sub-second break-away boost - without this the fan holds full power for a
     // whole second on every start. Does nothing when no boost is in progress.
     void serviceFan();
+    // Advances the louvre toward its target at LOUVRE_RAMP_PCT per
+    // SERVO_MIN_MOVE_INTERVAL_MS, so a 0->100% move takes 2 s. Call every
+    // loop() iteration, like serviceFan().
+    void serviceLouvre();
 
     // Control functions
     void stopFan();
@@ -283,6 +298,14 @@ public:
     uint8_t louvrePercent() const; // 0-100
     bool remoteLinkAlive() const;
     bool jobIsActive() const { return jobWasActive; }
+    // Material temperature targets (configurable).
+    int materialPlaTarget() const { return matPlaTarget; }
+    int materialPetgTarget() const { return matPetgTarget; }
+    int materialFlexTarget() const { return matFlexTarget; }
+    int materialHtTarget() const { return matHtTarget; }
+    void setMaterialTargets(int pla, int petg, int flex, int ht) {
+        matPlaTarget = pla; matPetgTarget = petg; matFlexTarget = flex; matHtTarget = ht;
+    }
     // Bed actual from the last good OctoPrint snapshot. Used by the calibration
     // progress dialog and the preheat wait; meaningless until hasGoodData.
     double bedActual() const { return lastSnap.bedActual; }

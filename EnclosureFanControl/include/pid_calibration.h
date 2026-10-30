@@ -90,6 +90,9 @@ namespace PidCalibration
         bool aborted = false;
         uint32_t elapsedMs = 0;
         uint16_t cycles = 0;
+        uint16_t phasesExpected = 0;   // estimate, see Autotuner::expectedPhaseCount
+        uint16_t bedRefreshes = 0;     // heater-timeout keep-alive re-asserts
+        uint32_t bedRefreshNextMs = 0; // ms until the next re-assert, 0 if not armed
         float ku = 0.0f;
         float pu = 0.0f;
         float amplitude = 0.0f;
@@ -129,6 +132,9 @@ namespace PidCalibration
         float update(float errorC, uint32_t nowMs, bool &finished, Result &result);
 
         uint16_t phaseCount() const { return relay.phaseCount; }
+        // Estimated total relay phases before the run can finish: at least 6,
+        // up to (enoughDataPhase + 6) if the data has not settled. 0 while idle.
+        uint16_t expectedPhaseCount() const;
         uint16_t zeroCrossings() const { return freq.count; }
         bool hasEnoughData() const { return freq.hasEnough() && amp.hasEnough(); }
 

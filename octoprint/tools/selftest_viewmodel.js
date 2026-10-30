@@ -74,6 +74,7 @@ let status = {
     setpoint: 35, material: 0, state: 0, mode: 0, job: false, emergency: false,
     remote: true, louvre: 0, fan: 0, manualLouvre: 0, manualFan: 0,
     pidSaved: true,
+    matPla: 31, matPetg: 40, matFlex: 35, matHt: 50,
     pid: { kp: 50, ki: 0.466823, kd: 50,
            min: { kp: 0, ki: 0, kd: 0 }, max: { kp: 50, ki: 5, kd: 50 } },
     cal: { active: false, hasResult: false, aborted: false, phase: 0,
@@ -84,9 +85,17 @@ let status = {
 };
 
 const actions = [];
+let materialPayload = null;
 
 const OctoPrint = {
     simpleApiCommand(plugin, name, payload) {
+        if (name === "setmaterials") {
+            materialPayload = payload;
+            status.matPla = payload.pla;
+            status.matPetg = payload.petg;
+            status.matFlex = payload.flex;
+            status.matHt = payload.ht;
+        }
         if (name === "calibrate") {
             actions.push(payload.action);
             switch (payload.action) {
@@ -155,6 +164,8 @@ const Ctor = sandbox.OCTOPRINT_VIEWMODELS[0].construct;
 const view = new Ctor([{}, {}]);
 
 check("calibration is reported as supported", view.calSupported() === true);
+check("material profiles followed the board", view.matPla() === 31,
+      view.matPla());
 check("the PID fields followed the board", view.kp() === 50, view.kp());
 check("the form is not dirty after a refresh", view.pidDirty() === false);
 check("calibrate is enabled while idle", view.calStartDisabled() === false);
@@ -211,6 +222,23 @@ check("apply reached the board", actions[actions.length - 1] === "apply");
 check("the result is cleared after applying", view.calHasResult() === false);
 check("the PID inputs show the new gains", view.kp() === 12.5, view.kp());
 check("the PID inputs are editable again", view.pidControlsDisabled() === false);
+
+// Material profiles: edit, save, and the board's answer is applied.
+view.matPla(33);
+view.matPetg(41);
+view.matFlex(36);
+view.matHt(51);
+view.saveMaterials();
+check("the material save reached the board",
+      materialPayload !== null &&
+      materialPayload.pla === 33 && materialPayload.petg === 41 &&
+      materialPayload.flex === 36 && materialPayload.ht === 51,
+      JSON.stringify(materialPayload));
+check("the save is acknowledged in the tab",
+      view.materialMsg().length > 0, view.materialMsg());
+check("the inputs keep the saved values", view.matPla() === 33, view.matPla());
+check("the material inputs are editable again",
+      view.materialBusy() === false);
 
 console.log("");
 if (failures) {

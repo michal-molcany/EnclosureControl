@@ -129,6 +129,9 @@ void TemperatureRegulation::begin()
     fanBoostUntilMs = 0;
     fanStartedMs = 0;
     lastLouvrePct = 0;
+    louvreTarget = 0;
+    louvreRamped = 0;
+    lastLouvreMoveMs = 0;
     lastUpdate = millis();
     lastDemand = 0.0f;
     // Force the first snapshot to count as new. 0 cannot be a real updatedMs
@@ -670,6 +673,10 @@ bool TemperatureRegulation::startCalibration(String &reason)
     calPrinterPausedByUs = true;
     calPauseObserved = false;
     calPauseGraceUntilMs = 0;
+    // Heater-timeout keep-alive: re-assert the bed target before the printer's
+    // ~30 min idle timer can switch it off. Re-armed at the end of each refresh.
+    calBedRefreshMs = millis() + CAL_BED_REFRESH_MS;
+    calBedRefreshCount = 0;
 
     Serial.printf("[CAL] starting: bed %d C, setpoint %.1f C, relay %.0f-%.0f, noiseband %.2f C\n",
                   CAL_BED_TARGET_C, (double)CAL_SETPOINT_C, (double)CAL_RELAY_LOW,
@@ -737,6 +744,13 @@ PidCalibration::Info TemperatureRegulation::calibrationInfo() const
         info.elapsedMs = (uint32_t)(calFinishedMs - calStartedMs);
 
     info.cycles = calAutotuner.phaseCount();
+    info.phasesExpected = calAutotuner.expectedPhaseCount();
+    info.bedRefreshes = calBedRefreshCount;
+    info.bedRefreshNextMs = (calBedRefreshMs != 0)
+                                ? (uint32_t)((int32_t)(calBedRefreshMs - millis()) > 0
+                                              ? (calBedRefreshMs - millis())
+                                              : 0)
+                                : 0;
     info.ku = calResult.ku;
     info.pu = calResult.pu;
     info.amplitude = calResult.amplitude;
@@ -789,6 +803,19 @@ uint8_t TemperatureRegulation::calibrationErrorCode() const
 void TemperatureRegulation::updateCalibration(const OctoSnapshot &snap, bool haveData,
                                               unsigned long now)
 {
+    // Heater-timeout keep-alive: re-assert the bed target before the printer's
+    // ~30 min idle timer can switch it off mid-run. Skipped when a print starts
+    // (the printer owns the bed then) or when we have no fresh data.
+    if (haveData && calBedRefreshMs != 0 && (int32_t)(now - calBedRefreshMs) >= 0 &&
+        !snap.printing)
+    {
+        octoPollerRequestBed(CAL_BED_TARGET_C);
+        Serial.printf("[CAL] re-asserting bed %d C (heater timeout keep-alive)\n",
+                      CAL_BED_TARGET_C);
+        calBedRefreshCount++;
+        calBedRefreshMs = now + CAL_BED_REFRESH_MS;
+    }
+
     if (!haveData)
     {
         finishCalibration(false, "lost valid OctoPrint data");
@@ -956,6 +983,7 @@ void TemperatureRegulation::finishCalibration(bool success, const char *reason,
                                               bool printerBusy)
 {
     const bool wasRunning = calibrationRunning();
+    calBedRefreshMs = 0;
 
     // The bed goes off on success AND on every abort. Leaving a 90 C bed behind
     // after a failed experiment is the one outcome that must never happen.
@@ -1030,7 +1058,7 @@ void TemperatureRegulation::applyRawDemand(float demand)
     calOutput = (uint8_t)lroundf(demand);
 
     const uint8_t louvre = demand >= 100.0f ? 100 : (uint8_t)lroundf(demand);
-    setLouvrePercent(louvre);
+    setLouvrePercent(louvre, true);
 
     if (demand > 100.0f)
     {
@@ -1101,17 +1129,18 @@ int TemperatureRegulation::materialTarget(uint8_t material)
     switch (material)
     {
     case ENC_MATERIAL_PLA:
+        return matPlaTarget;
     case ENC_MATERIAL_PETG:
-        return TEMP_STANDARD_TARGET;
+        return matPetgTarget;
     case ENC_MATERIAL_TPU:
-        return TEMP_TPU_TARGET;
+        return matFlexTarget;
     case ENC_MATERIAL_ASA:
     case ENC_MATERIAL_ABS:
     case ENC_MATERIAL_NYLON:
     case ENC_MATERIAL_HIGH_TEMP:
     case ENC_MATERIAL_UNKNOWN:
     default:
-        return TEMP_HIGH_TEMP_TARGET;
+        return matHtTarget;
     }
 }
 
@@ -1136,22 +1165,23 @@ void TemperatureRegulation::transitionToState(MaterialState newState)
 #endif
 }
 
-void TemperatureRegulation::setLouvrePercent(uint8_t percent)
+void TemperatureRegulation::setLouvrePercent(uint8_t percent, bool immediate)
 {
     if (percent > 100)
         percent = 100;
-    // Ramp toward target by at most LOUVRE_RAMP_PCT per poll for smooth motion.
-    if (louvreRampTarget == 255) {
-        louvreRampTarget = lastLouvrePct;
+    louvreTarget = percent;
+    if (immediate)
+    {
+        // Snap to target: emergency/closeOutputs/calibration relay must not wait
+        // for the 2 s ramp.
+        louvreRamped = percent;
+        if (louver)
+            louver->setPercent(percent);
+        lastLouvrePct = percent;
+        louvreOpen = percent > 0;
     }
-    int8_t delta = (int8_t)percent - (int8_t)louvreRampTarget;
-    if (delta > LOUVRE_RAMP_PCT) delta = LOUVRE_RAMP_PCT;
-    if (delta < -LOUVRE_RAMP_PCT) delta = -LOUVRE_RAMP_PCT;
-    louvreRampTarget += delta;
-    if (louver)
-        louver->setPercent((uint8_t)louvreRampTarget);
-    lastLouvrePct = louvreRampTarget;
-    louvreOpen = louvreRampTarget > 0;
+    // Otherwise serviceLouvre() advances louvreRamped toward louvreTarget at
+    // LOUVRE_RAMP_PCT per SERVO_MIN_MOVE_INTERVAL_MS (2 s for full travel).
 }
 
 void TemperatureRegulation::setFanPercent(uint8_t percent)
@@ -1224,6 +1254,28 @@ void TemperatureRegulation::serviceFan()
     applyFanSpeed(fanTargetSpeed);
 }
 
+void TemperatureRegulation::serviceLouvre()
+{
+    if (louvreTarget == 255)
+        return;
+    if (louvreRamped == 255)
+        louvreRamped = lastLouvrePct;
+    if (louvreRamped == louvreTarget)
+        return;
+    const unsigned long now = millis();
+    if (now - lastLouvreMoveMs < (unsigned long)SERVO_MIN_MOVE_INTERVAL_MS)
+        return;
+    lastLouvreMoveMs = now;
+    int8_t delta = (int8_t)louvreTarget - (int8_t)louvreRamped;
+    if (delta > LOUVRE_RAMP_PCT) delta = LOUVRE_RAMP_PCT;
+    if (delta < -LOUVRE_RAMP_PCT) delta = -LOUVRE_RAMP_PCT;
+    louvreRamped = (uint8_t)((int8_t)louvreRamped + delta);
+    if (louver)
+        louver->setPercent(louvreRamped);
+    lastLouvrePct = louvreRamped;
+    louvreOpen = louvreRamped > 0;
+}
+
 void TemperatureRegulation::applyFanSpeed(uint8_t speed)
 {
     if (speed == lastFanSpeed && fanActive == (speed > 0))
@@ -1241,7 +1293,7 @@ void TemperatureRegulation::stopFan()
 
 void TemperatureRegulation::closeOutputs()
 {
-    setLouvrePercent(0);
+    setLouvrePercent(0, true);
     forceFanOff();
 }
 

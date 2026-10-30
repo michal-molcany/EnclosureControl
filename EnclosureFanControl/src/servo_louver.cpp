@@ -19,17 +19,18 @@ void ServoLouver::begin()
     setAngle(SERVO_OFF_ANGLE);
 }
 
-void ServoLouver::setAngle(int targetAngle)
+bool ServoLouver::setAngle(int targetAngle)
 {
     if (targetAngle == currentAngle)
-        return;
+        return false;
     // Rate-limit physical moves instead of blocking with delay().
     unsigned long now = millis();
     if (currentAngle != -1 && (now - lastMoveMs) < SERVO_MIN_MOVE_INTERVAL_MS)
-        return;
+        return false;
     servo.write(targetAngle);
     lastMoveMs = now;
     currentAngle = targetAngle;
+    return true;
 }
 
 int ServoLouver::getAngle() const
@@ -53,15 +54,25 @@ void ServoLouver::selfTest()
     // interval expire first to guarantee both moves execute.
     delay(SERVO_MIN_MOVE_INTERVAL_MS + 100);
 #if SERIAL_DEBUG
-    Serial.println("Louvre self-test: opening 100%...");
+    Serial.println("Louvre self-test: opening 25%...");
 #endif
-    setPercent(100);
-    delay(1000);
+    // Ramp slowly: step through in 10% increments up to 100%.
+    for (int pct = 10; pct <= 100; pct += 10)
+    {
+        setPercent(pct);
+        delay(SERVO_MIN_MOVE_INTERVAL_MS);
+    }
+    delay(500);
 #if SERIAL_DEBUG
     Serial.println("Louvre self-test: closing...");
 #endif
-    setAngle(SERVO_OFF_ANGLE);
-    delay(SERVO_MIN_MOVE_INTERVAL_MS + 100);
+    // Ramp closed slowly.
+    for (int pct = 90; pct >= 0; pct -= 10)
+    {
+        setPercent(pct);
+        delay(SERVO_MIN_MOVE_INTERVAL_MS);
+    }
+    delay(SERVO_MIN_MOVE_INTERVAL_MS);
 #if SERIAL_DEBUG
     Serial.println("Louvre self-test done");
 #endif

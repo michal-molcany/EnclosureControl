@@ -51,6 +51,9 @@ namespace EnclosureUi
         uint8_t phase = 0;
         unsigned long elapsedMs = 0;
         uint16_t cycles = 0;
+        uint16_t cyclesExpected = 0;
+        uint16_t bedRefreshes = 0;
+        unsigned long bedRefreshNextMs = 0;
         float ku = 0.0f;
         float pu = 0.0f;
         float amplitude = 0.0f;
@@ -90,6 +93,10 @@ namespace EnclosureUi
         uint8_t manualFanPct = 0;
         bool jobActive = false;
         uint8_t material = ENC_MATERIAL_UNKNOWN;
+        int matPlaTarget = 30;
+        int matPetgTarget = 40;
+        int matFlexTarget = 35;
+        int matHtTarget = 50;
         String elapsed;
         String remaining;
         // Setpoint in force, in whole C. Negative when the regulator has not
@@ -203,6 +210,8 @@ namespace EnclosureUi
     // still has to reach the server the run started with).
     using EndpointReset = bool (*)(String &reason);
 
+    using MaterialSetter = bool (*)(int pla, int petg, int flex, int ht, String &reason);
+
     struct Config
     {
         uint16_t port = 8082;
@@ -221,6 +230,7 @@ namespace EnclosureUi
         ManualHandler manual = nullptr;
         EndpointSetter setEndpoint = nullptr;
         EndpointReset clearEndpoint = nullptr;
+        MaterialSetter setMaterial = nullptr;
     };
 
     // Starts its own WebServer on cfg.port. Call once after Wi-Fi is up.

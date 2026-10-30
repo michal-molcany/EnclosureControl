@@ -274,6 +274,14 @@ The material buttons reach the same presets as the preheat screens, from the sam
 `TOOL_PRESETS` / `BED_PRESETS` tables, so the two can never disagree. Off sends
 target 0 to both.
 
+The **chamber's** Material tab is a different thing: it sends only an
+`ENC_MATERIAL_*` index in the ESP-NOW command, and the C3 resolves that to one of
+four chamber setpoints — PLA, PETG, FLEX (TPU/TPA) and HT (ASA/ABS/Nylon/PC) —
+stored in the C3's own NVS. Those four values are edited from the C3 web UI
+(Settings) or the OctoPrint plugin, and changing one never changes the nozzle/bed
+preheat presets above. This is deliberate: the C3 must keep regulating the
+chamber when the CYD is unplugged.
+
 
 
 ## OTA Updates

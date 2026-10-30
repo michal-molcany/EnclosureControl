@@ -90,6 +90,31 @@ namespace PidCalibration
         return output;
     }
 
+uint16_t PidCalibration::Autotuner::expectedPhaseCount() const
+{
+    uint16_t needed = relay.phaseCount;
+    // Extremes still required: each relay phase delivers at most one extreme of
+    // one kind, and amp.hasEnough() wants 3 of each.
+    if (!amp.hasEnough())
+    {
+        uint8_t low = amp.minCount < amp.maxCount ? amp.minCount : amp.maxCount;
+        uint16_t missing = (low >= 3) ? 0 : (uint16_t)((3 - low) * 2);
+        if (relay.phaseCount + missing > needed)
+            needed = (uint16_t)(relay.phaseCount + missing);
+    }
+    // Quality gate already tripped: it burns up to 6 more phases before
+    // computing anyway.
+    if (enoughDataPhase != 0)
+    {
+        uint16_t gate = (uint16_t)(enoughDataPhase + 6);
+        if (gate > needed)
+            needed = gate;
+    }
+    if (needed < 6)
+        needed = 6;
+    return needed;
+}
+
     // ===================== RelayFunction =====================
 
     float Autotuner::Relay::update(float error)

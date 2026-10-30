@@ -131,6 +131,39 @@
       </span>
     </p>
 
+    <hr>
+
+    <h3>Material profiles (chamber setpoint)</h3>
+    <p class="ef-help">
+      Chamber temperature the C3 targets for each material. Stored on the board
+      (NVS) and applied when the printer reports that material. Defaults:
+      PLA 30&nbsp;&deg;C, PETG 40&nbsp;&deg;C, FLEX (TPU/TPA) 35&nbsp;&deg;C,
+      HT (ASA/ABS/Nylon/PC) 50&nbsp;&deg;C.
+    </p>
+
+    <form class="form-inline ef-materials">
+      <label class="ef-gain">PLA
+        <input type="number" class="input-mini" min="20" max="80" step="1"
+               data-bind="value: matPla">
+      </label>
+      <label class="ef-gain">PETG
+        <input type="number" class="input-mini" min="20" max="80" step="1"
+               data-bind="value: matPetg">
+      </label>
+      <label class="ef-gain">FLEX
+        <input type="number" class="input-mini" min="20" max="80" step="1"
+               data-bind="value: matFlex">
+      </label>
+      <label class="ef-gain">HT
+        <input type="number" class="input-mini" min="20" max="80" step="1"
+               data-bind="value: matHt">
+      </label>
+      <button class="btn btn-primary" data-bind="click: saveMaterials, disable: materialBusy">Save</button>
+    </form>
+    <p class="ef-help" data-bind="visible: materialMsg() !== ''">
+      <span data-bind="text: materialMsg"></span>
+    </p>
+
     <div class="ef-cal" data-bind="visible: calSupported">
       <h4>
         PID calibration

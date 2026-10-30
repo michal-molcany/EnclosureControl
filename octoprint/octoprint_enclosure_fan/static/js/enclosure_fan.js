@@ -197,6 +197,14 @@ $(function () {
         self.pidSaved = ko.observable(true);
         self.pidSaving = ko.observable(false);
 
+        // Material profiles (chamber setpoint per group). Board-side values.
+        self.matPla = ko.observable(30);
+        self.matPetg = ko.observable(40);
+        self.matFlex = ko.observable(35);
+        self.matHt = ko.observable(50);
+        self.materialBusy = ko.observable(false);
+        self.materialMsg = ko.observable("");
+
         self.pidRange = function (which) {
             var lo = self.pidMin()[which], hi = self.pidMax()[which];
             return lo + " to " + hi;
@@ -424,6 +432,15 @@ $(function () {
             // pidSaved is a TOP-LEVEL field, not inside the pid object.
             self.pidSaved(s.pidSaved === undefined ? true : !!s.pidSaved);
 
+            // Material profiles come from /api/status (matPla...). Only overwrite
+            // while not saving, so a poll cannot yank a value mid-edit.
+            if (!self.materialBusy()) {
+                if (s.matPla !== undefined) self.matPla(s.matPla);
+                if (s.matPetg !== undefined) self.matPetg(s.matPetg);
+                if (s.matFlex !== undefined) self.matFlex(s.matFlex);
+                if (s.matHt !== undefined) self.matHt(s.matHt);
+            }
+
             // Seed the manual sliders from what the board actually has, but only
             // while they are untouched - otherwise a poll would yank the slider
             // back mid-drag.
@@ -514,6 +531,27 @@ $(function () {
                 .always(function () {
                     self.pidSaving(false);
                     self.pidDirty(false);
+                });
+        };
+
+        self.saveMaterials = function () {
+            var pla = parseInt(self.matPla(), 10);
+            var petg = parseInt(self.matPetg(), 10);
+            var flex = parseInt(self.matFlex(), 10);
+            var ht = parseInt(self.matHt(), 10);
+            if (isNaN(pla) || isNaN(petg) || isNaN(flex) || isNaN(ht)) {
+                self.writeError("Material targets must be numbers.");
+                return;
+            }
+            self.materialBusy(true);
+            self.materialMsg("");
+            write("setmaterials", { pla: pla, petg: petg, flex: flex, ht: ht },
+                  "Material profiles saved to the board")
+                .done(function () {
+                    self.materialMsg("Saved to the board.");
+                })
+                .always(function () {
+                    self.materialBusy(false);
                 });
         };
 

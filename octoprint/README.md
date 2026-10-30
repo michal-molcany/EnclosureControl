@@ -1,8 +1,8 @@
 # OctoPrint-­EnclosureFan
 
 A **Fan Control** tab inside OctoPrint for the EnclosureFanControl (C3) board: live
-enclosure state, runtime PID tuning, PID calibration, and a manual fan/louvre
-override.
+enclosure state, editable material profiles, runtime PID tuning, PID calibration,
+and a manual fan/louvre override.
 
 ## It is a client, not a new device
 
@@ -32,6 +32,35 @@ board does not have.
 
 Port 8081 is the CYD's own machine-to-machine channel and uses username `cyd`
 (8082 uses `Enclosure`).
+
+## Material profiles
+
+The tab edits the four chamber-setpoint profiles the C3 stores in NVS:
+
+| Group | Covers | Default |
+| --- | --- | --- |
+| PLA | PLA and anything the classifier matches as PLA | 30 °C |
+| PETG | PETG | 40 °C |
+| FLEX | TPU / TPA | 35 °C |
+| HT | ASA, ABS, Nylon, PC, everything unrecognised | 50 °C |
+
+The values are read from `/api/status` (`matPla` … `matHt`) like every other
+field, so the tab needs no second round trip. **Save** posts them to
+`/api/materials`, which persists them to the board's NVS. Two things are worth
+knowing:
+
+- The board answers that write with `{"ok":true}`, **not** with the full status
+  document its other write routes return. The plugin therefore re-reads
+  `/api/status` after a successful save; folding the little `ok` object into the
+  cache would blank the tab for one poll (`on_setmaterials` in `__init__.py`).
+- Grouping happens on the board: the CYD and OctoPrint only send an
+  `ENC_MATERIAL_*` index, so the four groups are also what the CYD's material
+  selection resolves to. The CYD's own Material tab presets (nozzle/bed temps for
+  its screens) are separate values and are not touched here.
+- **Requires C3 firmware 0.5.22 or newer.** The route first appeared in the 0.5.21
+  build with its handler unwired, so that build answers the read fine but refuses
+  the write with `501`. Older boards have no `/api/materials` at all. Everything
+  else in the plugin still works against older firmware.
 
 ## PID calibration
 
@@ -82,16 +111,41 @@ every poll, so the controls return on their own once the CYD drops off.
 
 ## Installation
 
-1. In OctoPrint: **Settings → Plugin Manager → Install from URL**
-2. Paste the URL of `OctoPrint-EnclosureFan-<version>.zip` and install
-3. **Restart OctoPrint** (required)
-4. Open **Settings → Enclosure-Fan-Control** and set:
+**Take an OctoPrint backup first** — Settings → Backup & Restore → Create
+backup. A plugin that fails to import can stop OctoPrint from starting, and the
+backup is the only way back. From the API:
+
+```powershell
+curl.exe -X POST -H "X-Api-Key: $k" -H "Content-Type: application/json" -d "{}" `
+  http://<octoprint>/plugin/backup/backup
+```
+
+Then install:
+
+1. In OctoPrint: **Settings → Plugin Manager → Install from URL**, or upload
+   `dist/OctoPrint-EnclosureFan-<version>.zip` with **…from archive**. The
+   current build is **0.4.1**.
+2. **Restart OctoPrint** (required)
+3. Open **Settings → Enclosure-Fan-Control** and set:
    - **Board address** — `enclosure-fan-control.local` (default), or an IP
    - **Port** — `8082`
    - **API token** — `ENC_API_TOKEN` from the firmware's `include/enclosure_api.h`
-5. Press **Test connection**. It probes what is currently typed, unsaved, and says
+4. Press **Test connection**. It probes what is currently typed, unsaved, and says
    which of the four things went wrong: unreachable, wrong port, token rejected,
    or connected (and then shows the firmware version).
+
+For development, `tools/build_package.py` writes the zip to `dist/`. Installing a
+local build without the browser (used for the 0.4.1 verification):
+
+```powershell
+curl.exe -H "X-Api-Key: $k" -F "file=@dist/OctoPrint-EnclosureFan-0.4.1.zip" `
+  http://<octoprint>/plugin/pluginmanager/upload_file     # 200, {"in_progress": true}
+curl.exe -X POST -H "X-Api-Key: $k" -H "Content-Type: application/json" -d "{}" `
+  http://<octoprint>/api/system/commands/core/restart
+```
+
+The install finishes in the background; wait until the plugin list reports the new
+version and `pending_install: false` before restarting.
 
 The username is fixed at `Enclosure` by the plugin. It is not a placeholder:
 `WebServer::authenticate()` base64-encodes `"user:password"` and compares the

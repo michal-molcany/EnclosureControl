@@ -77,6 +77,7 @@ namespace
     EnclosureUi::ManualHandler handleManual = nullptr;
     EnclosureUi::EndpointSetter applyEndpoint = nullptr;
     EnclosureUi::EndpointReset clearEndpointFn = nullptr;
+    EnclosureUi::MaterialSetter handleMaterial = nullptr;
 
     // The stored key is a credential, so it is never echoed: /api/status reports
     // only whether one is in force and where it came from. This bound exists so
@@ -160,6 +161,10 @@ namespace
   doc["elapsed"] = s.elapsed;
   doc["remaining"] = s.remaining;
         doc["material"] = s.material;
+  doc["matPla"] = s.matPlaTarget;
+  doc["matPetg"] = s.matPetgTarget;
+  doc["matFlex"] = s.matFlexTarget;
+  doc["matHt"] = s.matHtTarget;
         doc["setpoint"] = s.setpointC;
         doc["emergency"] = s.emergencyActive;
         doc["peer"] = s.remotePeer;
@@ -184,6 +189,9 @@ namespace
         cal["phase"] = s.calibration.phase;
         cal["elapsed"] = s.calibration.elapsedMs;
         cal["cycles"] = s.calibration.cycles;
+        cal["cyclesExpected"] = s.calibration.cyclesExpected;
+        cal["bedRefreshes"] = s.calibration.bedRefreshes;
+        cal["bedRefreshNextMs"] = s.calibration.bedRefreshNextMs;
         cal["ku"] = s.calibration.ku;
         // "tu" on the wire, not "pu": the page and the ZN literature both call
         // the ultimate period Tu, and only ESPHome's code calls it pu.
@@ -219,7 +227,56 @@ namespace
         server->send(200, "application/json", body);
     }
 
-    // GET /api/cal/trace - the calibration graph's data.
+    void sendMaterials()
+    {
+        if (!provideStatus)
+        {
+            server->send(501, "text/plain", "material profiles not supported on this build");
+            return;
+        }
+        EnclosureUi::Status s = provideStatus();
+        JsonDocument doc;
+        doc["pla"] = s.matPlaTarget;
+        doc["petg"] = s.matPetgTarget;
+        doc["flex"] = s.matFlexTarget;
+        doc["ht"] = s.matHtTarget;
+        String body;
+        serializeJson(doc, body);
+        server->send(200, "application/json", body);
+    }
+
+    void receiveMaterials()
+    {
+        if (!handleMaterial)
+        {
+            server->send(501, "text/plain", "material profiles not supported on this build");
+            return;
+        }
+        JsonDocument doc;
+        if (!requestBody(doc))
+            return;
+        int pla = doc["pla"] | 0;
+        int petg = doc["petg"] | 0;
+        int flex = doc["flex"] | 0;
+        int ht = doc["ht"] | 0;
+        if (pla < 20 || pla > 80 || petg < 20 || petg > 80 || flex < 20 || flex > 80 || ht < 20 || ht > 80)
+        {
+            server->send(400, "text/plain", "values must be 20-80");
+            return;
+        }
+        String reason;
+        if (!handleMaterial(pla, petg, flex, ht, reason))
+        {
+            server->send(400, "text/plain", reason);
+            return;
+        }
+        // Save to NVS via the setter's side effect (main.cpp handles persistence)
+        JsonDocument resp;
+        resp["ok"] = true;
+        String body;
+        serializeJson(resp, body);
+        server->send(200, "application/json", body);
+    }
     //
     // Separate from /api/status because the page polls that every 2 s and this
     // document is a few thousand numbers: folding it in would multiply the
@@ -566,6 +623,7 @@ namespace EnclosureUi
         handleManual = cfg.manual;
         applyEndpoint = cfg.setEndpoint;
         clearEndpointFn = cfg.clearEndpoint;
+        handleMaterial = cfg.setMaterial;
 
         if (server)
             return;
@@ -620,6 +678,15 @@ namespace EnclosureUi
         server->on("/api/octoprint/defaults", HTTP_POST, []() {
             if (authorized())
                 resetEndpoint();
+        });
+
+        server->on("/api/materials", HTTP_GET, []() {
+            if (authorized())
+                sendMaterials();
+        });
+        server->on("/api/materials", HTTP_POST, []() {
+            if (authorized())
+                receiveMaterials();
         });
 
         // Answered before the auth check, and without auth: a browser requests
