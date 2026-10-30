@@ -327,6 +327,20 @@ var pidFilled = false;
 var pidBusy = false;
 var octoFilled = false;
 var octoBusy = false;
+// Material targets: per-field "edited but not saved yet". The status poll runs
+// every 2 s and used to write all four fields unconditionally, so a value typed
+// here was replaced by the stored one before Save could be pressed - the save
+// then persisted the OLD number. A field is dirty from its first edit until a
+// save succeeds, and only dirty fields are skipped by render(); untouched ones
+// keep tracking the board, because the plugin can change them too.
+var MAT_FIELDS = ['matpla', 'matpetg', 'matflex', 'matht'];
+var matDirty = {};
+var matBusy = false;
+MAT_FIELDS.forEach(function (id) {
+  var el = $(id);
+  if (!el) { return; }
+  el.oninput = function () { matDirty[id] = true; say($('matmsg'), 'unsaved', ''); };
+});
 // Set by a successful save; consumed by the next render() to blank the field.
 var keyJustSaved = false;
 // Latest status document, so a local UI action (opening the confirm dialog) can
@@ -955,10 +969,14 @@ function render(s) {
   $('link').textContent = !s.peer ? 'no peer' : (s.remote ? 'live' : 'silent');
   $('emg').textContent = s.emergency ? 'ACTIVE' : 'no';
 
-  if (s.matPla !== undefined) { $('matpla').value = s.matPla; }
-  if (s.matPetg !== undefined) { $('matpetg').value = s.matPetg; }
-  if (s.matFlex !== undefined) { $('matflex').value = s.matFlex; }
-  if (s.matHt !== undefined) { $('matht').value = s.matHt; }
+  // Only fill fields the user is not editing - see matDirty above. A dirty
+  // field holds the typed value until the save is accepted (or fails, so it can
+  // be corrected).
+  var mats = { matpla: s.matPla, matpetg: s.matPetg, matflex: s.matFlex, matht: s.matHt };
+  MAT_FIELDS.forEach(function (id) {
+    if (mats[id] === undefined || matDirty[id]) { return; }
+    $(id).value = mats[id];
+  });
 
 
 
@@ -1259,19 +1277,34 @@ $('calrdiscard').onclick = function () {
 };
 
 // Material save button
-$('matsave').onclick = function () {
-  post('api/materials', {
-    pla: parseInt($('matpla').value, 10),
-    petg: parseInt($('matpetg').value, 10),
-    flex: parseInt($('matflex').value, 10),
-    ht: parseInt($('matht').value, 10)
-  }).then(function () {
+function saveMaterials() {
+  if (matBusy) { return; }
+  var body = {};
+  for (var i = 0; i < MAT_FIELDS.length; i++) {
+    body[MAT_FIELDS[i].slice(3)] = parseInt($(MAT_FIELDS[i]).value, 10);
+  }
+  matBusy = true;
+  say($('matmsg'), 'saving...', '');
+  post('api/materials', body).then(function () {
     say($('matmsg'), 'Saved.', 'ok');
-    poll();
+    // Accepted, so the fields may go back to following the board. The write
+    // answers {ok:true} rather than a status document, so the values come from
+    // the poll below - which is also what surfaces a clamped or rejected number.
+    matDirty = {};
   }).catch(function (err) {
+    // Rejected values (out of range, or a field left blank) keep their dirty
+    // flag and stay on screen so they can be corrected instead of silently
+    // reverting.
     say($('matmsg'), err.message, 'err');
+  }).then(function () {
+    matBusy = false;
+    poll();
   });
-};
+}
+$('matsave').onclick = saveMaterials;
+MAT_FIELDS.forEach(function (id) {
+  $(id).onkeydown = function (ev) { if (ev.key === 'Enter') { saveMaterials(); } };
+});
 
 // Tab switching
 document.querySelectorAll('.tab').forEach(function(btn) {

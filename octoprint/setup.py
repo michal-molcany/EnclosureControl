@@ -28,7 +28,7 @@ plugin_description = (
     "fan/louvre override for the EnclosureFanControl (C3) board. Talks to the "
     "board's existing HTTP API on port 8082, so no firmware changes are required."
 )
-plugin_version = "0.4.1"
+plugin_version = "0.4.2"
 plugin_license = "AGPLv3"
 plugin_url = "https://github.com/michal-molcany/EnclosureControl"
 

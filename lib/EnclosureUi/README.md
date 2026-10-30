@@ -89,6 +89,24 @@ Material groups are four, not eight: `PLA`, `PETG`, `FLEX` (TPU/TPA) and `HT`
 (ASA, ABS, Nylon, PC and everything unrecognised). The CYD and OctoPrint send
 the `ENC_MATERIAL_*` index; the board maps it in `TemperatureRegulation::materialTarget()`.
 
+### The poll must never overwrite what is being typed
+
+The page re-reads `/api/status` every 2 s and renders it into the same elements
+the user edits. Anything typed into an input therefore has to be protected from
+the next poll — which applies to the PID gains, the OctoPrint address/port, and
+the four material targets. The rule in each case:
+
+- a field is **dirty** from its first edit until its write is accepted;
+- `render()` skips dirty fields and fills the rest, so a value can still change
+  from the board or from the OctoPrint plugin without a reload;
+- a **refused** write leaves the flag set (and the typed value on screen) so it
+  can be corrected, instead of silently snapping back.
+
+`matDirty` is the per-field map for the material card (`matsave`, and Enter in any
+of the four inputs). Getting this wrong is not cosmetic: while it was missing the
+poll put the stored value back within two seconds, and Save then persisted the
+*old* number — the board looked like it was rejecting every change.
+
 ### `Content-Type: application/json` is required on POSTs with a body
 
 ```bash

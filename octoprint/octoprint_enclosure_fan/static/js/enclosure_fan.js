@@ -433,12 +433,17 @@ $(function () {
             self.pidSaved(s.pidSaved === undefined ? true : !!s.pidSaved);
 
             // Material profiles come from /api/status (matPla...). Only overwrite
-            // while not saving, so a poll cannot yank a value mid-edit.
-            if (!self.materialBusy()) {
+            // while the user has not edited them: a 1 Hz poll that rewrites the
+            // field being typed makes Save unreachable, because the save then
+            // sends the value the poll put back. Untouched fields still follow the
+            // board, which matters when the C3 page changes them.
+            if (!self.materialBusy() && !self.materialDirty()) {
+                suppressDirty = true;
                 if (s.matPla !== undefined) self.matPla(s.matPla);
                 if (s.matPetg !== undefined) self.matPetg(s.matPetg);
                 if (s.matFlex !== undefined) self.matFlex(s.matFlex);
                 if (s.matHt !== undefined) self.matHt(s.matHt);
+                suppressDirty = false;
             }
 
             // Seed the manual sliders from what the board actually has, but only
@@ -457,6 +462,7 @@ $(function () {
         // they were making has been sent and answered.
         self.pidDirty = ko.observable(false);
         self.manualDirty = ko.observable(false);
+        self.materialDirty = ko.observable(false);
 
         [self.kp, self.ki, self.kd].forEach(function (obs) {
             obs.subscribe(function () {
@@ -466,6 +472,11 @@ $(function () {
         [self.manualLouvre, self.manualFan].forEach(function (obs) {
             obs.subscribe(function () {
                 if (!suppressDirty) self.manualDirty(true);
+            });
+        });
+        [self.matPla, self.matPetg, self.matFlex, self.matHt].forEach(function (obs) {
+            obs.subscribe(function () {
+                if (!suppressDirty) self.materialDirty(true);
             });
         });
 
@@ -545,10 +556,19 @@ $(function () {
             }
             self.materialBusy(true);
             self.materialMsg("");
+            // The dirty flag is what prevents the poll from overwriting these
+            // fields, so it has to be down before the board's own answer is
+            // applied - otherwise the tab keeps showing the typed numbers and the
+            // next poll would look like it "snapped back". It goes back up if the
+            // write is refused, keeping the value the user has to correct.
+            self.materialDirty(false);
             write("setmaterials", { pla: pla, petg: petg, flex: flex, ht: ht },
                   "Material profiles saved to the board")
                 .done(function () {
                     self.materialMsg("Saved to the board.");
+                })
+                .fail(function () {
+                    self.materialDirty(true);
                 })
                 .always(function () {
                     self.materialBusy(false);

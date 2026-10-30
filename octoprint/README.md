@@ -57,6 +57,17 @@ knowing:
   `ENC_MATERIAL_*` index, so the four groups are also what the CYD's material
   selection resolves to. The CYD's own Material tab presets (nozzle/bed temps for
   its screens) are separate values and are not touched here.
+- **The fields are dirty until Save.** The tab polls `/api/status` once a second
+  and used to write the four inputs on every poll, so a number typed into PLA was
+  replaced by the stored one before Save could be pressed — and Save then sent the
+  old value, which reads exactly like the board refusing the change. The inputs
+  now carry a dirty flag (`materialDirty`, set by the observables' subscriptions
+  and suppressed while the board's answer is being applied) and a dirty field is
+  never overwritten by a poll. Untouched fields still follow the board, so a
+  change made from the C3 page shows up here. The flag clears when the write is
+  accepted; a refused write keeps it set, so the value to correct stays on screen.
+  The C3 page needs the same rule per field (`matDirty` in
+  `lib/EnclosureUi/src/enclosure_ui_page.h`) because it polls every 2 s.
 - **Requires C3 firmware 0.5.22 or newer.** The route first appeared in the 0.5.21
   build with its handler unwired, so that build answers the read fine but refuses
   the write with `501`. Older boards have no `/api/materials` at all. Everything
@@ -124,7 +135,7 @@ Then install:
 
 1. In OctoPrint: **Settings → Plugin Manager → Install from URL**, or upload
    `dist/OctoPrint-EnclosureFan-<version>.zip` with **…from archive**. The
-   current build is **0.4.1**.
+   current build is **0.4.2**.
 2. **Restart OctoPrint** (required)
 3. Open **Settings → Enclosure-Fan-Control** and set:
    - **Board address** — `enclosure-fan-control.local` (default), or an IP
@@ -135,17 +146,25 @@ Then install:
    or connected (and then shows the firmware version).
 
 For development, `tools/build_package.py` writes the zip to `dist/`. Installing a
-local build without the browser (used for the 0.4.1 verification):
+local build without the browser (used for the 0.4.2 verification):
 
 ```powershell
-curl.exe -H "X-Api-Key: $k" -F "file=@dist/OctoPrint-EnclosureFan-0.4.1.zip" `
+curl.exe -H "X-Api-Key: $k" -F "file=@dist/OctoPrint-EnclosureFan-0.4.2.zip" `
   http://<octoprint>/plugin/pluginmanager/upload_file     # 200, {"in_progress": true}
 curl.exe -X POST -H "X-Api-Key: $k" -H "Content-Type: application/json" -d "{}" `
   http://<octoprint>/api/system/commands/core/restart
 ```
 
-The install finishes in the background; wait until the plugin list reports the new
-version and `pending_install: false` before restarting.
+The upload unpacks in the background and the plugin list then reports the **old**
+version with `pending_install: true` — that is the queued state, not a failure.
+The restart is what activates the new one; poll the plugin list afterwards until
+it reports the new version with `pending_install: false`, then prove the plugin
+actually loaded with its own API rather than the plugin list:
+
+```powershell
+curl.exe -H "X-Api-Key: $k" -H "Content-Type: application/json" `
+  -d '{"command":"status"}' http://<octoprint>/api/plugin/enclosure_fan
+```
 
 The username is fixed at `Enclosure` by the plugin. It is not a placeholder:
 `WebServer::authenticate()` base64-encodes `"user:password"` and compares the

@@ -63,6 +63,17 @@ function resolved(value) {
     return promise;
 }
 
+// A jQuery promise that fails, so the "board refused the write" path can be
+// exercised. The plugin reads xhr.responseJSON.error through failureText().
+function rejected(message) {
+    const promise = {
+        done() { return promise; },
+        fail(fn) { fn({ responseJSON: { error: message } }); return promise; },
+        always(fn) { fn(); return promise; }
+    };
+    return promise;
+}
+
 // --------------------------------------------------------------------------
 // The board. One status document, mutated by the calibration actions, so the
 // test drives the same state machine the C3 does.
@@ -86,11 +97,17 @@ let status = {
 
 const actions = [];
 let materialPayload = null;
+let rejectMaterialWrite = null;   // set to a message to make the next save fail
 
 const OctoPrint = {
     simpleApiCommand(plugin, name, payload) {
         if (name === "setmaterials") {
             materialPayload = payload;
+            if (rejectMaterialWrite) {
+                const reason = rejectMaterialWrite;
+                rejectMaterialWrite = null;
+                return rejected(reason);
+            }
             status.matPla = payload.pla;
             status.matPetg = payload.petg;
             status.matFlex = payload.flex;
@@ -136,11 +153,17 @@ function $(arg) {
     return { on() { return this; } };
 }
 
+// The viewmodel polls on an interval. Capture the callback so the checks can
+// deliver a poll at a chosen moment instead of waiting for one - the whole point
+// of the dirty flags is WHICH poll lands while the user is typing.
+let pollNow = function () { throw new Error("poll callback was never registered"); };
+
 const sandbox = {
     ko: ko, OctoPrint: OctoPrint, $: $, window: {},
     PNotify: function () {},
     OCTOPRINT_VIEWMODELS: [],
-    setInterval: setInterval, clearInterval: clearInterval,
+    setInterval(fn) { pollNow = fn; return 1; },
+    clearInterval() {},
     setTimeout: setTimeout, console: console
 };
 sandbox.globalThis = sandbox;
@@ -166,6 +189,15 @@ const view = new Ctor([{}, {}]);
 check("calibration is reported as supported", view.calSupported() === true);
 check("material profiles followed the board", view.matPla() === 31,
       view.matPla());
+// The other half of the rule: a field nobody has touched still follows the
+// board, because the values can also be changed from the C3 page.
+status.matPla = 34;
+pollNow();
+check("an untouched material field follows the board", view.matPla() === 34,
+      view.matPla());
+status.matPla = 31;
+pollNow();
+check("the field goes back with the board", view.matPla() === 31, view.matPla());
 check("the PID fields followed the board", view.kp() === 50, view.kp());
 check("the form is not dirty after a refresh", view.pidDirty() === false);
 check("calibrate is enabled while idle", view.calStartDisabled() === false);
@@ -228,6 +260,15 @@ view.matPla(33);
 view.matPetg(41);
 view.matFlex(36);
 view.matHt(51);
+
+// A poll arriving mid-edit must not undo the edit - the tab polls at 1 Hz, so
+// overwriting here makes Save send the old value. This is the regression that
+// made a changed PLA target appear to "change back before it could be saved".
+pollNow();
+check("a poll does not overwrite a material edit", view.matPla() === 33,
+      view.matPla());
+check("the edit is marked dirty", view.materialDirty() === true);
+
 view.saveMaterials();
 check("the material save reached the board",
       materialPayload !== null &&
@@ -239,6 +280,20 @@ check("the save is acknowledged in the tab",
 check("the inputs keep the saved values", view.matPla() === 33, view.matPla());
 check("the material inputs are editable again",
       view.materialBusy() === false);
+check("the tab follows the board again after a save",
+      view.materialDirty() === false);
+
+// A refused write must keep the value on screen so it can be corrected - and a
+// poll arriving meanwhile must not quietly put the stored value back.
+rejectMaterialWrite = "values must be 20-80";
+view.matPla(90);
+view.saveMaterials();
+check("a refused material save is reported",
+      String(view.writeError()).indexOf("20-80") >= 0, view.writeError());
+check("the refused value stays on screen", view.matPla() === 90, view.matPla());
+pollNow();
+check("a poll does not revert a refused value", view.matPla() === 90,
+      view.matPla());
 
 console.log("");
 if (failures) {

@@ -34,7 +34,7 @@
 
 #define ENC_FW_VERSION_MAJOR 0
 #define ENC_FW_VERSION_MINOR 5
-#define ENC_FW_VERSION_PATCH 22
+#define ENC_FW_VERSION_PATCH 23
 
 // Protocol revision, bumped only when the structs in enclosure_proto.h or the
 // JSON keys in lib/EnclosureApi change in a backward-incompatible way.

@@ -378,9 +378,9 @@ portal will not be on the network to serve it.
 pio run -e esp32-c3-devkitm-1
 ```
 
-The firmware is roughly 1129 KB and the default partition table provides two
+The firmware is roughly 1131 KB and the default partition table provides two
 1.25 MB app slots, so images up to ~1.25 MB can be sent OTA. The current build
-sits at 88.2% of its slot, leaving about 150 KB of headroom — the page lives in
+sits at 88.4% of its slot, leaving about 150 KB of headroom — the page lives in
 flash (`send_P`), but there is not much room left for new client-side code.
 
 ## Uploading from VS Code
