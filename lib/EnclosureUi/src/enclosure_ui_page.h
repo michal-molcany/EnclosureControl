@@ -157,6 +157,7 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
     <span><i style="background:#ff6b6b"></i>setpoint &deg;C</span>
     <span><i style="background:#4caf7d"></i>louvre %</span>
     <span><i style="background:#5aa9e6"></i>fan %</span>
+    <span style="margin-left:auto">last 15&nbsp;min</span>
   </div>
   <canvas id="histplot" style="height:240px;width:100%;background:#0e1116;border:1px solid var(--line);border-radius:6px"></canvas>
   <div class="note" id="histmsg">Waiting for samples&hellip;</div>
@@ -351,14 +352,11 @@ var keyJustSaved = false;
 // Latest status document, so a local UI action (opening the confirm dialog) can
 // repaint the modal without waiting for the next poll.
 var lastStatus = null;
-var HIST_MAX = 60;
-var histCh = [];
-var histLouvre = [];
-var histFan = [];
-var histSetpoint = [];
-var histMs = [];
-// History buffers for the status graph. Each entry is one poll (2 s).
-var HIST_MAX = 60;
+// History buffers for the status graph. One entry per successful poll, and the
+// page polls every 2 s, so 480 entries span a little over 15 minutes. The span
+// is a floor, not a promise: a hidden tab is throttled by the browser and fills
+// the same buffer much more slowly, which only makes the window longer.
+var HIST_MAX = 480;
 var histCh = [];
 var histLouvre = [];
 var histFan = [];
@@ -898,16 +896,27 @@ function drawHist() {
   ctx.textBaseline = 'top';
   ctx.fillStyle = '#8b97a8';
   ctx.font = '9px system-ui,sans-serif';
+  // Time span covered by the buffer. Minimum 1 s so two samples taken inside
+  // the same second still produce a sane divisor.
+  var t0 = histMs[0];
+  var t1 = histMs[n - 1];
+  if (t1 - t0 < 1000) { t1 = t0 + 1000; }
   var now = Date.now();
   var numLabels = Math.min(5, n);
+  // Ticks are chosen on the time axis and then snapped to the nearest sample,
+  // so a stretch of throttled polls cannot bunch four labels into one corner.
   for (var li = 0; li < numLabels; li++) {
-    var idx = Math.round(li * (n - 1) / (numLabels - 1));
+    var target = t0 + (li * (t1 - t0)) / (numLabels - 1);
+    var idx = 0;
+    while (idx < n - 1 && histMs[idx] < target) { idx++; }
     var x = xOf(idx);
     var ago = Math.round((now - histMs[idx]) / 1000);
     var label = ago === 0 ? 'now' : (ago < 60 ? '-' + ago + 's' : '-' + Math.floor(ago / 60) + 'm');
     ctx.fillText(label, x, h - padB + 4);
   }
-  function xOf(i) { return padL + (i / (n - 1)) * (w - padL - padR); }
+  // The x axis is time, not sample index: a paused or throttled poll then shows
+  // up as a real gap instead of being stretched across the whole plot.
+  function xOf(i) { return padL + ((histMs[i] - t0) / (t1 - t0)) * (w - padL - padR); }
   function yOfL(v) { return h - padB - ((v - yMinL) / (yMaxL - yMinL)) * (h - padT - padB); }
   function yOfR(v) { return h - padB - ((v - yMinR) / (yMaxR - yMinR)) * (h - padT - padB); }
   ctx.strokeStyle = '#e6eaf0';

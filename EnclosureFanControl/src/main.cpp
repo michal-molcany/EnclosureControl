@@ -655,9 +655,53 @@ void setup()
 
   louver.begin();
 
-  // Power-on self-test: open 25% and close again to verify the servo.
-  display.showMessage("Louvre", "test 25%");
-  louver.selfTest();
+  // Power-on self-test: sweep the louvre open and closed again to verify the
+  // servo. It is a deliberate disturbance of the airflow, so it may only run
+  // when the printer is known to be idle:
+  //
+  //   - The wait above gave OctoPrint up to 20 s to answer. If it never did,
+  //     "idle" cannot be established, so the sweep is skipped - not knowing is
+  //     not the same as being idle, and a mid-print sweep would show in the
+  //     part. The regulator places the louvre from its first cycle instead.
+  //   - A print that is running or paused at boot also skips it. The regulator
+  //     owns the louvre from then on and will move it to the right position.
+  //
+  // A skipped check costs nothing beyond one boot without a servo sweep; a
+  // wrong one costs a print.
+  OctoSnapshot bootSnap;
+  bool bootKnown = false;
+  const uint32_t bootSnapStart = millis();
+  while (millis() - bootSnapStart < 1000)
+  {
+    // octoPollerCopy() can lose the race for the snapshot mutex; retry briefly
+    // rather than mistaking one busy mutex for a missing OctoPrint.
+    if (octoPollerCopy(bootSnap) && octoSnapshotValid(bootSnap))
+    {
+      bootKnown = true;
+      break;
+    }
+    delay(50);
+  }
+  const bool bootBusy = bootKnown && (bootSnap.printing || bootSnap.paused);
+  if (!bootKnown)
+  {
+    display.showMessage("Louvre", "no OctoPrint");
+#if SERIAL_DEBUG
+    Serial.println("[BOOT] OctoPrint unknown - skipping louvre self-test");
+#endif
+  }
+  else if (bootBusy)
+  {
+    display.showMessage("Louvre", bootSnap.printing ? "printing" : "paused");
+#if SERIAL_DEBUG
+    Serial.println("[BOOT] print active - skipping louvre self-test");
+#endif
+  }
+  else
+  {
+    display.showMessage("Louvre", "test 100%");
+    louver.selfTest();
+  }
 
   tempRegulation.begin();
 

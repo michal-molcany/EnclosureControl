@@ -28,7 +28,14 @@ CYD <-> C3 packet layout, timing and fallback rules are in
 - **Web UI on port 8082** — three tabs: **Status** (live values plus the history
   graph), **Settings** (material profiles, PID gains, OctoPrint address/key) and
   **Manual control** — from any browser on the network
-- **Relay-feedback PID auto-calibration** — preheat the bed, measure the
+- **History graph** on the Status tab keeps the last **~16 minutes** of chamber
+  temperature, setpoint, louvre and fan (480 samples at the 2 s poll interval).
+  The x axis is wall-clock time, so a stalled or throttled poll shows as a gap
+  rather than stretching the line.
+- **Power-on louvre self-test** (0 → 100 % ramp and back) runs at boot only when
+  OctoPrint answered within 20 s *and* no print is running or paused. If
+  OctoPrint is unknown or a print is active, the sweep is skipped and the
+  regulator places the louvre from its first cycle.
   chamber's ultimate gain and period, and get Ziegler-Nichols gains from the web
   UI instead of guessing
 

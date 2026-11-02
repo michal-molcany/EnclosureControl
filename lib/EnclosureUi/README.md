@@ -1,8 +1,10 @@
 # EnclosureUi
 
-A browser page served by the EnclosureFanControl (C3): live status and history
-graph, material/PID/OctoPrint settings, and manual fan/louvre control, in three
-tabs so the settings no longer share a column with the live readings.
+A browser page served by the EnclosureFanControl (C3): live status and a
+history graph (last ~16 minutes of chamber temperature, setpoint, louvre and fan
+at the 2 s poll interval), material/PID/OctoPrint settings, and manual
+fan/louvre control, in three tabs so the settings no longer share a column with
+the live readings.
 
 Open **`http://enclosure-fan-control.local:8082/`** (or the board's IP). The
 browser asks for credentials: username **`Enclosure`**, password
