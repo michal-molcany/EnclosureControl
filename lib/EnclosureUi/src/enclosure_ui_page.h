@@ -53,7 +53,12 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,"Seg
 .tab{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px 16px;cursor:pointer;color:var(--dim);font:inherit}
 .tab.active{background:var(--acc);border-color:var(--acc);color:#06121c;font-weight:600}
 .tab-content{display:none}
-.tab-content.active{display:block}
+/* The pane must span the whole page grid. It is a grid item of .wrap like the
+   header and the tab bar, and without this it sits in column 1 only - which is
+   what made the page look left-aligned on any screen wide enough for two
+   columns (measured: a 428 px pane inside an 868 px content area). */
+.tab-content.active{display:block;grid-column:1/-1}
+.mats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px}
 header{grid-column:1/-1;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}
 h1{font-size:18px;margin:0}
 .meta{color:var(--dim);font-size:12px}
@@ -161,7 +166,7 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
 <div class="tab-content" id="tab-settings">
 <div class="card">
   <h2>Material profiles</h2>
-  <div class="row">
+  <div class="mats">
     <div><div class="k">PLA</div><input id="matpla" type="number" min="20" max="80" step="1"></div>
     <div><div class="k">PETG</div><input id="matpetg" type="number" min="20" max="80" step="1"></div>
     <div><div class="k">FLEX (TPU/TPA)</div><input id="matflex" type="number" min="20" max="80" step="1"></div>

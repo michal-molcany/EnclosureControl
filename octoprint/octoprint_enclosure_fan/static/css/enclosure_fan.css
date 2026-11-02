@@ -72,6 +72,79 @@
     width: 70px;
 }
 
+/* Material profiles.
+ *
+ * Bootstrap 2's .form-inline puts the four targets and the Save button in one
+ * unbroken run, so each label crowds its own input and the whole thing re-wraps
+ * wherever the panel happens to end. A fixed two-column grid gives the same four
+ * fields two even rows at any panel width, with the unit attached to the input
+ * instead of living in the prose above it.
+ */
+.ef-materials {
+    margin-bottom: 0;
+}
+
+.ef-mat-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 24px;
+    max-width: 600px;
+    margin: 0;
+}
+
+/* The `.ef-materials` prefix is not decoration: Bootstrap 2 sets
+ * `.form-inline label { display: inline-block }`, which out-specifies a bare
+ * `.ef-mat` and drops the input onto its own line underneath the name. */
+.ef-materials .ef-mat {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 0;
+    font-weight: normal;
+}
+
+.ef-mat-name {
+    display: block;
+    line-height: 1.25;
+}
+
+/* The group note is a hint, not a label: small and grey, and clipped rather than
+ * wrapped so the two columns keep an even height. */
+.ef-mat-note {
+    display: block;
+    color: #999;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ef-materials .input-append {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0;
+}
+
+.ef-mat-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.ef-mat-actions .ef-help {
+    margin: 0;
+}
+
+/* One column only when the panel is genuinely phone-width; the tab is normally
+ * far wider and the 2x2 block is the point of the grid. */
+@media (max-width: 500px) {
+    .ef-mat-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* Calibration block. It lives inside the PID section because it produces PID
  * gains; the alert boxes double as the progress/result panels, so no modal or
  * extra library is needed. */

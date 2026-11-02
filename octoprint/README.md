@@ -73,6 +73,15 @@ knowing:
   the write with `501`. Older boards have no `/api/materials` at all. Everything
   else in the plugin still works against older firmware.
 
+The four fields are a **2×2 grid**, not a Bootstrap 2 `.form-inline` run: at any
+panel width the targets read as two even rows, the unit is attached to the input
+as an `.input-append` add-on, and each label carries a one-line hint of the
+materials it covers. `Save` sits under the grid next to the status message. Two
+specificity traps are worth knowing if this is ever restyled — `.form-inline
+label` is more specific than a bare class, so the flex rule is `.ef-materials
+.ef-mat`, and `.input-append` needs its `margin-bottom` cleared or the rows
+misalign.
+
 ## PID calibration
 
 The tab can run the board's relay-feedback auto-tune and follow it live, with
@@ -135,7 +144,7 @@ Then install:
 
 1. In OctoPrint: **Settings → Plugin Manager → Install from URL**, or upload
    `dist/OctoPrint-EnclosureFan-<version>.zip` with **…from archive**. The
-   current build is **0.4.2**.
+   current build is **0.4.3**.
 2. **Restart OctoPrint** (required)
 3. Open **Settings → Enclosure-Fan-Control** and set:
    - **Board address** — `enclosure-fan-control.local` (default), or an IP
@@ -146,10 +155,10 @@ Then install:
    or connected (and then shows the firmware version).
 
 For development, `tools/build_package.py` writes the zip to `dist/`. Installing a
-local build without the browser (used for the 0.4.2 verification):
+local build without the browser (used for the 0.4.3 verification):
 
 ```powershell
-curl.exe -H "X-Api-Key: $k" -F "file=@dist/OctoPrint-EnclosureFan-0.4.2.zip" `
+curl.exe -H "X-Api-Key: $k" -F "file=@dist/OctoPrint-EnclosureFan-0.4.3.zip" `
   http://<octoprint>/plugin/pluginmanager/upload_file     # 200, {"in_progress": true}
 curl.exe -X POST -H "X-Api-Key: $k" -H "Content-Type: application/json" -d "{}" `
   http://<octoprint>/api/system/commands/core/restart

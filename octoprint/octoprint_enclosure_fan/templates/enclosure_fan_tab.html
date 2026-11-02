@@ -136,33 +136,41 @@
     <h3>Material profiles (chamber setpoint)</h3>
     <p class="ef-help">
       Chamber temperature the C3 targets for each material. Stored on the board
-      (NVS) and applied when the printer reports that material. Defaults:
-      PLA 30&nbsp;&deg;C, PETG 40&nbsp;&deg;C, FLEX (TPU/TPA) 35&nbsp;&deg;C,
-      HT (ASA/ABS/Nylon/PC) 50&nbsp;&deg;C.
+      (NVS) and applied when the printer reports that material. Compiled-in
+      defaults: PLA 30&nbsp;&deg;C, PETG 40&nbsp;&deg;C, FLEX 35&nbsp;&deg;C,
+      HT 50&nbsp;&deg;C.
     </p>
 
     <form class="form-inline ef-materials">
-      <label class="ef-gain">PLA
-        <input type="number" class="input-mini" min="20" max="80" step="1"
-               data-bind="value: matPla">
-      </label>
-      <label class="ef-gain">PETG
-        <input type="number" class="input-mini" min="20" max="80" step="1"
-               data-bind="value: matPetg">
-      </label>
-      <label class="ef-gain">FLEX
-        <input type="number" class="input-mini" min="20" max="80" step="1"
-               data-bind="value: matFlex">
-      </label>
-      <label class="ef-gain">HT
-        <input type="number" class="input-mini" min="20" max="80" step="1"
-               data-bind="value: matHt">
-      </label>
-      <button class="btn btn-primary" data-bind="click: saveMaterials, disable: materialBusy">Save</button>
+      <div class="ef-mat-grid">
+        <label class="ef-mat">
+          <span class="ef-mat-name">PLA<span class="ef-mat-note">polylactic acid</span></span>
+          <span class="input-append"><input type="number" class="input-mini" min="20" max="80" step="1"
+                 data-bind="value: matPla"><span class="add-on">&deg;C</span></span>
+        </label>
+        <label class="ef-mat">
+          <span class="ef-mat-name">PETG<span class="ef-mat-note">glycol-modified</span></span>
+          <span class="input-append"><input type="number" class="input-mini" min="20" max="80" step="1"
+                 data-bind="value: matPetg"><span class="add-on">&deg;C</span></span>
+        </label>
+        <label class="ef-mat">
+          <span class="ef-mat-name">FLEX<span class="ef-mat-note">TPU / TPA</span></span>
+          <span class="input-append"><input type="number" class="input-mini" min="20" max="80" step="1"
+                 data-bind="value: matFlex"><span class="add-on">&deg;C</span></span>
+        </label>
+        <label class="ef-mat">
+          <span class="ef-mat-name">HT<span class="ef-mat-note">ASA / ABS / Nylon / PC</span></span>
+          <span class="input-append"><input type="number" class="input-mini" min="20" max="80" step="1"
+                 data-bind="value: matHt"><span class="add-on">&deg;C</span></span>
+        </label>
+      </div>
+      <div class="ef-mat-actions">
+        <button class="btn btn-primary" data-bind="click: saveMaterials, disable: materialBusy">Save</button>
+        <span class="ef-help" data-bind="visible: materialMsg() !== ''">
+          <span data-bind="text: materialMsg"></span>
+        </span>
+      </div>
     </form>
-    <p class="ef-help" data-bind="visible: materialMsg() !== ''">
-      <span data-bind="text: materialMsg"></span>
-    </p>
 
     <div class="ef-cal" data-bind="visible: calSupported">
       <h4>

@@ -107,6 +107,17 @@ of the four inputs). Getting this wrong is not cosmetic: while it was missing th
 poll put the stored value back within two seconds, and Save then persisted the
 *old* number — the board looked like it was rejecting every change.
 
+### The page is a two-column grid, so a tab pane must span it
+
+`.wrap` is `display:grid` with `repeat(auto-fit, minmax(420px,1fr))`, and the
+header, the tab bar and the tab panes are all its items — which is why the header
+and `.tabs` carry `grid-column:1/-1`. The panes need it too. Without it the active
+pane sits in **column 1 only**: at a 1440 px viewport the content area is 868 px
+wide but the pane measured 428 px, so every card hugged the left half and the page
+looked left-aligned (measured with `getBoundingClientRect`, not by eye). With the
+span the pane is flush with the tab bar on both edges, and the cards fill it. A
+new pane that forgets the rule reintroduces exactly that asymmetry.
+
 ### `Content-Type: application/json` is required on POSTs with a body
 
 ```bash
