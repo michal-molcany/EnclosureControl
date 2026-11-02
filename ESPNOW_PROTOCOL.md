@@ -148,8 +148,9 @@ socket. Both require HTTP Basic auth with `ENC_API_TOKEN` as the password.
 GET  /api/enclosure  ->  {"louvre":0-100,"fan":0-100,"chamber":int16,"bed":int16,
                           "state":u8,"mode":u8,"seq":u8,
                           "calPhase":u8,"calElapsed":seconds,"calCycles":u16,
-                          "calBedTarget":C,"calSetpoint":C,"calError":u8}
-POST /api/enclosure  <-  {"mode":u8,"setpoint":0-60,"louvre":0-100,"fan":0-100,
+                          "calBedTarget":C,"calSetpoint":C,"calError":u8,
+                          "matPla":C,"matPetg":C,"matFlex":C,"matHt":C}
+POST /api/enclosure  <-  {"mode":u8,"setpoint":0-80,"louvre":0-100,"fan":0-100,
                           "material":u8,"job":0|1,"calAction":0|nonzero}
 ```
 
@@ -265,7 +266,7 @@ The setpoint remains in the packet but is ignored while the mode is MANUAL.
 ## C3 → CYD: `EnclosureTelemetry`
 
 **Direction:** EnclosureFanControl C3 to PrinterDisplay CYD  
-**Size:** 92 bytes (was 82; see *Protocol revision 4* below)<br>
+**Size:** 96 bytes (was 92; see *Protocol revision 5* below)<br>
 **Sent:** approximately every `ENC_TELEMETRY_INTERVAL_MS` (1 second)
 
 ### Byte layout
@@ -291,6 +292,26 @@ The setpoint remains in the packet but is ignored while the mode is MANUAL.
 | 89 | 1 | `calBedTargetC` | Bed preheat target in whole °C (currently 90) |
 | 90 | 1 | `calSetpointC` | Chamber setpoint in whole °C (currently 35) |
 | 91 | 1 | `calErrorCode` | `EnclosureCalError`, meaningful when `calPhase == 5` |
+| 92 | 1 | `matPlaC` | Stored PLA chamber target, whole °C; `0` = not reported |
+| 93 | 1 | `matPetgC` | Stored PETG chamber target, whole °C; `0` = not reported |
+| 94 | 1 | `matFlexC` | Stored FLEX (TPU/TPA) chamber target, whole °C; `0` = not reported |
+| 95 | 1 | `matHtC` | Stored HT (ASA/ABS/Nylon/PC) chamber target, whole °C; `0` = not reported |
+
+### Stored material targets
+
+`matPlaC` / `matPetgC` / `matFlexC` / `matHtC` are the four per-group chamber
+targets the C3 already keeps in its NVS and exposes in its web UI Settings tab
+and the OctoPrint plugin. They are on the wire because the regulator uses the
+CYD's `setpoint` whenever the link is alive (`applyActiveSetpoint`): a CYD that
+kept its own compiled-in copies would overwrite whatever was saved the moment a
+material button was pressed.
+
+The CYD maps its six material buttons onto the four groups exactly as the C3
+does — PLA→`matPlaC`, PETG→`matPetgC`, TPU→`matFlexC`, ASA/ABS/Nylon/anything
+else→`matHtC` — shows those numbers on the buttons, and sends the selected one as
+`setpoint`. `0` is the "not reported" sentinel an older C3 build sends; the CYD
+then keeps its compiled-in defaults (PLA 30, PETG 40, ASA/ABS/Nylon 50, TPU 35).
+The C3's editable range is 20–80 °C, which is also the range of `setpoint`.
 
 ### OctoPrint address propagation
 
@@ -404,6 +425,20 @@ The CYD uses these fields for a modal calibration screen that shows live
 chamber/bed readings and phase, blocks navigation until the run ends, and can
 request a confirmed cancel. All other CYD command fields remain ignored by the
 C3 while the relay owns the outputs.
+
+### Protocol revision 5
+
+Revision 5 grew `EnclosureTelemetry` from 92 to **96** bytes by adding the four
+stored material-group targets (`matPlaC`, `matPetgC`, `matFlexC`, `matHtC`).
+`EnclosureCommand` is unchanged at 10 bytes; the accepted `setpoint` range grew
+from 20–60 to 20–80 to cover the same range the material editor allows.
+`/api/enclosure` gained `matPla`, `matPetg`, `matFlex`, `matHt`.
+
+Before revision 5 the CYD's Material tab used its own compiled-in presets and sent
+those as the setpoint, so a target saved from the C3 web UI or the plugin was
+silently replaced by the display's copy whenever it was awake. With these fields
+the C3's stored values are what the Material tab shows and sends; a `0` field
+means an older C3 and the CYD falls back to its compiled-in defaults.
 
 Both boards validate the packet length against their own `sizeof()`, so a C3 and
 a CYD on mismatched builds **drop every frame** — the link goes quiet until both
@@ -645,7 +680,7 @@ The wire format depends on the shared struct definitions, native little-endian b
 
 Recommended safeguards for future protocol revisions:
 
-- ~~Add explicit static assertions for struct sizes and field offsets.~~ Done — `enclosure_proto.h` pins `EnclosureTelemetry` to 92 bytes and `EnclosureCommand` to 10, with every offset asserted, including the byte that is now `calAction`.
+- ~~Add explicit static assertions for struct sizes and field offsets.~~ Done — `enclosure_proto.h` pins `EnclosureTelemetry` to 96 bytes and `EnclosureCommand` to 10, with every offset asserted, including the byte that is now `calAction`.
 - ~~Add sender-MAC validation.~~ Done — both receive callbacks enforce it once paired.
 - Consider packed wire structs with fixed-width serialization.
 - Use an explicit protocol version field.

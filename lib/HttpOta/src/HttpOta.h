@@ -41,14 +41,19 @@ namespace HttpOta
     // "512k", "done reboot", "begin", "write", "end", "abort". May be null.
     using StatusFn = void (*)(const char *text);
 
+    // Appended to GET /status, space-separated, for sketch-specific diagnostics.
+    using ExtraStatusFn = String (*)();
+
     // password may be null or empty, which disables auth. It is copied, so the
     // caller does not have to keep the string alive. verbose adds a per-chunk
     // serial progress line (about once a second).
     //
     // boardRole is a short label ("CYD" / "C3") echoed in GET /status so a
     // remote query identifies which board answered. It is copied; may be null.
+    // extraStatus, when set, appends its text to the /status line.
     void begin(uint16_t port, const char *username, const char *password,
-               bool verbose, StatusFn onStatus, const char *boardRole = nullptr);
+               bool verbose, StatusFn onStatus, const char *boardRole = nullptr,
+               ExtraStatusFn extraStatus = nullptr);
 
     // Call from loop(). Handles one request; returns immediately.
     void poll();

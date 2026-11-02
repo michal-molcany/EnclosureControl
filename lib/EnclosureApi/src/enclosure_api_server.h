@@ -86,6 +86,12 @@ namespace EnclosureApi
         uint8_t calBedTargetC = 0;
         uint8_t calSetpointC = 0;
         uint8_t calErrorCode = ENC_CAL_ERR_NONE;
+        // The stored material-group chamber targets, mirroring the ESP-NOW
+        // fields of the same name. 0 means "not reported" (older firmware).
+        uint8_t matPlaC = 0;
+        uint8_t matPetgC = 0;
+        uint8_t matFlexC = 0;
+        uint8_t matHtC = 0;
     };
 
     using TelemetryProvider = Telemetry (*)();

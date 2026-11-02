@@ -23,6 +23,13 @@ struct EnclosureSnapshot
     uint8_t calBedTargetC = 0;
     uint8_t calSetpointC = 0;
     uint8_t calErrorCode = ENC_CAL_ERR_NONE;
+    // The four material-group chamber targets stored on the C3 (PLA, PETG,
+    // FLEX, HT). 0 means "not reported" - an older C3 build - and the UI then
+    // keeps its compiled-in defaults. See EnclosureTelemetry.
+    uint8_t matPlaC = 0;
+    uint8_t matPetgC = 0;
+    uint8_t matFlexC = 0;
+    uint8_t matHtC = 0;
     unsigned long rxMs = 0;
     bool valid = false;
     // True when the newest telemetry arrived over the HTTP API fallback rather
@@ -77,5 +84,12 @@ EnclosureLinkStats enclosureLinkStats();
 // magic+seq and sends immediately, then repeats it as heartbeat.
 // Safe to call before enclosureLinkStart (drops the packet).
 void enclosureLinkSend(const EnclosureCommand &cmd);
+
+// The command the link task is currently repeating, and how many commands have
+// been enqueued since boot. GET /status reports both: "the UI shows setpoint 33
+// but the C3 still says 30" is either a command that was never queued or a
+// heartbeat repeating an old one, and the two look identical from outside.
+bool enclosureLinkLastCommand(EnclosureCommand &out);
+uint32_t enclosureLinkCommandsQueued();
 
 #endif

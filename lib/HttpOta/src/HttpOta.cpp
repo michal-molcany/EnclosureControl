@@ -26,6 +26,8 @@ namespace
         const char *boardRole = "?";
         bool verbose = false;
         HttpOta::StatusFn onStatus = nullptr;
+        // Sketch-specific /status tail; null when the caller supplied none.
+        HttpOta::ExtraStatusFn extraStatus = nullptr;
 
         // True while chunks are arriving, and briefly after a failure so the
         // reason stays readable instead of the UI overwriting it.
@@ -215,12 +217,14 @@ namespace
 } // namespace
 
 void HttpOta::begin(uint16_t port, const char *user, const char *pass,
-                    bool verboseLog, StatusFn sink, const char *role)
+                    bool verboseLog, StatusFn sink, const char *role,
+                    ExtraStatusFn extra)
 {
     st.username = (user && *user) ? user : "enclosure";
     st.password = pass ? pass : "";
     st.verbose = verboseLog;
     st.onStatus = sink;
+    st.extraStatus = extra;
     // Points at the caller's string literal, which outlives the process.
     st.boardRole = (role && *role) ? role : "?";
 
@@ -268,7 +272,15 @@ void HttpOta::begin(uint16_t port, const char *user, const char *pass,
                      static_cast<unsigned>(st.written),
                      static_cast<unsigned>(st.contentTotal),
                      static_cast<unsigned long>(millis() - st.lastWriteMs), st.errName);
-            st.server->send(200, "text/plain", b);
+            // The sketch's own diagnostics last, so the fields above keep their
+            // position for anything that parses this line.
+            String out = b;
+            if (st.extraStatus)
+            {
+                out += ' ';
+                out += st.extraStatus();
+            }
+            st.server->send(200, "text/plain", out);
         });
 
     st.server->on(

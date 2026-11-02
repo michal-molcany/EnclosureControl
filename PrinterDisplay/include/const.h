@@ -79,7 +79,10 @@
 #define PREHEAT_TARGET_SETTLE_MS 6000
 
 #define CHAMBER_SETPOINT_MIN 20
-#define CHAMBER_SETPOINT_MAX 60
+// Matches the C3's editable material-target range (20-80, /api/materials) and
+// its REMOTE_SETPOINT_MAX. A lower ceiling here would clamp a saved HT target
+// on the way to the board and quietly replace it with the clamped value.
+#define CHAMBER_SETPOINT_MAX 80
 #define CHAMBER_SETPOINT_STEP 1
 #define CHAMBER_SETPOINT_DEFAULT 30
 
@@ -94,11 +97,15 @@
 #define FAN_LOUVRE_MIN_OPEN 10
 
 // Material presets for the chamber Material tab (AUTO setpoint profiles).
-// ASA/ABS target is 50 everywhere (matches C3 TEMP_ASA_CHAMBER_TARGET).
+// These are FALLBACKS only: the C3 owns the four group targets (PLA, PETG,
+// FLEX(TPU), HT(ASA/ABS/Nylon)) in its NVS and reports them in telemetry, and
+// those reported values are what the material screen shows and sends. The
+// numbers here are the C3's compiled-in defaults, used before the first
+// telemetry frame and against a C3 build that predates the reported targets.
 #define MATERIAL_COUNT 6
 #define MATERIAL_DEFAULT_INDEX 0 // PLA
 #define MATERIAL_PLA_SETPOINT 30
-#define MATERIAL_PETG_SETPOINT 30
+#define MATERIAL_PETG_SETPOINT 40
 #define MATERIAL_ASA_SETPOINT 50
 #define MATERIAL_ABS_SETPOINT 50
 #define MATERIAL_TPU_SETPOINT 35

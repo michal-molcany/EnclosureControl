@@ -148,6 +148,25 @@ struct EnclosureTelemetry
     uint8_t calBedTargetC;
     uint8_t calSetpointC;
     uint8_t calErrorCode; // EnclosureCalError, meaningful when calPhase == ABORTED
+
+    // Chamber setpoints the C3 has stored for its four material groups, in
+    // whole degrees C: PLA, PETG, FLEX (TPU/TPA) and HT (ASA/ABS/Nylon/PC).
+    //
+    // These are NOT new settings - they are the values already editable from
+    // the C3's own web UI or the OctoPrint plugin and persisted in its NVS.
+    // They are on the wire because the regulator uses the CYD's setpoint while
+    // the link is alive (see applyActiveSetpoint): a CYD that kept its own
+    // compiled-in copies would silently overwrite whatever was saved as soon as
+    // anyone pressed a material button or switched to the Material tab. Sending
+    // them makes the CYD's material screen a view of the one stored truth.
+    //
+    // 0 means "not reported" - an older C3 build. The C3 never stores 0 (its
+    // editable range is 20-80 C), so 0 tells the CYD to keep its compiled-in
+    // fallback instead of showing or sending a nonsensical target.
+    uint8_t matPlaC;
+    uint8_t matPetgC;
+    uint8_t matFlexC;
+    uint8_t matHtC;
 };
 
 // Whether octoKey carries a value, and whether the receiver should act on it.
@@ -222,7 +241,7 @@ enum EnclosureRxDrop : uint8_t
 // mismatch - which shows up only as "the link is dead" - into a build error.
 // ESP32 (CYD) and ESP32-C3 (fan control) are both 32-bit little-endian with
 // 2-byte alignment on uint16_t/int16_t, so the two layouts must agree.
-static_assert(sizeof(EnclosureTelemetry) == 92, "EnclosureTelemetry must stay 92 bytes on the wire");
+static_assert(sizeof(EnclosureTelemetry) == 96, "EnclosureTelemetry must stay 96 bytes on the wire");
 static_assert(offsetof(EnclosureTelemetry, magic) == 0, "telemetry magic offset");
 static_assert(offsetof(EnclosureTelemetry, seq) == 2, "telemetry seq offset");
 static_assert(offsetof(EnclosureTelemetry, louvrePct) == 3, "telemetry louvrePct offset");
@@ -241,6 +260,10 @@ static_assert(offsetof(EnclosureTelemetry, calPhase) == 88, "telemetry calPhase 
 static_assert(offsetof(EnclosureTelemetry, calBedTargetC) == 89, "telemetry calBedTargetC offset");
 static_assert(offsetof(EnclosureTelemetry, calSetpointC) == 90, "telemetry calSetpointC offset");
 static_assert(offsetof(EnclosureTelemetry, calErrorCode) == 91, "telemetry calErrorCode offset");
+static_assert(offsetof(EnclosureTelemetry, matPlaC) == 92, "telemetry matPlaC offset");
+static_assert(offsetof(EnclosureTelemetry, matPetgC) == 93, "telemetry matPetgC offset");
+static_assert(offsetof(EnclosureTelemetry, matFlexC) == 94, "telemetry matFlexC offset");
+static_assert(offsetof(EnclosureTelemetry, matHtC) == 95, "telemetry matHtC offset");
 static_assert(sizeof(EnclosureTelemetry) < 127, "ESP-NOW payload limit");
 
 static_assert(sizeof(EnclosureCommand) == 10, "EnclosureCommand must stay 10 bytes on the wire");

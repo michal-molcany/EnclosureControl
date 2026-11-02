@@ -567,6 +567,14 @@ void espnowLinkPoll(TemperatureRegulation &reg, double chamberTemp, bool chamber
         tele.calBedTargetC = (uint8_t)cal.bedTargetC;
         tele.calSetpointC = (uint8_t)cal.setpointC;
         tele.calErrorCode = reg.calibrationErrorCode();
+        // The stored per-group material targets, so the CYD's Material tab can
+        // show and send the values saved here rather than its own copies. While
+        // the link is alive the regulator honours the CYD's setpoint, so a CYD
+        // unaware of these would override a saved target on the first tap.
+        tele.matPlaC = (uint8_t)reg.materialPlaTarget();
+        tele.matPetgC = (uint8_t)reg.materialPetgTarget();
+        tele.matFlexC = (uint8_t)reg.materialFlexTarget();
+        tele.matHtC = (uint8_t)reg.materialHtTarget();
         // The address we are polling, so the CYD can use the same one. Sent
         // every frame; the CYD stores it and repoints its own poller. All-zero
         // means "no override here", which tells the CYD to fall back to its own

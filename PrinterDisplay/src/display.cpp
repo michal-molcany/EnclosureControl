@@ -86,6 +86,69 @@ uint8_t Display::classifyFilament(const String &filament)
     return ENC_MATERIAL_UNKNOWN;
 }
 
+// The C3 stores four chamber targets - PLA, PETG, FLEX (TPU/TPA) and HT
+// (ASA/ABS/Nylon/PC) - and this mapping MUST stay identical to
+// TemperatureRegulation::materialTarget() on the C3, or the number shown on a
+// button is not the number the enclosure will regulate to.
+//
+// While the ESP-NOW link is alive the C3 uses THIS board's setpoint rather than
+// its own stored target (applyActiveSetpoint). That is why the C3 reports the
+// four targets in telemetry: without them the display would show its compiled-in
+// copies and quietly overwrite whatever was saved from the C3 web UI or the
+// OctoPrint plugin the first time a material button was touched.
+int Display::materialSetpoint(int index) const
+{
+    if (index < 0 || index >= MATERIAL_COUNT)
+        return CHAMBER_SETPOINT_DEFAULT;
+    // MATERIAL_PRESETS is in the same order as EnclosureMaterial for these six
+    // entries (PLA, PETG, ASA, ABS, TPU, Nylon), so the index is the code.
+    return materialSetpointForCode((uint8_t)index);
+}
+
+int Display::materialSetpointForCode(uint8_t material) const
+{
+    int target = 0;
+    int fallback = MATERIAL_ASA_SETPOINT;
+    switch (material)
+    {
+    case ENC_MATERIAL_PLA:
+        target = _enclosure.matPlaC;
+        fallback = MATERIAL_PLA_SETPOINT;
+        break;
+    case ENC_MATERIAL_PETG:
+        target = _enclosure.matPetgC;
+        fallback = MATERIAL_PETG_SETPOINT;
+        break;
+    case ENC_MATERIAL_TPU:
+        target = _enclosure.matFlexC;
+        fallback = MATERIAL_TPU_SETPOINT;
+        break;
+    case ENC_MATERIAL_ASA:
+        target = _enclosure.matHtC;
+        fallback = MATERIAL_ASA_SETPOINT;
+        break;
+    case ENC_MATERIAL_ABS:
+        target = _enclosure.matHtC;
+        fallback = MATERIAL_ABS_SETPOINT;
+        break;
+    case ENC_MATERIAL_NYLON:
+        target = _enclosure.matHtC;
+        fallback = MATERIAL_NYLON_SETPOINT;
+        break;
+    case ENC_MATERIAL_HIGH_TEMP:
+    case ENC_MATERIAL_UNKNOWN:
+    default:
+        target = _enclosure.matHtC;
+        fallback = MATERIAL_ASA_SETPOINT;
+        break;
+    }
+    // 0 is the "not reported" sentinel an older C3 sends; use our own default
+    // rather than showing, or sending, zero degrees.
+    const int value = target ? target : fallback;
+    return constrain(value, CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
+}
+
+
 String Display::normalizeFilament(const String &raw)
 {
     String s = raw;
@@ -1287,10 +1350,11 @@ void Display::createChamberView()
                             reinterpret_cast<void *>(static_cast<intptr_t>(index)));
         lv_obj_t *matLabel = lv_label_create(_materialButtons[index]);
         lv_label_set_text(matLabel, (String(MATERIAL_PRESETS[index].name) + " " +
-                                     String(MATERIAL_PRESETS[index].setpoint) + "C")
+                                     String(materialSetpoint(index)) + "C")
                                         .c_str());
         lv_obj_remove_flag(matLabel, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_center(matLabel);
+        _materialLabels[index] = matLabel;
     }
 
     // --- Temp tab: setpoint stepper (as before) + read-only info lines. ---
@@ -2778,6 +2842,35 @@ void Display::setChamberControl(ChamberControl mode)
         setChamberTab(mode == ChamberControl::Auto ? ChamberTab::Temperature : ChamberTab::Manual);
 }
 
+void Display::refreshMaterialLabels()
+{
+    for (int index = 0; index < MATERIAL_COUNT; ++index)
+    {
+        if (!_materialLabels[index])
+            continue;
+        const String text = String(MATERIAL_PRESETS[index].name) + " " +
+                            String(materialSetpoint(index)) + "C";
+        setLabelTextOnce(_materialLabels[index], text);
+    }
+}
+
+void Display::materialTargetsUpdate()
+{
+    refreshMaterialLabels();
+    // On the Temperature tab the setpoint is the user's own number, not a
+    // material profile, so the stored targets must not move it. Entering the
+    // Material tab re-applies the selected profile through setChamberTab().
+    if (_chamberTab != ChamberTab::Material)
+        return;
+    const int target = materialSetpoint(_materialIndex);
+    if (target == _chamberSetpoint)
+        return;
+    _chamberSetpoint = target;
+    _chamberSetpointSeeded = true;
+    refreshChamberDetail();
+    pushEnclosureCommand();
+}
+
 void Display::setChamberTab(ChamberTab tab)
 {
     const uint32_t index = static_cast<uint32_t>(tab);
@@ -2788,8 +2881,7 @@ void Display::setChamberTab(ChamberTab tab)
     // Entering Material re-applies the selected profile setpoint.
     if (tab == ChamberTab::Material)
     {
-        _chamberSetpoint = constrain(MATERIAL_PRESETS[_materialIndex].setpoint,
-                                     CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
+        _chamberSetpoint = materialSetpoint(_materialIndex);
         _chamberSetpointSeeded = true;
     }
     refreshChamberDetail();
@@ -2804,8 +2896,7 @@ void Display::selectMaterial(int index)
     _commandMaterial = (uint8_t)index;
     _chamberTab = ChamberTab::Material;
     _chamberControl = ChamberControl::Auto;
-    _chamberSetpoint = constrain(MATERIAL_PRESETS[index].setpoint,
-                                 CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
+    _chamberSetpoint = materialSetpoint(index);
     _chamberSetpointSeeded = true;
     _lastAutoFilament = normalizeFilament(_octoFilament);
     refreshChamberDetail();
@@ -2844,13 +2935,12 @@ void Display::autoSelectMaterial(const String &filament, bool jobActive)
     {
         _materialIndex = matched;
         _commandMaterial = (uint8_t)matched;
-        _chamberSetpoint = constrain(MATERIAL_PRESETS[matched].setpoint,
-                                     CHAMBER_SETPOINT_MIN, CHAMBER_SETPOINT_MAX);
+        _chamberSetpoint = materialSetpoint(matched);
     }
     else
     {
         _commandMaterial = classifyFilament(filament);
-        _chamberSetpoint = MATERIAL_ASA_SETPOINT;
+        _chamberSetpoint = materialSetpointForCode(_commandMaterial);
     }
 
     _chamberSetpointSeeded = true;
@@ -2878,8 +2968,17 @@ void Display::pushEnclosureCommand()
 
 void Display::enclosureUpdate(const EnclosureSnapshot &snap)
 {
+    bool targetsChanged = false;
     if (snap.valid)
+    {
+        targetsChanged = snap.matPlaC != _enclosure.matPlaC ||
+                         snap.matPetgC != _enclosure.matPetgC ||
+                         snap.matFlexC != _enclosure.matFlexC ||
+                         snap.matHtC != _enclosure.matHtC;
         _enclosure = snap;
+    }
+    if (targetsChanged)
+        materialTargetsUpdate();
     calibrationUpdate();
     refreshChamberDetail();
     refreshEnclosureLinkHeader();

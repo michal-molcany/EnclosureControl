@@ -76,7 +76,12 @@
 #define TEMP_EMERGENCY_TRIGGER 55
 #define TEMP_EMERGENCY_CLEAR 50
 #define REMOTE_SETPOINT_MIN 20
-#define REMOTE_SETPOINT_MAX 60
+// Must cover the whole range the material editor accepts (20-80, see
+// /api/materials). It used to stop at 60, which meant a saved HT target above
+// 60 was silently replaced by the CYD's 60 in the moment the display's own
+// setpoint arrived - the exact drift the telemetry material targets exist to
+// prevent.
+#define REMOTE_SETPOINT_MAX 80
 
 // ESP-NOW peer (PrinterDisplay CYD WiFi MAC). All zeros = receive-only
 // until set. Both firmwares log their own MAC at boot - copy them over.

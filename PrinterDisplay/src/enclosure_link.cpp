@@ -31,6 +31,10 @@ namespace
 
     EnclosureCommand lastCmd = {};
     bool hasCmd = false;
+    unsigned long lastCmdMs = 0;
+    // Counts enqueued commands, so /status can distinguish "the UI never queued
+    // a change" from "the link is repeating an old command".
+    volatile uint32_t cmdsQueued = 0;
     unsigned long lastHeartbeatMs = 0;
     unsigned long lastResyncMs = 0;
     unsigned long lastDiagMs = 0;
@@ -361,6 +365,10 @@ namespace
         shared.calBedTargetC = tele->calBedTargetC;
         shared.calSetpointC = tele->calSetpointC;
         shared.calErrorCode = tele->calErrorCode;
+        shared.matPlaC = tele->matPlaC;
+        shared.matPetgC = tele->matPetgC;
+        shared.matFlexC = tele->matFlexC;
+        shared.matHtC = tele->matHtC;
         shared.rxMs = millis();
         shared.valid = true;
         shared.fromApi = false;
@@ -490,6 +498,10 @@ namespace
                     shared.calBedTargetC = t.calBedTargetC;
                     shared.calSetpointC = t.calSetpointC;
                     shared.calErrorCode = t.calErrorCode;
+                    shared.matPlaC = t.matPlaC;
+                    shared.matPetgC = t.matPetgC;
+                    shared.matFlexC = t.matFlexC;
+                    shared.matHtC = t.matHtC;
                     shared.rxMs = millis();
                     shared.valid = true;
                     shared.fromApi = true;
@@ -841,5 +853,21 @@ EnclosureLinkStats enclosureLinkStats()
 void enclosureLinkSend(const EnclosureCommand &cmd)
 {
     if (commandQueue)
-        xQueueSend(commandQueue, &cmd, 0);
+    {
+        if (xQueueSend(commandQueue, &cmd, 0) == pdTRUE)
+            ++cmdsQueued;
+    }
+}
+
+bool enclosureLinkLastCommand(EnclosureCommand &out)
+{
+    if (!hasCmd)
+        return false;
+    out = lastCmd;
+    return true;
+}
+
+uint32_t enclosureLinkCommandsQueued()
+{
+    return cmdsQueued;
 }

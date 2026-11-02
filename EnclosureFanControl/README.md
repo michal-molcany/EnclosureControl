@@ -47,6 +47,12 @@ fan, material, setpoint, whether the CYD is linked), and lets you:
 - read and change the PID gains, then **Save** them to NVS or restore the
   compiled-in defaults. The header shows whether the running gains still match
   what is stored, so an unsaved tuning cannot quietly disappear on reboot;
+- edit the four **material profiles** (PLA, PETG, FLEX, HT) on the Settings tab.
+  They live in this board's NVS and survive OTA updates, and they are what the
+  CYD's Material tab shows and sends: while the link is alive the regulator uses
+  the CYD's setpoint, so the display reads these values back over telemetry
+  instead of keeping its own copies. Accepted range is 20-80 °C, matching the
+  CYD's `setpoint` range;
 - run a **PID calibration** (see below);
 - take manual control of the fan and louvre.
 
@@ -168,7 +174,7 @@ curl -u "$AUTH" -X POST $C3/api/octoprint/defaults  # back to include/octoprint_
   Telemetry carries the address every second, so a CYD that was off during the
   change catches up within a second. Clearing the override here clears it there
   too. Both boards must be flashed together when the protocol revision changes -
-  see [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 4*.
+  see [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 5*.
 - An IPv4 address only, not a hostname: the OctoPrint client connects to an
   `IPAddress`, so a name would need DNS resolution added first.
 

@@ -21,8 +21,10 @@
 //                          "bed":int16<- "0.1 C, "state":EnclosureState,"mode":EnclosureMode,
 //                          "seq":0-255,"calPhase":EnclosureCalPhase,
 //                          "calElapsed":seconds,"calCycles":n,"calBedTarget":C,
-//                          "calSetpoint":C,"calError":EnclosureCalError}
-//   POST /api/enclosure <- {"mode":EnclosureMode,"setpoint":0-60,"louvre":0-100,
+//                          "calSetpoint":C,"calError":EnclosureCalError,
+//                          "octoIp":"x.x.x.x","octoPort":n,"matPla":C,"matPetg":C,
+//                          "matFlex":C,"matHt":C}
+//   POST /api/enclosure <- {"mode":EnclosureMode,"setpoint":0-80,"louvre":0-100,
 //                          "fan":0-100,"material":EnclosureMaterial,"job":0|1,
 //                          "calAction":0|nonzero cancel request}
 //
@@ -93,6 +95,13 @@ namespace
         doc["calBedTarget"] = t.calBedTargetC;
         doc["calSetpoint"] = t.calSetpointC;
         doc["calError"] = t.calErrorCode;
+        // Stored per-group material targets, same keys as the ESP-NOW fields'
+        // meaning. Always emitted: unlike the API key this is not a credential,
+        // and the CYD's fallback path needs them on every response.
+        doc["matPla"] = t.matPlaC;
+        doc["matPetg"] = t.matPetgC;
+        doc["matFlex"] = t.matFlexC;
+        doc["matHt"] = t.matHtC;
         doc["octoIp"] = String(t.octoIp[0]) + "." + String(t.octoIp[1]) + "." +
                         String(t.octoIp[2]) + "." + String(t.octoIp[3]);
         doc["octoPort"] = t.octoPort;

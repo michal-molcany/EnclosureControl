@@ -50,6 +50,13 @@ static EnclosureApi::Telemetry provideEnclosureTelemetry()
   t.calBedTargetC = (uint8_t)cal.bedTargetC;
   t.calSetpointC = (uint8_t)cal.setpointC;
   t.calErrorCode = tempRegulation.calibrationErrorCode();
+  // The stored per-group material targets, same values and same reason as the
+  // ESP-NOW telemetry copy: the CYD drives the setpoint while the link is alive,
+  // so it has to know what was saved here or it will overwrite it.
+  t.matPlaC = (uint8_t)tempRegulation.materialPlaTarget();
+  t.matPetgC = (uint8_t)tempRegulation.materialPetgTarget();
+  t.matFlexC = (uint8_t)tempRegulation.materialFlexTarget();
+  t.matHtC = (uint8_t)tempRegulation.materialHtTarget();
   // Carried over this transport too, so the CYD still learns a new OctoPrint
   // address while it is falling back to HTTP because ESP-NOW is unusable.
   const IPAddress octo = octoEndpointIp();

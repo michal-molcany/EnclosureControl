@@ -264,6 +264,17 @@ private:
     void pushEnclosureCommand();
     // Auto-switch Material profile from OctoPrint filament (Material tab only).
     void autoSelectMaterial(const String &filament, bool jobActive);
+    // Chamber setpoint for a material index / ENC_MATERIAL_* code. Resolves to
+    // the C3's stored group target when telemetry has reported one, else to the
+    // compiled-in MATERIAL_PRESETS value (an older C3 that sends no targets).
+    int materialSetpoint(int index) const;
+    int materialSetpointForCode(uint8_t material) const;
+    // Re-label the Material tab's buttons after the C3's stored targets change.
+    void refreshMaterialLabels();
+    // Adopt the four stored group targets from fresh telemetry. If the Material
+    // tab is the active one, the selected profile's setpoint follows them: that
+    // setpoint is what the C3 regulates to while this board is alive.
+    void materialTargetsUpdate();
     static String normalizeFilament(const String &raw);
     static bool filamentContains(const String &norm, const char *token);
 
@@ -388,6 +399,9 @@ private:
     lv_obj_t *_tempContainer = nullptr;
     lv_obj_t *_manContainer = nullptr;
     lv_obj_t *_materialButtons[MATERIAL_COUNT] = {};
+    // Labels inside those buttons, kept so a target changed on the C3 can be
+    // reflected without waiting for a screen rebuild.
+    lv_obj_t *_materialLabels[MATERIAL_COUNT] = {};
     lv_obj_t *_tempInfoLabel = nullptr;
     lv_obj_t *_tempStateLabel = nullptr;
     ChamberControl _chamberControl = ChamberControl::Auto;

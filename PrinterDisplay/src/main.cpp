@@ -139,6 +139,54 @@ void octoPrintUpdate()
     }
 }
 
+// Appended to GET /status. "Which build is running" is only half the question
+// on this board; the other half is "is the enclosure link delivering telemetry,
+// and what does the Material screen think it should send?" - neither of which is
+// visible without a serial cable. The material numbers are the C3's stored
+// targets as this board last saw them; 0 means it has never seen them.
+static String cydStatusExtra()
+{
+    EnclosureSnapshot snap;
+    const bool have = enclosureLinkCopy(snap);
+    const bool fresh = have && snap.valid &&
+                       (millis() - snap.rxMs < ENC_LINK_STALE_MS);
+    String out = "link=";
+    out += fresh ? (snap.fromApi ? "api" : "espnow") : "stale";
+    // What the link is actually repeating: setpoint/mode/job. This is the
+    // command the C3 sees, which is not necessarily what the UI shows.
+    EnclosureCommand cmd = {};
+    if (enclosureLinkLastCommand(cmd))
+    {
+        out += " cmd=";
+        out += String(cmd.setpoint);
+        out += '/';
+        out += String(static_cast<unsigned>(cmd.mode));
+        out += '/';
+        out += String(static_cast<unsigned>(cmd.jobActive));
+    }
+    else
+    {
+        out += " cmd=none";
+    }
+    out += " cq=";
+    out += String(enclosureLinkCommandsQueued());
+    out += " mat=";
+    out += String(snap.matPlaC);
+    out += '/';
+    out += String(snap.matPetgC);
+    out += '/';
+    out += String(snap.matFlexC);
+    out += '/';
+    out += String(snap.matHtC);
+    out += " sp=";
+    out += String(disp.chamberSetpoint());
+    out += " tab=";
+    out += String(static_cast<int>(disp.chamberTab()));
+    out += " mi=";
+    out += String(disp.materialIndex());
+    return out;
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -184,7 +232,7 @@ disp.setPreheatAction(Display::PreheatKind::Bed, preheatBed);
     // only outbound traffic is needed (ArduinoOTA is blocked by the host
     // firewall - see the README).
     HttpOta::begin(OTA_HTTP_PORT, OTA_HTTP_USER, sec.getOTAPassword().c_str(),
-                   SERIAL_DEBUG != 0, otaStatus, "CYD");
+                   SERIAL_DEBUG != 0, otaStatus, "CYD", cydStatusExtra);
     disp.createLabes();
 }
 

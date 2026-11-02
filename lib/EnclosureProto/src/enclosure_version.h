@@ -33,8 +33,8 @@
 // version number are still distinguishable on the device.
 
 #define ENC_FW_VERSION_MAJOR 0
-#define ENC_FW_VERSION_MINOR 5
-#define ENC_FW_VERSION_PATCH 24
+#define ENC_FW_VERSION_MINOR 6
+#define ENC_FW_VERSION_PATCH 2
 
 // Protocol revision, bumped only when the structs in enclosure_proto.h or the
 // JSON keys in lib/EnclosureApi change in a backward-incompatible way.
@@ -51,12 +51,18 @@
 // error), and gave EnclosureCommand its previously-padded byte to calAction.
 // The HTTP fallback's /api/enclosure gained the matching JSON keys.
 //
+// Revision 5 grew EnclosureTelemetry from 92 to 96 bytes with the four stored
+// material-group chamber targets (matPlaC/matPetgC/matFlexC/matHtC), so the
+// CYD's Material tab shows - and sends - the values saved on the C3 instead of
+// its own compiled-in copies. /api/enclosure gained matPla/matPetg/matFlex/
+// matHt. The static_asserts in enclosure_proto.h pin the new size and offsets.
+//
 // Note this number is a DIAGNOSTIC LABEL, not an enforced handshake: nothing on
 // the link compares it, and the length check does that work implicitly. Its whole
 // value is that "proto vN" on a boot line names the layout, so a reader chasing a
 // dead link can rule a version mismatch in or out immediately. That only helps if
 // it is actually correct.
-#define ENC_PROTO_VERSION 4
+#define ENC_PROTO_VERSION 5
 
 // Stringify the numbers above so the printed line cannot drift from them.
 #define ENC_STR2(x) #x

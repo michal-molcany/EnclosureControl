@@ -161,11 +161,12 @@ Two consequences:
   value cleared on the C3 clears it here too — the all-zero `octoIp` in telemetry
   means "I have no override", not "address zero".
 - **Both boards must be flashed together.** Telemetry grew from 10 to 16 bytes in
-  revision 2, from 16 to 82 in revision 3, and from 82 to 92 in revision 4; a
-  mismatched pair drops every frame. It is not fatal — this board falls back to
-  the HTTP API and keeps working, it just does not receive the endpoint, key, or
-  calibration hand-off until both are flashed. See
-  [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 4*.
+  revision 2, from 16 to 82 in revision 3, from 82 to 92 in revision 4, and from
+  92 to 96 in revision 5; a mismatched pair drops every frame. It is not fatal —
+  this board falls back to the HTTP API and keeps working, it just does not
+  receive the endpoint, key, calibration, or material-target hand-off until both
+  are flashed. See
+  [`../ESPNOW_PROTOCOL.md`](../ESPNOW_PROTOCOL.md) → *Protocol revision 5*.
 
 > WARNING: Rotate your WiFi password and OctoPrint API key if they were ever committed.
 
@@ -282,6 +283,19 @@ stored in the C3's own NVS. Those four values are edited from the C3 web UI
 preheat presets above. This is deliberate: the C3 must keep regulating the
 chamber when the CYD is unplugged.
 
+The Material tab **shows the C3's stored values**, not copies of its own. The C3
+reports the four group targets in telemetry (`matPlaC`/`matPetgC`/`matFlexC`/
+`matHtC`), the buttons label themselves from them, and pressing one sends that
+number as the `setpoint`. PLA/PETG/TPU map to their own group, and ASA/ABS/Nylon
+share HT, mirroring the C3's own classification. Without this the display's
+compiled-in presets would overwrite a saved target the first time a button was
+pressed, because the C3 uses the CYD's setpoint while the link is alive. The
+compiled-in values in `MATERIAL_*_SETPOINT` are only a fallback: they are used
+before the first telemetry frame and against an older C3 that reports no targets
+(`0` means "not reported"). A target changed on the C3 page or in the plugin
+while this screen is open re-labels the buttons within a second; if the Material
+tab is the active one, the selected profile's setpoint follows it too.
+
 
 
 ## OTA Updates
@@ -317,18 +331,35 @@ real flash from a failed one. On success the board **reboots itself** once the
 response has been sent, so the new image is the one actually running; it is
 back on the network roughly 15 seconds later.
 
-`GET /status` reports the same state without uploading, which matters here
-because `SERIAL_DEBUG` is off:
+`GET /status` reports the same state without uploading, which matters because the
+board is normally mounted out of reach:
 
 ```text
 curl -u enclosure:YOUR_OTA_PASSWORD http://<board>:8080/status
-busy=0 ok=0 starts=0 written=0 total=0 age=54905ms err=
+board=CYD fw=v0.6.2 proto=v5 busy=0 ok=0 starts=0 written=0 total=0 age=54905ms err= link=api cmd=48/0/1 cq=7 mat=30/40/35/48 sp=48 tab=0 mi=2
 ```
 
 `starts` counts upload attempts since boot and `age` is time since the last
 chunk, so a rising `age` means the board is up and idle rather than wedged.
 A transfer that stops mid-stream is abandoned after 30s (`err=stalled`) so a
 half-open connection cannot leave the splash stuck on screen.
+
+The tail after `err=` is this sketch's own, and it exists because "is the
+enclosure link working?" is not answerable from the fields above:
+
+| Field | Meaning |
+| --- | --- |
+| `link=` | `espnow` or `api` - the transport that delivered the newest telemetry - or `stale` if nothing has arrived for 5 s |
+| `cmd=` | `setpoint/mode/jobActive` of the command the link is currently repeating |
+| `cq=` | commands enqueued since boot |
+| `mat=` | the C3's stored PLA/PETG/FLEX/HT chamber targets, as last reported |
+| `sp=` | the chamber setpoint this board is sending |
+| `tab=` | `0` Material, `1` Temperature, `2` Manual |
+| `mi=` | selected material index, in `MATERIAL_PRESETS` order |
+
+`sp` disagreeing with `cmd` means the UI changed but nothing was queued;
+`cmd` disagreeing with the C3's own `/api/status` setpoint means the command was
+not delivered or not accepted. Both used to look identical from the outside.
 
 Per-chunk progress is also written to the serial log about once a second when
 `SERIAL_DEBUG` is enabled in `const.h`.

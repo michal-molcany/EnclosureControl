@@ -161,6 +161,12 @@ namespace EnclosureApi
         out.calBedTargetC = (uint8_t)(doc["calBedTarget"] | 0);
         out.calSetpointC = (uint8_t)(doc["calSetpoint"] | 0);
         out.calErrorCode = (uint8_t)(doc["calError"] | (uint8_t)ENC_CAL_ERR_NONE);
+        // Stored material targets. Absent on an older C3 build, which leaves 0 -
+        // the "not reported" sentinel the UI already handles for an old board.
+        out.matPlaC = (uint8_t)(doc["matPla"] | 0);
+        out.matPetgC = (uint8_t)(doc["matPetg"] | 0);
+        out.matFlexC = (uint8_t)(doc["matFlex"] | 0);
+        out.matHtC = (uint8_t)(doc["matHt"] | 0);
         // OctoPrint endpoint, same keys the ESP-NOW telemetry carries. Absent on
         // an older C3 build, which leaves the all-zero "no override" sentinel
         // intact rather than inventing an address.
