@@ -1169,6 +1169,7 @@ void TemperatureRegulation::setLouvrePercent(uint8_t percent, bool immediate)
 {
     if (percent > 100)
         percent = 100;
+    const uint8_t previousTarget = louvreTarget;
     louvreTarget = percent;
     if (immediate)
     {
@@ -1180,8 +1181,17 @@ void TemperatureRegulation::setLouvrePercent(uint8_t percent, bool immediate)
         lastLouvrePct = percent;
         louvreOpen = percent > 0;
     }
-    // Otherwise serviceLouvre() advances louvreRamped toward louvreTarget at
-    // LOUVRE_RAMP_PCT per SERVO_MIN_MOVE_INTERVAL_MS (2 s for full travel).
+    else if (percent != previousTarget)
+    {
+        // Restart the step clock for every new target. The time since the last
+        // step belongs to the previous move - possibly minutes ago, with the
+        // louvre sitting still - and folding it into the first step of this one
+        // would open with a jump instead of a ramp.
+        lastLouvreMoveMs = millis();
+    }
+    // Otherwise serviceLouvre() advances louvreRamped toward louvreTarget over
+    // LOUVRE_TRAVEL_MS (2 s for full travel), one SERVO_MIN_MOVE_INTERVAL_MS
+    // step at a time.
 }
 
 void TemperatureRegulation::setFanPercent(uint8_t percent)
@@ -1263,15 +1273,35 @@ void TemperatureRegulation::serviceLouvre()
     if (louvreRamped == louvreTarget)
         return;
     const unsigned long now = millis();
-    if (now - lastLouvreMoveMs < (unsigned long)SERVO_MIN_MOVE_INTERVAL_MS)
+    const unsigned long elapsed = now - lastLouvreMoveMs;
+    if (elapsed < (unsigned long)SERVO_MIN_MOVE_INTERVAL_MS)
         return;
+
+    // Step from the time that ACTUALLY elapsed, not from a fixed count. The
+    // slew rate is then LOUVRE_TRAVEL_MS by construction, whatever loop()
+    // jitter (HTTP, OTA, display) does in between - a late iteration takes a
+    // bigger step instead of stretching the whole move. LOUVRE_RAMP_MAX_PCT
+    // caps the catch-up so a real stall cannot snap the louvre.
+    int step = (int)((elapsed * 100UL + (LOUVRE_TRAVEL_MS / 2)) / LOUVRE_TRAVEL_MS);
+    if (step < 1)
+        step = 1;
+    if (step > LOUVRE_RAMP_MAX_PCT)
+        step = LOUVRE_RAMP_MAX_PCT;
+
+    const int delta = (int)louvreTarget - (int)louvreRamped;
+    if (step > (delta < 0 ? -delta : delta))
+        step = (delta < 0 ? -delta : delta); // never overshoot the target
+    const uint8_t next = (uint8_t)((int)louvreRamped + (delta < 0 ? -step : step));
+
+    // setPercent() drops a move inside its OWN rate limit. Report it and retry
+    // next iteration rather than consuming the time step: advancing the ramp
+    // anyway would silently drop that step and leave the louvre short of the
+    // target, which the old fixed-step version could not recover from.
+    if (louver && !louver->setPercent(next))
+        return;
+
     lastLouvreMoveMs = now;
-    int8_t delta = (int8_t)louvreTarget - (int8_t)louvreRamped;
-    if (delta > LOUVRE_RAMP_PCT) delta = LOUVRE_RAMP_PCT;
-    if (delta < -LOUVRE_RAMP_PCT) delta = -LOUVRE_RAMP_PCT;
-    louvreRamped = (uint8_t)((int8_t)louvreRamped + delta);
-    if (louver)
-        louver->setPercent(louvreRamped);
+    louvreRamped = next;
     lastLouvrePct = louvreRamped;
     louvreOpen = louvreRamped > 0;
 }

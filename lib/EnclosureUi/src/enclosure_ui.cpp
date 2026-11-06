@@ -176,6 +176,11 @@ namespace
         doc["octoSentToCyd"] = s.octoSentToCyd;
         doc["octoKeySet"] = s.octoKeySet;
         doc["octoKeyOverridden"] = s.octoKeyOverridden;
+        // OctoPrint reachability. The values that would read as a live chamber
+        // or bed temperature are keep-last-good, so the flag is what tells the
+        // page the number is history and not present.
+        doc["octoStale"] = s.octoStale;
+        doc["octoAgeMs"] = s.octoAgeMs;
 
         writePidBlock(doc, providePid ? providePid() : pidDefaultGains());
 

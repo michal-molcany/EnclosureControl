@@ -29,6 +29,13 @@ static unsigned long lastUiMs = 0;
 static double g_chamberTemp = 0.0;
 static bool g_chamberValid = false;
 
+// Whether OctoPrint is answering, mirrored for the same reason: the web page and
+// both telemetry paths are built by free functions. `g_octoAgeMs` is how long
+// since the last successful poll, so the page can say "down for 4 m" rather than
+// just "down".
+static bool g_octoFresh = false;
+static unsigned long g_octoAgeMs = 0;
+
 // Serves GET /api/enclosure. The CYD requests this only while its ESP-NOW link
 // is stale, so this path never runs once the radios agree on a channel again.
 static EnclosureApi::Telemetry provideEnclosureTelemetry()
@@ -282,8 +289,13 @@ static EnclosureUi::Status provideEnclosureUiStatus()
   s.matPetgTarget = tempRegulation.materialPetgTarget();
   s.matFlexTarget = tempRegulation.materialFlexTarget();
   s.matHtTarget = tempRegulation.materialHtTarget();
-  s.elapsed = haveGood ? lastGood.elapsed : "";
-  s.remaining = haveGood ? lastGood.remaining : "";
+  s.elapsed = g_octoFresh && haveGood ? lastGood.elapsed : "";
+  s.remaining = g_octoFresh && haveGood ? lastGood.remaining : "";
+  // OctoPrint reachability, as its own fact rather than something the page has to
+  // infer from a missing temperature. Every reading above is keep-last-good, so
+  // without this a dead server looks like a live one with the same numbers.
+  s.octoStale = !g_octoFresh;
+  s.octoAgeMs = g_octoAgeMs;
   s.material = tempRegulation.activeMaterial();
   s.setpointC = (int8_t)tempRegulation.activeSetpoint();
   s.emergencyActive = tempRegulation.isEmergencyActive();
@@ -788,9 +800,17 @@ void loop()
   }
   const OctoSnapshot &effective = haveGood ? lastGood : snap;
   const bool valid = haveGood ? octoSnapshotValid(lastGood) : false;
+  // Keep-last-good is right for REGULATION (the PID holds its demand on a stale
+  // reading - see temperature_regulation) but wrong for anything a human reads:
+  // the same last-good temperature would be shown as a live one. So the OLED,
+  // the ESP-NOW/HTTP telemetry and the web page get the strict version.
+  const bool fresh = haveGood && !octoSnapshotStale(lastGood);
+  const bool readable = valid && fresh;
   const double chamberTemp = haveGood ? lastGood.chamberActual : 0.0;
   g_chamberTemp = chamberTemp;
-  g_chamberValid = valid;
+  g_chamberValid = readable;
+  g_octoFresh = fresh;
+  g_octoAgeMs = haveGood ? (unsigned long)((int32_t)(millis() - lastGood.updatedMs)) : 0UL;
 
   // Single louvre owner: TemperatureRegulation drives fan + servo.
   // (Calling louver.updateForPrinter() here as well would fight it.)
@@ -818,14 +838,16 @@ tempRegulation.serviceLouvre();
       if (!espnowLinkHasPeer())
         display.showPairing(WiFi.macAddress());
       else
-        display.update(chamberTemp, valid,
+        display.update(chamberTemp, readable,
                        tempRegulation.getCurrentState(), tempRegulation.isFanActive(),
                        tempRegulation.controlModeCode() == ENC_MODE_MANUAL, linked,
                        tempRegulation.louvrePercent(), tempRegulation.fanPercent());
     }
 
     // ESP-NOW telemetry to PrinterDisplay + inbound remote commands.
-    espnowLinkPoll(tempRegulation, chamberTemp, valid);
+    // `readable`, not `valid`: a stale number must not be republished as a live
+    // one to the CYD either.
+    espnowLinkPoll(tempRegulation, chamberTemp, readable);
 #if SERIAL_DEBUG
     Serial.printf("[DBG] mode=%s state=%s temp=%.1fC valid=%u job=%u louvre=%u fan=%u link=%u\n",
                   tempRegulation.controlModeCode() == ENC_MODE_MANUAL ? "MANUAL" : "AUTO",
@@ -841,6 +863,12 @@ tempRegulation.serviceLouvre();
 
   // Idle faster during any update so the OTA/HTTP sockets drain quickly.
   // HttpOta::busy() matters as much as otaActive: the HTTP path would otherwise
-  // sit at 50 ms per iteration, throttling a ~1 MB upload to ~700 rounds.
-  delay((otaActive || HttpOta::busy()) ? 1 : 50);
+  // sit at LOOP_IDLE_MS per iteration, throttling a ~1 MB upload to ~700 rounds.
+  //
+  // The idle value is also the louvre ramp's cadence ceiling: serviceLouvre()
+  // can only step once per iteration, so a longer sleep coarsens the servo
+  // motion. It is kept at LOOP_IDLE_MS (const.h), below
+  // SERVO_MIN_MOVE_INTERVAL_MS, so the ramp actually runs at its 40 ms step
+  // interval instead of at whatever loop() happens to cost.
+  delay((otaActive || HttpOta::busy()) ? 1 : LOOP_IDLE_MS);
 }

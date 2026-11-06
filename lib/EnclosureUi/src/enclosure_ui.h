@@ -108,6 +108,15 @@ namespace EnclosureUi
         // made here will be overwritten by the CYD's next heartbeat.
         bool remotePeer = false;
         bool remoteLinkAlive = false;
+        // Whether OctoPrint is still answering, and for how long. Every value
+        // the page shows above that carries a temperature is keep-last-good -
+        // the poller keeps republishing the last successful reading while the
+        // server is away - so the page needs this flag to keep a stale reading
+        // from looking like a live one. stale = true means the readings are
+        // from the last poll that succeeded; the page then says so instead of
+        // inventing a current number.
+        bool octoStale = false;
+        unsigned long octoAgeMs = 0;
         // True when the NVS copy of the gains still matches the running ones,
         // i.e. nothing applied through the UI is one reboot away from being lost.
         bool gainsSaved = true;

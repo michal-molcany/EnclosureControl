@@ -18,11 +18,36 @@
 #define SERVO_MAX 2400
 #define SERVO_OFF_ANGLE 0
 #define SERVO_ON_ANGLE 120
-// Minimum time between physical servo moves (replaces blocking delay).
-#define SERVO_MIN_MOVE_INTERVAL_MS 200
-// Louvre ramp: maximum percentage point change per poll (2 s interval).
-// Lower = slower smoother motion; higher = faster but may jerk.
-#define LOUVRE_RAMP_PCT 10
+// Louvre ramp: time for a full 0-100% move. The ramp is driven by THIS, not by
+// a fixed percent-per-step: serviceLouvre() derives each step from the time
+// that actually elapsed, so a late loop() iteration takes a proportionally
+// bigger step and the travel still takes 2 s. (A fixed step per tick turned
+// loop jitter into travel-time drift - on the old 10%/200ms setting a 50 ms
+// idle delay made a "2 s" move take 2.0-2.5 s.)
+#define LOUVRE_TRAVEL_MS 2000
+// Longest elapsed time one step may compensate for. After a stall (an OTA
+// upload, a blocking HTTP request) the derived step would otherwise be the
+// whole remaining travel, and the louvre would snap to its target. Capping it
+// turns a stall into a slightly slow sweep instead. 15% = 18 deg, one step.
+#define LOUVRE_RAMP_MAX_PCT 15
+// Minimum time between physical servo writes. This sets the ramp's GRANULARITY
+// only - the slew rate comes from LOUVRE_TRAVEL_MS, so a shorter interval is
+// smoother without being faster. 40 ms is every 2nd 50 Hz PWM frame (~2.4 deg
+// per step); finer buys nothing, because a hobby servo's deadband is roughly
+// 0.6-1.2 deg and it does not resolve smaller commands.
+//
+// Must stay >= the loop's idle delay (LOOP_IDLE_MS) or the cadence cannot be
+// met and the derived steps simply grow to compensate.
+#define SERVO_MIN_MOVE_INTERVAL_MS 40
+// Self-test step cadence. Deliberately its own constant: the boot sweep steps a
+// blocking 10% per tick for the same 2 s as the operational ramp, so it must
+// NOT inherit SERVO_MIN_MOVE_INTERVAL_MS - that would turn it into a 0.4 s
+// snap across the full travel.
+#define SERVO_SELFTEST_STEP_MS 200
+// Idle sleep in loop(). Bounded from above by SERVO_MIN_MOVE_INTERVAL_MS: the
+// louvre ramp can only step once per iteration, so a longer sleep caps the
+// cadence and coarsens the motion.
+#define LOOP_IDLE_MS 20
 
 // Fan Control (PWM)
 // IMPORTANT: LEDC channel/timer reservation (Arduino maps chan->timer fixed):

@@ -223,6 +223,47 @@ The small C3 icon in the top-right of the main view goes green while telemetry i
 fresh and grey once it is older than 5 s. It reports the C3→CYD direction only;
 the C3's own `+CYD OK` footer reports the other way.
 
+### Info screen (connection diagnostics)
+
+**Tap anywhere in the header strip** — the state text, the link icons, the wifi
+bars, the separator line and the margin under it, i.e. the whole top 35 px above
+the panels — to open the info screen. Tap anywhere on it, or its **Back** button,
+to close it. The whole strip is the target on purpose: the earlier 50x26 px corner
+over the wifi bars was about 12x6 mm of glass and was hard to hit.
+
+The strip is a transparent, clickable LVGL **object** created last among the main
+view's children, not a coordinate test on the main container. That is load-
+bearing: LVGL only forwards a press from a child to its parent when the child
+carries `LV_OBJ_FLAG_EVENT_BUBBLE`, and the wifi bars are clickable objects in
+their own right, so as a coordinate test the gesture lost exactly the corner
+everyone instinctively taps.
+
+`GET /status` reports what the touch panel last did, which is the only way to
+diagnose this without a serial cable:
+
+| Field | Meaning |
+|---|---|
+| `hdr` | Header taps that reached the gesture and opened the screen |
+| `tp`  | Last touch in screen coordinates, `-1,-1` before the first one |
+
+Three groups of rows: **THIS BOARD** (firmware, uptime, address), **C3**
+(transport, online/offline) and **OCTOPRINT** (address, online/offline).
+
+The OctoPrint row is decided by **freshness**, not by the poll's own valid flag:
+the poll task keeps republishing the last good values after the server stops
+answering, so the values themselves cannot tell "idle" from "gone". A reading
+older than 30 s (ten 3 s poll cycles) turns the row red. If the row stays green
+with the printer switched off, that is a bug in the poller's timestamp, not a
+missing check — `PrinterSnapshot::updatedMs` may only advance on a poll cycle
+that actually reached OctoPrint.
+
+The main view applies the same test, a level up from the info screen: when the
+snapshot is stale, the state row reads **OctoPrint down** in red and the
+temperature panels fall back to their **-- / -- C** placeholders instead of the
+keep-last-good numbers. The values are not zeroed — a 0 C nozzle is a real
+temperature and printing that would be a second lie — they are just not shown
+as current.
+
 ### Nozzle and bed preheat
 
 Tapping the nozzle panel or the bed panel on the main view opens a preheat screen

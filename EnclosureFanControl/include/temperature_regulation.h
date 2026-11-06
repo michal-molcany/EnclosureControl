@@ -223,9 +223,11 @@ public:
     // sub-second break-away boost - without this the fan holds full power for a
     // whole second on every start. Does nothing when no boost is in progress.
     void serviceFan();
-    // Advances the louvre toward its target at LOUVRE_RAMP_PCT per
-    // SERVO_MIN_MOVE_INTERVAL_MS, so a 0->100% move takes 2 s. Call every
-    // loop() iteration, like serviceFan().
+    // Advances the louvre toward its target over LOUVRE_TRAVEL_MS (2 s for a
+    // 0->100% move), one SERVO_MIN_MOVE_INTERVAL_MS step at a time, where each
+    // step is sized from the time actually elapsed so loop() jitter cannot
+    // stretch or shorten the move. Call every loop() iteration, like
+    // serviceFan().
     void serviceLouvre();
 
     // Control functions

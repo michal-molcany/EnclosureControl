@@ -399,6 +399,14 @@ namespace
     QueueHandle_t commandQueue = nullptr;
     PrinterSnapshot shared;
     volatile bool hasData = false;
+    // Last poll cycle that actually reached OctoPrint. Poll-task-owned, like
+    // `shared`.
+    //
+    // This is what makes `updatedMs` mean "we last HAD data" rather than "we
+    // last ran". The task republishes the same values on every pass, so stamping
+    // unconditionally reported an unreachable OctoPrint as perfectly fresh - the
+    // one thing the info screen's online/offline row exists to catch.
+    uint32_t lastReachMs = 0;
     // Printable-file cache. Heap-allocated once (see pollerStart): ~3.8 KB
     // static here overflows the CYD's DRAM segment (it links only ~800 bytes
     // under the limit), while one early heap block is harmless.
@@ -668,10 +676,16 @@ namespace
         copy.lastLayerDuration = api.lastLayerDuration();
         copy.lastLayerDurationSeconds = api.lastLayerDurationSeconds();
         copy.valid = true;
-        // Stamped here, on the poll task, so it means "this task last had data at
+        // Stamped here, on the poll task, so it means "this task last HAD data at
         // T" - not "the UI last copied it". That is what makes it usable as a
         // staleness signal.
-        copy.updatedMs = millis();
+        //
+        // Only a cycle that reached OctoPrint may advance it: this task keeps
+        // republishing the last good values when the server stops answering, and
+        // a timestamp that moved anyway would call a dead server fresh.
+        if (api.lastUpdateOk())
+            lastReachMs = millis();
+        copy.updatedMs = lastReachMs;
         if (xSemaphoreTake(snapshotMutex, portMAX_DELAY) == pdTRUE)
         {
             shared = copy;

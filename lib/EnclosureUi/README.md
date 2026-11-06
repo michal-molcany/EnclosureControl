@@ -104,6 +104,25 @@ the four material targets. The rule in each case:
 - a **refused** write leaves the flag set (and the typed value on screen) so it
   can be corrected, instead of silently snapping back.
 
+### OctoPrint reachability
+
+`/api/status` carries two fields the rest of the document does not have:
+
+| Field | Meaning |
+|---|---|
+| `octoStale` | `true` when the last successful poll is older than 30 s. |
+| `octoAgeMs` | how long since that successful poll, in milliseconds. |
+
+They exist because the temperatures that feed the page are **keep-last-good**:
+while OctoPrint is away the board keeps repolling and keeps publishing the last
+reading it managed to read. On a stale read the page therefore (a) shows `octo`
+as `DOWN – last poll X`, (b) shows the chamber/bed readings as `no data`, and (c)
+shows the status note "OctoPrint unreachable – temperatures and job state show
+the last successful readings".
+
+Without the flag a dead OctoPrint looks like a live one, with a chamber of the
+correct magnitude and no way to tell the difference from the user's seat.
+
 `matDirty` is the per-field map for the material card (`matsave`, and Enter in any
 of the four inputs). Getting this wrong is not cosmetic: while it was missing the
 poll put the stored value back within two seconds, and Save then persisted the
@@ -141,6 +160,24 @@ the framework behaviour.
 defaults, read from `lib/EnclosureProto/src/enclosure_pid.h` rather than
 duplicated in the HTML, plus `pidSaved` (does NVS still match the running gains?)
 and board facts: RSSI, free heap, uptime, IP, firmware version.
+
+## The Status tab: enclosure readings and the Sources panel
+
+The Status tab is now two cards rather than one flat grid:
+
+- **Status** — the board's own readings: chamber, setpoint, state, mode, material,
+  louvre, fan, elapsed, remaining, emergency.
+- **Sources** — the upstream sources, grouped together: **OctoPrint** (status
+  pill `online`/`DOWN`, printer job, last-poll age) and the **CYD** (link pill
+  `live`/`silent`/`no peer`, mode, RSSI), each in its own panel, side by side.
+
+Before this change the OctoPrint tile and the CYD-link tile were two plain items
+in the single auto-fit status grid, so the printer and the display were just two
+readings among many and had no shared place of their own. The Sources panel puts
+the two source statuses together, and the status pills are colour-coded
+(`badge ok` / `badge warn` / `badge bad`) — green for an answering OctoPrint or a
+live CYD link, amber for a silent CYD, red for a down OctoPrint or a missing peer —
+so the source health reads at a glance.
 
 ## The OctoPrint card
 

@@ -184,6 +184,19 @@ static String cydStatusExtra()
     out += String(static_cast<int>(disp.chamberTab()));
     out += " mi=";
     out += String(disp.materialIndex());
+    // Touch diagnostics. `hdr` counts header taps that reached the info-screen
+    // gesture; `tp` is the last touch in screen coordinates (-1,-1 = never
+    // touched). "The connection screen is hard to open" needs one of those two
+    // answers, and the panel has no serial cable attached.
+    int16_t touchX = -1;
+    int16_t touchY = -1;
+    touchLastPoint(touchX, touchY);
+    out += " hdr=";
+    out += String(touchInfoTaps());
+    out += " tp=";
+    out += String(touchX);
+    out += ',';
+    out += String(touchY);
     return out;
 }
 

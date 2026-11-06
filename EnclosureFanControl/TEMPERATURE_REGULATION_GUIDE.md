@@ -91,6 +91,36 @@ This system automatically controls the enclosure fan and louver based on printer
 
 ## Technical Details
 
+### Louvre Ramp
+
+- **Pin:** GPIO 0, servo 50 Hz on LEDC channel 0 / timer 0 (see the fan note
+  below — they must not share a timer)
+- **Travel:** `SERVO_OFF_ANGLE` 0° → `SERVO_ON_ANGLE` 120°, mapped linearly onto
+  the 0-100% the regulator commands (1% = 1.2°)
+- **Ramp:** a full 0→100% move takes `LOUVRE_TRAVEL_MS` (2 s, ~50 %/s),
+  stepped every `SERVO_MIN_MOVE_INTERVAL_MS` (40 ms, ~2.4°)
+
+The step size is derived from the time that actually elapsed, not from a fixed
+percent per tick. `serviceLouvre()` runs from `loop()`, so HTTP, OTA and the
+OLED all add jitter; a fixed step per call turns that jitter into a travel-time
+that drifts (the old 10%-per-200 ms ramp really took 2.0-2.5 s because the loop
+idles at 50 ms). Deriving the step from `elapsed` keeps the rate at exactly
+50 %/s and just makes a late step bigger — capped at `LOUVRE_RAMP_MAX_PCT`
+(15%) so a stall (an upload, a blocking request) cannot snap the louvre to its
+target.
+
+`SERVO_MIN_MOVE_INTERVAL_MS` is therefore a *granularity* setting, not a speed
+setting: shortening it gives finer steps at the same speed, and there is no
+point going much below 40 ms because a hobby servo's deadband (~0.6-1.2°) is
+coarser than the resulting per-step angle. It must also stay above the loop's
+idle delay (`LOOP_IDLE_MS`), or the cadence cannot be met.
+
+Two paths still snap instead of ramping, deliberately: emergency cooling and
+the PID-calibration relay both call `setLouvrePercent(..., immediate = true)`,
+because waiting 2 s for a safety close or a relay edge would corrupt the
+measurement. The power-on self-test sweeps 10% per `SERVO_SELFTEST_STEP_MS`
+(200 ms) with blocking delays — the same 2 s travel as the operational ramp.
+
 ### Fan Control
 
 - **Pin:** GPIO 1

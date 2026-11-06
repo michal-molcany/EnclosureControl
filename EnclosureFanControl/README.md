@@ -19,8 +19,10 @@ CYD <-> C3 packet layout, timing and fallback rules are in
 
 - PID enclosure regulation with material profiles (PLA/PETG/FLEX/HT) and
   emergency cooling
-- Servo louvre with a minimum move interval, a **2 s full-travel ramp** (also
-  used by the power-on self-test), and an instant close for emergency/power-off
+- Servo louvre with a **2 s full-travel ramp in ~2.4° steps** (time-based, so
+  loop jitter cannot stretch it; ~50 %/s whatever the loop is doing), a 2 s
+  sweep on the power-on self-test, and an instant close for
+  emergency/power-off
 - ESP-NOW telemetry to the CYD and inbound CYD control commands
 - WiFi captive portal via WiFiManager for first-time network setup
 - **OTA firmware updates over WiFi** (HTTP on port 8080, plus ArduinoOTA), with
@@ -32,6 +34,10 @@ CYD <-> C3 packet layout, timing and fallback rules are in
   temperature, setpoint, louvre and fan (480 samples at the 2 s poll interval).
   The x axis is wall-clock time, so a stalled or throttled poll shows as a gap
   rather than stretching the line.
+- **OctoPrint liveness in the web UI**: the Status tab has an **OctoPrint** row
+  (`online`, or `DOWN – last poll X`) plus an "OctoPrint unreachable" note. While
+  the server is down the chamber/bed readings drop to **no data** instead of
+  showing the keep-last-good numbers as if the printer were still running.
 - **Power-on louvre self-test** (0 → 100 % ramp and back) runs at boot only when
   OctoPrint answered within 20 s *and* no print is running or paused. If
   OctoPrint is unknown or a print is active, the sweep is skipped and the
@@ -49,7 +55,10 @@ whole `user:password` credential, so any other username is rejected even with th
 right token.
 
 The page shows what the board is doing (chamber temperature, state, louvre and
-fan, material, setpoint, whether the CYD is linked), and lets you:
+fan, material, setpoint, emergency) on the **Status** tab, and on the new
+**Sources** panel shows the two upstream sources together — **OctoPrint** (status
+pill, job, last-poll age) and the **CYD** (link pill, mode, RSSI) — each with a
+coloured status pill. It lets you:
 
 - read and change the PID gains, then **Save** them to NVS or restore the
   compiled-in defaults. The header shows whether the running gains still match

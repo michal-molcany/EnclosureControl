@@ -199,7 +199,16 @@ void OctoPrinter::setApiKey(const char *key)
 
 void OctoPrinter::update()
 {
-  _parseConnection(_requester("/api/connection"));
+  // /api/connection is the one request EVERY cycle makes, so its HTTP status is
+  // the honest answer to "did OctoPrint answer this cycle?" - which is what both
+  // pollers stamp their snapshots with (see lastUpdateOk()).
+  //
+  // Taken from the status line rather than from the body: an error page is also
+  // a body, and a truncated one is an empty body, so neither can distinguish a
+  // dead server from a server that answered something unexpected.
+  const String connection = _requester("/api/connection");
+  _lastUpdateOk = (_lastHttpStatus == 200);
+  _parseConnection(connection);
   // if (!_is._closed) {
   _parsePrinter(_requester("/api/printer?exclude=sd"));
   if (_is._printing || _is._paused)
@@ -208,6 +217,11 @@ void OctoPrinter::update()
     _parseLayerProgress(_requester("/plugin/DisplayLayerProgress/values"));
   }
   // }
+}
+
+bool OctoPrinter::lastUpdateOk()
+{
+  return _lastUpdateOk;
 }
 
 /*
@@ -430,6 +444,9 @@ String OctoPrinter::_requester(String uri)
 {
   _client.setTimeout(OCTOPRINTER_READ_TIMEOUT_S);
   const uint32_t deadlineMs = millis() + OCTOPRINTER_REQUEST_TIMEOUT_MS;
+  // Cleared first: a connect failure must leave 0 behind, so update() cannot
+  // read the previous request's status as this one's.
+  _lastHttpStatus = 0;
   if (!_client.connect(_host, _port, OCTOPRINTER_CONNECT_TIMEOUT_MS))
   {
     Serial.println("Connection failed");
@@ -453,6 +470,12 @@ String OctoPrinter::_requester(String uri)
       {
         headersComplete = true;
         break;
+      }
+      if (line.startsWith("HTTP"))
+      {
+        // "HTTP/1.1 200 OK" -> "200", the same substring _poster takes. Stored
+        // for the caller: whether the SERVER answered is not visible in the body.
+        _lastHttpStatus = line.substring(9, 12).toInt();
       }
       if (line.startsWith("Content-Length:"))
       {

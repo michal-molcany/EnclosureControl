@@ -30,6 +30,34 @@ inline bool octoSnapshotValid(const OctoSnapshot &s)
     return !(s.toolActual == 0 && s.bedActual == 0 && s.chamberActual == 0);
 }
 
+// How long a snapshot may go without a successful poll before it counts as
+// stale. Ten cycles at the 3 s poll interval - the same threshold the CYD uses,
+// so the two boards never disagree about whether OctoPrint is there.
+static constexpr unsigned long OCTO_SNAPSHOT_STALE_MS = 30000UL;
+
+// True when OctoPrint has stopped answering.
+//
+// The poll task stamps `updatedMs` only on a pass that actually reached it (see
+// publishSnapshot), and every value in the struct is keep-last-good. So
+// octoSnapshotValid() alone cannot tell "idle" from "gone": a printer that was
+// switched off an hour ago still has valid=true and its last temperatures. This
+// is the test that answers the real question - and it is what the web UI, the
+// OLED and the ESP-NOW/HTTP telemetry now use to show "no data" instead of a
+// reading from the last time the server was up.
+inline bool octoSnapshotStale(const OctoSnapshot &s)
+{
+    if (s.updatedMs == 0)
+        return true;
+    // Signed difference so a millis() wrap reads as "just now", not as 49 days.
+    return (unsigned long)((int32_t)(millis() - s.updatedMs)) > OCTO_SNAPSHOT_STALE_MS;
+}
+
+// The freshness of the snapshot, as one predicate: usable AND recent.
+inline bool octoSnapshotFresh(const OctoSnapshot &s)
+{
+    return octoSnapshotValid(s) && !octoSnapshotStale(s);
+}
+
 // Starts the poll task and its sync primitives. Returns immediately.
 // Must be called after WiFi is connected.
 void octoPollerStart();

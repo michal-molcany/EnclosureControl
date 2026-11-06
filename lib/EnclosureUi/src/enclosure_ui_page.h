@@ -66,6 +66,11 @@ h1{font-size:18px;margin:0}
 .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 10px}
 .subhead{display:flex;align-items:center;gap:8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:16px 0 6px;padding-top:12px;border-top:1px solid var(--line)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px 14px}
+.srcs{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.src{border:1px solid var(--line);border-radius:8px;background:#141824;padding:12px 14px}
+.src h3{margin:0 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);font-weight:600}
+.src .srcrow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 0;border-top:1px solid var(--line)}
+.src .srcrow:first-of-type{border-top:0}
 .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
 .v{font-size:18px;font-variant-numeric:tabular-nums}
 .bar{height:7px;background:#0e1116;border-radius:4px;overflow:hidden;margin-top:5px}
@@ -86,6 +91,7 @@ button:disabled{opacity:.5;cursor:default}
 .badge.warn{color:var(--warn);border-color:var(--warn)}
 .badge.bad{color:var(--bad);border-color:var(--bad)}
 .note{color:var(--dim);font-size:12px;margin-top:10px}
+.note.warn{color:var(--bad);font-size:12px;margin-top:10px}
 .chk{display:flex;align-items:center;gap:8px;cursor:pointer}
 .msg{font-size:12px;margin-top:8px;min-height:16px}
 .msg.err{color:var(--bad)}
@@ -139,15 +145,32 @@ table.gains td:first-child{text-align:left;color:var(--dim)}
     <div><div class="k">State</div><div class="v" id="state">&ndash;</div></div>
     <div><div class="k">Mode</div><div class="v" id="mode">&ndash;</div></div>
     <div><div class="k">Material</div><div class="v" id="material">&ndash;</div></div>
-    <div><div class="k">Job</div><div class="v" id="job">&ndash;</div></div>
     <div><div class="k">Louvre</div><div class="v" id="louvre">&ndash;</div><div class="bar"><i id="louvrebar"></i></div></div>
     <div><div class="k">Fan</div><div class="v" id="fan">&ndash;</div><div class="bar"><i id="fanbar"></i></div></div>
     <div><div class="k">Elapsed</div><div class="v" id="elapsed">&ndash;</div></div>
     <div><div class="k">Remaining</div><div class="v" id="remaining">&ndash;</div></div>
-    <div><div class="k">CYD link</div><div class="v" id="link">&ndash;</div></div>
     <div><div class="k">Emergency</div><div class="v" id="emg">&ndash;</div></div>
   </div>
   <div class="note" id="offline" style="display:none">Board unreachable &mdash; retrying every 2&nbsp;s.</div>
+</div>
+
+<div class="card">
+  <h2>Sources</h2>
+  <div class="srcs">
+    <div class="src">
+      <h3>OctoPrint</h3>
+      <div class="srcrow"><span class="k">Status</span><span class="badge" id="srcOcto">online</span></div>
+      <div class="srcrow"><span class="k">Job</span><span class="v" id="srcOctoJob">idle</span></div>
+      <div class="srcrow"><span class="k">Last poll</span><span class="v" id="srcOctoAge">&ndash;</span></div>
+    </div>
+    <div class="src">
+      <h3>CYD</h3>
+      <div class="srcrow"><span class="k">Link</span><span class="badge" id="srcCyd">live</span></div>
+      <div class="srcrow"><span class="k">Mode</span><span class="v" id="srcCydMode">auto</span></div>
+      <div class="srcrow"><span class="k">RSSI</span><span class="v" id="srcCydRssi">&ndash;</span></div>
+    </div>
+  </div>
+  <div class="note warn" id="octodown" style="display:none">OctoPrint unreachable &mdash; temperatures and job state show the last successful readings.</div>
 </div>
 
 <div class="card wide">
@@ -398,6 +421,18 @@ function post(path, body) {
 }
 
 function pct(v) { return Math.max(0, Math.min(100, v | 0)); }
+
+// Humanised "how long since the last successful poll", for the OctoPrint status
+// row. The raw value (ms) is what /api/status reports; the page only ever needs
+// the "down for X" part.
+function fmtAge(ms) {
+  var s = Math.round((ms || 0) / 1000);
+  if (s < 60) { return s + ' s'; }
+  var m = Math.round(s / 60);
+  if (m < 60) { return m + ' m'; }
+  var h = Math.round(m / 60);
+  return h + ' h ' + (m % 60) + ' m';
+}
 
 function fmt1(v) {
   if (v === undefined || v === null || isNaN(v)) { return '\u2013'; }
@@ -965,6 +1000,28 @@ function drawHist() {
 function render(s) {
   lastStatus = s;
   $('offline').style.display = 'none';
+  $('octodown').style.display = s.octoStale ? '' : 'none';
+  // OctoPrint source: the status pill lives in the Sources card. The numbers the
+  // page would otherwise call "the bed/chamber temperature" are keep-last-good,
+  // so on a stale read they are history, not present.
+
+  // Sources panel: OctoPrint status pill and supporting details.
+  var octoBadge = $('srcOcto');
+  if (octoBadge) {
+    octoBadge.className = 'badge ' + (s.octoStale ? 'bad' : 'ok');
+    octoBadge.textContent = s.octoStale ? 'DOWN' : 'online';
+  }
+  $('srcOctoJob').textContent = s.job ? 'printing' : 'idle';
+  $('srcOctoAge').textContent = s.octoStale ? ('down ' + fmtAge(s.octoAgeMs)) : 'healthy';
+
+  // Sources panel: CYD link status pill and supporting details.
+  var cydBadge = $('srcCyd');
+  if (cydBadge) {
+    cydBadge.className = 'badge ' + (!s.peer ? 'bad' : (s.remote ? 'ok' : 'warn'));
+    cydBadge.textContent = !s.peer ? 'no peer' : (s.remote ? 'live' : 'silent');
+  }
+  $('srcCydMode').textContent = s.mode === 1 ? 'manual' : 'auto';
+  $('srcCydRssi').textContent = (s.rssi === undefined || s.rssi === null) ? '\u2013' : (s.rssi + ' dBm');
 
   // ENC_CHAMBER_INVALID is INT16_MIN. Showing it as a number would be a lie by
   // two orders of magnitude, so an invalid reading is spelled out instead.
@@ -973,14 +1030,12 @@ function render(s) {
   $('mode').textContent = s.mode === 1 ? 'manual' : 'auto';
   $('setpoint').textContent = s.setpoint < 0 ? '\u2013' : s.setpoint + ' \u00b0C';
   $('material').textContent = MATERIALS[s.material] || '?';
-  $('job').textContent = s.job ? 'printing' : 'idle';
   $('elapsed').textContent = s.elapsed || '\u2013';
   $('remaining').textContent = s.remaining || '\u2013';
   $('louvre').textContent = s.louvre + '%';
   $('fan').textContent = s.fan + '%' + (s.fanActive ? ' (on)' : '');
   $('louvrebar').style.width = pct(s.louvre) + '%';
   $('fanbar').style.width = pct(s.fan) + '%';
-  $('link').textContent = !s.peer ? 'no peer' : (s.remote ? 'live' : 'silent');
   $('emg').textContent = s.emergency ? 'ACTIVE' : 'no';
 
   // Only fill fields the user is not editing - see matDirty above. A dirty

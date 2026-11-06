@@ -53,3 +53,16 @@ The server knows nothing about `TemperatureRegulation`; the programme supplies a
 telemetry provider and a command handler. Routing API commands through
 `applyRemoteCommand()` is what makes the "linked" footer, the OLED state, and the
 command-link-loss fallback behave identically across both transports.
+
+## Temperature validity while OctoPrint is down
+
+`GET /api/enclosure` reports the chamber and the bed as the
+`ENC_CHAMBER_INVALID` sentinel (shown by clients as `no data`) while the snapshot
+they were derived from is stale — OctoPrint has not answered within the staleness
+window since the last successful poll.
+
+That distinction has to live here: the enclosure values are **keep-last-good**, so
+while the printer is down the board keeps republishing its last readings. The
+endpoint is the natural place to say "these are history, not present", which is
+what the CYD's temperature panels, the OLED and the HTTP-fallback transport need
+in order not to display stale numbers as current ones.

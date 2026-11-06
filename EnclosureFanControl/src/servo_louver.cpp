@@ -38,21 +38,21 @@ int ServoLouver::getAngle() const
     return currentAngle;
 }
 
-void ServoLouver::setPercent(int percent)
+bool ServoLouver::setPercent(int percent)
 {
     if (percent < 0)
         percent = 0;
     if (percent > 100)
         percent = 100;
     int targetAngle = SERVO_OFF_ANGLE + (percent * (SERVO_ON_ANGLE - SERVO_OFF_ANGLE)) / 100;
-    setAngle(targetAngle);
+    return setAngle(targetAngle);
 }
 
 void ServoLouver::selfTest()
 {
     // setAngle() rate-limits moves; begin() just parked at OFF, so let the
     // interval expire first to guarantee both moves execute.
-    delay(SERVO_MIN_MOVE_INTERVAL_MS + 100);
+    delay(SERVO_SELFTEST_STEP_MS + 100);
 #if SERIAL_DEBUG
     Serial.println("Louvre self-test: opening 25%...");
 #endif
@@ -60,7 +60,7 @@ void ServoLouver::selfTest()
     for (int pct = 10; pct <= 100; pct += 10)
     {
         setPercent(pct);
-        delay(SERVO_MIN_MOVE_INTERVAL_MS);
+        delay(SERVO_SELFTEST_STEP_MS);
     }
     delay(500);
 #if SERIAL_DEBUG
@@ -70,9 +70,9 @@ void ServoLouver::selfTest()
     for (int pct = 90; pct >= 0; pct -= 10)
     {
         setPercent(pct);
-        delay(SERVO_MIN_MOVE_INTERVAL_MS);
+        delay(SERVO_SELFTEST_STEP_MS);
     }
-    delay(SERVO_MIN_MOVE_INTERVAL_MS);
+    delay(SERVO_SELFTEST_STEP_MS);
 #if SERIAL_DEBUG
     Serial.println("Louvre self-test done");
 #endif

@@ -171,6 +171,11 @@ public:
     using PreheatAction = void (*)(int temp);
     void setPreheatAction(PreheatKind kind, PreheatAction action);
 
+    // Paint the main view (and the detail screens that mirror the same values)
+    // as "OctoPrint unreachable": a red state row and placeholder readings.
+    // Called from printerStatisticUpdate() when the snapshot is stale.
+    void showPrinterOffline();
+
 private:
     // One preheat screen's worth of widgets plus the state that drives it. The
     // nozzle and bed screens are the same UI over different targets, so they
@@ -432,5 +437,14 @@ private:
 };
 
 TFT_eSPI &tft();
+
+// Touch diagnostics for GET /status, which is the only way to see this board's
+// state without a serial cable. touchInfoTaps() counts the header taps that
+// actually reached the info-screen gesture; touchLastPoint() reports the last
+// touch in screen coordinates (-1, -1 before the first one). Together they
+// separate "the tap never arrived", "it arrived 20 px below the finger" and "the
+// gesture fired but the screen did not stay up".
+uint16_t touchInfoTaps();
+void touchLastPoint(int16_t &x, int16_t &y);
 
 #endif

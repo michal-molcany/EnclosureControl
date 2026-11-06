@@ -212,6 +212,13 @@ namespace
     const lv_coord_t preheatX[4] = {5, 84, 163, 242};
     constexpr lv_coord_t kPreheatButtonWidth = 73;
     Display *activeDisplay = nullptr;
+    // Touch diagnostics, reported by GET /status (see touchInfoTaps and
+    // touchLastPoint). "The info screen is hard to open" is otherwise impossible
+    // to separate from "the tap never reached the gesture" or "the touch panel
+    // reports a point 20 px lower than the finger" without a serial cable.
+    uint16_t infoTaps = 0;
+    int16_t lastTouchX = -1;
+    int16_t lastTouchY = -1;
 
     lv_color_t color565(uint16_t color)
     {
@@ -250,6 +257,19 @@ namespace
         lv_label_set_text(label, text.c_str());
     }
 
+    // Literal overload: the repaint path runs at 4 Hz, and wrapping a constant
+    // in a String just to compare it allocates on every frame. Same-named
+    // functions on purpose - a literal must not pay for the String overload.
+    void setLabelTextOnce(lv_obj_t *label, const char *text)
+    {
+        if (!label || !text)
+            return;
+        const char *current = lv_label_get_text(label);
+        if (current && strcmp(current, text) == 0)
+            return;
+        lv_label_set_text(label, text);
+    }
+
     void flushDisplay(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
     {
         const uint32_t width = area->x2 - area->x1 + 1;
@@ -284,6 +304,11 @@ namespace
 #endif
         data->point.x = map(point.x, 200, 3700, 1, SCREEN_WIDTH);
         data->point.y = map(point.y, 240, 3800, 1, SCREEN_HEIGHT);
+        // Recorded for /status: what the panel reports in SCREEN coordinates, so
+        // a tap that lands somewhere unexpected can be told apart from a press
+        // that never reached the gesture at all.
+        lastTouchX = data->point.x;
+        lastTouchY = data->point.y;
         data->state = LV_INDEV_STATE_PRESSED;
     }
 
@@ -471,43 +496,45 @@ void filesPanelTouchEvent(lv_event_t *event)
             activeDisplay->filesPanelTouched();
     }
 
-    // Tap box for the wifi-signal / info-screen gesture. x=270 is just left of the
-// first bar (275); y=26 clears the header separator at y=28.
-static constexpr lv_coord_t WIFI_TAP_X = 270;
-static constexpr lv_coord_t WIFI_TAP_Y = 26;
+// Bottom edge of the info-screen entry strip: the header plus the empty margin
+// below its separator at y=28, stopping just above the first panel at y=35.
+//
+// The whole strip, not the corner over the wifi bars: that corner was 50x26 px
+// (about 12x6 mm of glass) and was reported as hard to hit. Nothing else on the
+// main view lives above the panels, so the strip can own its full width and the
+// margin too - which also absorbs a few pixels of touch mis-reporting near the
+// panel's top edge, the one place a resistive digitizer is most likely to be
+// slightly off.
+static constexpr lv_coord_t INFO_TAP_LAST_Y = 34;
 
-// The info screen is opened by tapping the wifi signal in the header.
+// The info screen is opened by tapping anywhere in the header.
 //
-// Handled on the main CONTAINER with a coordinate test, rather than on a
-// transparent hit-area object sitting over the bars: it saves an LVGL object,
-// which is worth having on a board whose pool is capped at 60 KB. The cost is
-// that the handler sees every press on the main view, because LVGL bubbles
-// events from the touched child (the chamber/bed/tool/file panels) up through
-// its parents - so it must check WHERE the touch landed.
+// This callback is on a dedicated transparent hit AREA (see createLabes), and
+// that detail is the whole fix. It used to be a coordinate test on the main
+// container, which only ever fired for presses that landed on the container
+// itself: LVGL does NOT bubble a press up to the parent unless the pressed child
+// carries LV_OBJ_FLAG_EVENT_BUBBLE, so every clickable header child swallowed
+// the gesture. The wifi bars are exactly that - four plain lv_obj_create()
+// objects, clickable by default, sitting in the corner the gesture originally
+// asked for - and the two link icons and the state label are not clickable, but
+// are covered by the same area now regardless. Widening the coordinate box never
+// helped because the misses were being eaten, not measured.
 //
-// PRESSED, not CLICKED: this is an entry gesture on a fixed target, and reading
-// the touch point is only reliable on the press.
-    void mainContainerTapEvent(lv_event_t *event)
-    {
-        if (lv_event_get_code(event) != LV_EVENT_PRESSED || !activeDisplay)
-            return;
-        // Only from the main view: on any other view the header is not shown, and
-        // a stray press should never summon a full-screen diagnostic.
-        if (activeDisplay->currentView() != Display::View::Main)
-            return;
-        lv_point_t point;
-        lv_indev_t *indev = lv_event_get_indev(event);
-        if (!indev)
-            return;
-        // Returns void in this LVGL, so there is no failure case to test.
-        lv_indev_get_point(indev, &point);
-        // The signal group: four 7 px bars at x=275..315, bottom-aligned to y=22.
-        // The box is deliberately looser than the bars themselves - 7 px is a
-        // fiddly target on a 320x240 panel - and stops short of the link icons at
-        // x=230 and x=252, which are left free for separate taps later.
-        if (point.x >= WIFI_TAP_X && point.x <= SCREEN_WIDTH && point.y < WIFI_TAP_Y)
-            activeDisplay->showInfoView();
-    }
+// CLICKED, not PRESSED: with an area of its own there is no touch point to read,
+// and a click keeps the press and the release on the same, still-visible object.
+// Opening on PRESSED used to swap the view out from under a finger that was
+// still down. The header does not scroll, so a tap cannot be mistaken for a drag.
+void headerTapEvent(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED || !activeDisplay)
+        return;
+    // Only from the main view: on any other view the header is not shown, and a
+    // stray press should never summon a full-screen diagnostic.
+    if (activeDisplay->currentView() != Display::View::Main)
+        return;
+    ++infoTaps;
+    activeDisplay->showInfoView();
+}
 
     // Back out of the info screen.
     void infoBackEvent(lv_event_t *event)
@@ -903,6 +930,19 @@ TFT_eSPI &tft()
     return displayTft;
 }
 
+// See the declaration in display.h. Both read the touch diagnostics recorded by
+// readTouch() and infoTapEvent(); nothing else writes them.
+uint16_t touchInfoTaps()
+{
+    return infoTaps;
+}
+
+void touchLastPoint(int16_t &x, int16_t &y)
+{
+    x = lastTouchX;
+    y = lastTouchY;
+}
+
 void Display::Initialization()
 {
     pinMode(TFT_BL, OUTPUT);
@@ -1093,19 +1133,9 @@ void Display::createLabes()
         lv_obj_add_flag(_wifiBars[index], LV_OBJ_FLAG_HIDDEN);
     }
 
-    // The wifi-signal tap opens the info screen, handled on the MAIN CONTAINER
-    // rather than on a dedicated hit-area object: one fewer LVGL object, which on
-    // this board matters (see the note on the info view's pool budget).
-    //
-    // It has to be a coordinate test rather than "any tap on the container",
-    // because LVGL bubbles events from the touched child up through its parents -
-    // the chamber, bed, tool and file panels are all children of this container,
-    // so an unfiltered handler would open the info screen every time the user
-    // tapped a panel. mainContainerTapEvent() therefore checks where the touch
-    // actually landed.
-    lv_obj_add_flag(_mainContainer, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(_mainContainer, mainContainerTapEvent, LV_EVENT_PRESSED,
-                        nullptr);
+    // The wifi-signal tap opens the info screen via the header hit strip created
+    // at the end of this function. See infoTapEvent() for why an area of its own
+    // is required and a coordinate test on this container is not.
 
     _encLinkIcon = lv_image_create(_mainContainer);
     lv_image_set_src(_encLinkIcon, &icon_c3);
@@ -1249,6 +1279,29 @@ void Display::createLabes()
     }
     refreshJobButtons();
     setPreheatButtonsVisibility(true);
+
+    // Header hit strip for the info screen. Created LAST among this container's
+    // children so it is on top of the wifi bars, the two link icons and the
+    // header separator, and therefore receives every press in the strip no matter
+    // what it covers. That is the fix for the whole "hard to open" report: as a
+    // coordinate test on the container it only ever saw presses that landed on
+    // the container itself, because LVGL does not bubble a press to the parent
+    // unless the pressed child opts in with LV_OBJ_FLAG_EVENT_BUBBLE - and the
+    // wifi bars, the obvious thing to tap, are clickable lv_obj_create()s.
+    //
+    // It costs one LVGL object and no flash-worthy styling: transparent fill, no
+    // border, no padding. Nothing interactive lives above the panels, so it
+    // cannot shadow a control.
+    lv_obj_t *headerHit = lv_obj_create(_mainContainer);
+    lv_obj_set_pos(headerHit, 0, 0);
+    lv_obj_set_size(headerHit, SCREEN_WIDTH, INFO_TAP_LAST_Y + 1);
+    lv_obj_set_style_bg_opa(headerHit, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(headerHit, 0, 0);
+    lv_obj_set_style_pad_all(headerHit, 0, 0);
+    lv_obj_clear_flag(headerHit, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(headerHit, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(headerHit, headerTapEvent, LV_EVENT_CLICKED, nullptr);
+
     createChamberView();
     createPreheatView(PreheatKind::Tool, "Nozzle Preheat");
     createPreheatView(PreheatKind::Bed, "Bed Preheat");
@@ -3697,13 +3750,74 @@ void Display::drawWiFiSignal(int32_t rssi)
     }
 }
 
+// True when the printer snapshot is older than the staleness threshold.
+//
+// `updatedMs` is stamped by the poll task only on a cycle that actually reached
+// OctoPrint (see poller.cpp), so this is the same test the info screen uses -
+// applied here to the values themselves. 0 means "never reached it yet", which
+// is offline for display purposes.
+static bool octoSnapshotStale(const PrinterSnapshot &snap)
+{
+    return snap.updatedMs == 0 || ageMs(snap.updatedMs) > kOctoStaleMs;
+}
+
+// The main view with OctoPrint unreachable.
+//
+// The readings are replaced by their "unknown" placeholders rather than by
+// zeros: 0 C is a real temperature, and printing it would be a second lie on
+// top of the stale one. The state row carries the reason, in red, because
+// nothing else on this screen can distinguish "idle" from "gone" - the state
+// itself is keep-last-good.
+void Display::showPrinterOffline()
+{
+    setLabelTextOnce(_stateLabel, "OctoPrint down");
+    lv_obj_set_style_text_color(_stateLabel, color565(TFT_RED), 0);
+
+    // Same fonts the live values use, so nothing jumps when the link returns:
+    // the tool/bed pair is always montserrat_14, the chamber actual montserrat_20.
+    setLabelTextOnce(_toolLabel, "-- / -- C");
+    lv_obj_set_style_text_font(_toolLabel, &lv_font_montserrat_14, 0);
+    setLabelTextOnce(_bedLabel, "-- / -- C");
+    lv_obj_set_style_text_font(_bedLabel, &lv_font_montserrat_14, 0);
+    setLabelTextOnce(_chamberLabel, "-- C");
+    lv_obj_set_style_text_font(_chamberLabel, &lv_font_montserrat_20, 0);
+
+    // The preheat screens read their current temperature from the same snapshot.
+    // Without this they keep the last reading on screen for as long as the
+    // server is away - and actualValid=false is what makes the next fresh
+    // snapshot repaint them rather than consider them already up to date.
+    for (size_t slot = 0; slot < kPreheatCount; ++slot)
+    {
+        _preheat[slot].actualValid = false;
+        setLabelTextOnce(_preheat[slot].currentLabel, "-- C");
+    }
+    // Chamber detail view, same source, same problem.
+    setLabelTextOnce(_chamberCurrentLabel, "-- C");
+}
+
 void Display::printerStatisticUpdate(const PrinterSnapshot &snap)
 {
     if (!_stateLabel || !_toolLabel || !_bedLabel || !_chamberLabel)
         return;
+
+    // OctoPrint unreachable. Everything this function paints is keep-last-good:
+    // the poll task republishes the last values it managed to read, so the panel
+    // would show the temperatures from minutes ago with no hint that they are
+    // history. That is the "the numbers make no sense" case - the printer is off
+    // and the board confidently says 21.7 / 0 C. Say what is actually known.
+    //
+    // Checked before the empty-state return below, because that return is also
+    // what keeps a half-filled snapshot from blanking the row on boot.
+    if (octoSnapshotStale(snap))
+    {
+        showPrinterOffline();
+        return;
+    }
     if (!snap.state.length())
         return;
     setLabelTextOnce(_stateLabel, "State: " + snap.state);
+    // Back from the offline message, which paints this label red.
+    lv_obj_set_style_text_color(_stateLabel, color565(0xFFFFFF), 0);
     updateTempLabel(_toolLabel, snap.toolActual, snap.toolTarget);
     updateTempLabel(_bedLabel, snap.bedActual, snap.bedTarget);
 

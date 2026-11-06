@@ -123,6 +123,16 @@ public:
     These functions are used to check on the printer's status flags.
     All they do is return the state of the boolean flag.
   */
+  // True when the last update() actually REACHED OctoPrint, i.e. the
+  // /api/connection request - the one every cycle makes - answered HTTP 200.
+  //
+  // The parsed state is keep-last-good: a failed request leaves every getter()
+  // above returning the values from the last successful one, so nothing in this
+  // class can otherwise tell "the printer is idle" from "the server is gone".
+  // The pollers use this to decide whether their snapshot's timestamp may
+  // advance, and the CYD's info screen shows that age as online/offline.
+  bool lastUpdateOk();
+
   bool operational();
   bool paused();
   bool printing();
@@ -249,6 +259,12 @@ private:
   String _hostAddress;
   int _port;
   bool _doOnce;
+  // Set by _requester(): the status code of the LAST request it made, or 0 when
+  // no status line arrived (connect refused, timeout). update() folds the
+  // /api/connection result into _lastUpdateOk, which is the only liveness signal
+  // this class exposes - see the note on lastUpdateOk().
+  int _lastHttpStatus = 0;
+  bool _lastUpdateOk = false;
 
   struct
   {

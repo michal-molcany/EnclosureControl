@@ -16,6 +16,10 @@ namespace
     SemaphoreHandle_t snapshotMutex = nullptr;
     OctoSnapshot shared;
     volatile bool hasData = false;
+    // Last pass that actually reached OctoPrint. Poll-task-owned, like `shared`.
+    // See the note in publishSnapshot(): this is what lets `updatedMs` mean "we
+    // last HAD data" instead of "we last ran".
+    unsigned long lastReachMs = 0;
     volatile bool cancelRequested = false;
     // -1 = no request. Atomic, not a plain int: the regulator task publishes a
     // target while the poll task does an exchange(), and a read-then-clear on a
@@ -107,7 +111,15 @@ namespace
         copy.chamberActual = api.chamberActual();
         copy.closedOrError = api.closedOrError();
         copy.valid = true;
-        copy.updatedMs = millis();
+        // Only a pass that actually REACHED OctoPrint may advance the timestamp.
+        // Everything above is keep-last-good, so stamping unconditionally would
+        // make a dead server indistinguishable from a live one - and this
+        // timestamp is what the regulator gates the PID on (updateAutomatic
+        // integrates only on a NEW reading) and what the web UI/handover code
+        // uses to tell "no data" from "no change".
+        if (api.lastUpdateOk())
+            lastReachMs = millis();
+        copy.updatedMs = lastReachMs;
         if (xSemaphoreTake(snapshotMutex, portMAX_DELAY) == pdTRUE)
         {
             shared = copy;
